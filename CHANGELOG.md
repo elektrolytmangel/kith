@@ -17,6 +17,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - MIT license.
 - Gradle wrapper (8.11.1, distribution checksum pinned) for the Android package.
 
+### Changed
+- Rust: ed25519-dalek 3, sha2 0.11; keys and IDs come from `kith_core::random_bytes()`
+  (getrandom), rand_core is no longer a dependency.
+
 ### Fixed
 - Web: `create`/`edit` panicked in the browser because `SystemTime::now()` is
   unavailable on wasm32-unknown-unknown; the JS clock is used there.

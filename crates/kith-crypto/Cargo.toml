@@ -14,5 +14,7 @@ workspace = true
 [dependencies]
 kith-core.workspace = true
 ed25519-dalek.workspace = true
-rand_core.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
