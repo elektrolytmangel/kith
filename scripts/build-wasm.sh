@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TARGET="${1:-web}"
-SCOPE="${NPM_SCOPE:-kith}"
+SCOPE="${NPM_SCOPE:-elektrolytmangel}"  # same default as release.yml (repository owner)
 command -v wasm-pack >/dev/null || { echo "install wasm-pack: https://rustwasm.github.io/wasm-pack/installer/"; exit 1; }
 wasm-pack build bindings/wasm --release --target "$TARGET" --scope "$SCOPE" --out-name kith
 # Package name becomes @<scope>/kith-wasm; version comes from Cargo.toml.

@@ -2,7 +2,7 @@
 """Rebrand this template for a new project.
 
 Replaces the working name `kith` everywhere (file contents and paths), in
-every casing it appears in, plus the `OWNER` placeholder and the Kotlin
+every casing it appears in, plus the GitHub owner and the Kotlin
 package:
 
   kith-core        -> acme-sync-core      (crates, npm, docker, prose)
@@ -11,7 +11,7 @@ package:
   kithVersion      -> acmeSyncVersion     (generated camelCase)
   KITH_RELAY_ADDR  -> ACME_SYNC_RELAY_ADDR
   dev.kith         -> com.acme.sync       (Kotlin package + directories)
-  OWNER            -> acme-corp           (GitHub owner)
+  elektrolytmangel -> acme-corp           (GitHub owner: URLs, npm scope, CODEOWNERS)
 
 Usage:
   python3 scripts/rename.py --name acme-sync --owner acme-corp --kotlin-package com.acme.sync
@@ -30,6 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OLD = "kith"
 OLD_KOTLIN = "dev.kith"
+OLD_OWNER = "elektrolytmangel"
 SKIP_DIRS = {".git", "target", "node_modules", "pkg", "build", ".gradle", ".build"}
 SKIP_FILES = {"rename.py"}
 
@@ -59,7 +60,7 @@ def make_replacer(v: dict[str, str], owner: str | None, kotlin_pkg: str):
         (re.compile(r"kith"), v["kebab"]),
     ]
     if owner:
-        rules.append((re.compile(r"\bOWNER\b"), owner))
+        rules.append((re.compile(rf"\b{re.escape(OLD_OWNER)}\b"), owner))
 
     def apply(text: str) -> str:
         for pat, rep in rules:
@@ -82,7 +83,7 @@ def walk() -> list[Path]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--name", required=True, help="new project name, e.g. acme-sync")
-    ap.add_argument("--owner", help="GitHub owner/org replacing the OWNER placeholder")
+    ap.add_argument("--owner", help=f"GitHub user/org replacing {OLD_OWNER}")
     ap.add_argument("--kotlin-package", help="Kotlin/Java package (default: dev.<name without dashes>)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()

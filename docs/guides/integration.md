@@ -4,17 +4,18 @@ All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`
 and `history`. Sync, encryption and invitations will be added in later phases.
 
 Every package is a GitHub Release asset:
-`https://github.com/OWNER/kith/releases/download/vX.Y.Z/<asset>`. For a private
-repository, downloads need a GitHub token (see [Releasing](releasing.md#private-repositories)).
+`https://github.com/elektrolytmangel/kith/releases/download/vX.Y.Z/<asset>`. The repository
+is public, so no token is needed (for private projects started from this template, see
+[Releasing](releasing.md#if-your-repository-is-private)).
 
 ## Web
 
 ```sh
-npm install https://github.com/OWNER/kith/releases/download/v0.1.0/kith-wasm-0.1.0.tgz
+npm install https://github.com/elektrolytmangel/kith/releases/download/v0.1.0/kith-wasm-0.1.0.tgz
 ```
 
 ```ts
-import init, { KithClient } from "@OWNER/kith-wasm";
+import init, { KithClient } from "@elektrolytmangel/kith-wasm";
 
 await init();
 const client = new KithClient();
@@ -67,7 +68,7 @@ val history = client.history(change.objectId)
 
 ```toml
 [dependencies]
-kith-client = { git = "https://github.com/OWNER/kith", tag = "v0.1.0" }
+kith-client = { git = "https://github.com/elektrolytmangel/kith", tag = "v0.1.0" }
 ```
 
 ```rust
@@ -83,7 +84,7 @@ The always-on client (phase 7) is a headless Rust binary built this way.
 
 ```sh
 # Binary from the release (Linux/macOS/Windows, x86_64 and arm64)
-curl -fsSL https://github.com/OWNER/kith/releases/download/v0.1.0/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -fsSL https://github.com/elektrolytmangel/kith/releases/download/v0.1.0/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 ./kith-relay
 
 # or as a container, built from source
