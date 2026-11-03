@@ -21,7 +21,7 @@ android {
 
 dependencies {
     // UniFFI-generated code calls native code through JNA.
-    implementation("net.java.dev.jna:jna:5.15.0@aar")
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
 }
 
 publishing {
