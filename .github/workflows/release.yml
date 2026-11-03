@@ -185,16 +185,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # Uses the committed wrapper (bindings/kotlin/gradlew), validates its jar and caches.
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.11"
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
       # The runner image ships an NDK; ANDROID_NDK_LATEST_HOME points at it.
       - run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" scripts/build-android.sh
-      - run: gradle assembleRelease -Pversion="$VERSION"
+      - run: ./gradlew assembleRelease -Pversion="$VERSION"
         working-directory: bindings/kotlin
       - run: cp bindings/kotlin/kith/build/outputs/aar/kith-release.aar "kith-android-$VERSION.aar"
       - uses: actions/upload-artifact@v4

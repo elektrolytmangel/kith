@@ -34,5 +34,5 @@ publishing {
         }
     }
     // Releases ship the AAR as a GitHub Release asset. To try it in another
-    // project locally: `gradle publishToMavenLocal`, then add mavenLocal().
+    // project locally: `./gradlew publishToMavenLocal`, then add mavenLocal().
 }

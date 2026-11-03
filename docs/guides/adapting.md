@@ -31,7 +31,8 @@ Use this when you want a separately branded and versioned sync stack.
    This renames crates, directories, the Swift module (`AcmeSync`, `AcmeSyncFFI`),
    the Kotlin package, npm scope, Docker image, env vars (`ACME_SYNC_RELAY_ADDR`)
    and the `OWNER` placeholders.
-3. Set the license in `Cargo.toml` and add `LICENSE` files.
+3. Check the license: `LICENSE` (MIT) and `license` in `Cargo.toml`. Update the
+   copyright holder, or change both if your project uses another license.
 4. Fill in `CODEOWNERS`. Optionally set the repository variable `NPM_SCOPE`
    (default: the repository owner).
 5. Replace `docs/requirements/*.md` with your product's requirements, or keep

@@ -12,8 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-# TODO(license): confirm before the first public release.
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/OWNER/kith"
 authors = ["kith contributors"]
 

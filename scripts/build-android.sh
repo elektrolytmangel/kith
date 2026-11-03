@@ -8,4 +8,4 @@ rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-and
 OUT=bindings/kotlin/kith/src/main
 cargo ndk $(printf -- '-t %s ' "${ABIS[@]}") -o "$OUT/jniLibs" build -p kith-ffi --release
 scripts/gen-bindings.sh kotlin target/aarch64-linux-android/release/libkith_ffi.so "$OUT/kotlin"
-echo "now run: (cd bindings/kotlin && gradle assembleRelease)"
+echo "now run: (cd bindings/kotlin && ./gradlew assembleRelease)"

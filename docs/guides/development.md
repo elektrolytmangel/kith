@@ -7,7 +7,7 @@
 | Everything | Rust stable (pinned by `rust-toolchain.toml`), Python 3.11+ |
 | Web package | `wasm-pack` |
 | Swift package | macOS + Xcode |
-| Android package | JDK 17, Android SDK + NDK, `cargo install cargo-ndk`, Gradle 8.11 (no wrapper is committed) |
+| Android package | JDK 17, Android SDK + NDK, `cargo install cargo-ndk` (Gradle comes from `bindings/kotlin/gradlew`) |
 | Relay image | Docker |
 
 ## Daily loop
@@ -41,9 +41,12 @@ Browser randomness comes from `getrandom` with the `js` feature, enabled in
 scripts/build-wasm.sh web            # → bindings/wasm/pkg
 scripts/build-swift.sh               # → bindings/swift/KithFFI.xcframework (macOS only)
 scripts/build-android.sh             # → bindings/kotlin/kith/src/main/{jniLibs,kotlin}
-(cd bindings/kotlin && gradle assembleRelease)
+(cd bindings/kotlin && ./gradlew assembleRelease)
 docker build -f apps/relay-server/Dockerfile -t kith-relay .
 ```
+
+Update Gradle with `./gradlew wrapper --gradle-version <x.y.z>` in
+`bindings/kotlin` (Dependabot also proposes updates).
 
 Generated binding sources are not committed (see `.gitignore`). Hand-written
 conveniences go in `bindings/swift/Sources/Kith/Extensions.swift` and

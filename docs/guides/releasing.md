@@ -40,7 +40,10 @@ None is required: the workflow uses `GITHUB_TOKEN`. The optional repository
 variable `NPM_SCOPE` sets the npm package name `@<scope>/kith-wasm` (default:
 the repository owner).
 
-### Private repositories
+### If your repository is private
+
+This repository is public, so none of this applies here. For projects started
+from this template:
 
 - `relay-binaries` uses the `ubuntu-24.04-arm` runner. If it isn't available
   for your plan, remove that matrix entry or switch it to `ubuntu-latest` with

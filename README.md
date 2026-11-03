@@ -91,6 +91,10 @@ history and fork detection, in-memory store, naive reconciliation, relay
 routing, and a relay server without authentication yet. See the
 [traceability matrix](docs/requirements/TRACEABILITY.md) for per-requirement status.
 
+## License
+
+[MIT](LICENSE)
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

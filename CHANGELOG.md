@@ -13,6 +13,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Release: GitHub Release with relay binaries, npm tarball, Swift package, Android AAR
   and SHA256SUMS; manual dry run builds everything without creating a release.
 - Issue templates (requirement, bug), PR template, CODEOWNERS, Dependabot.
+- MIT license.
+- Gradle wrapper (8.11.1, distribution checksum pinned) for the Android package.
 
 ### Fixed
 - Web: `create`/`edit` panicked in the browser because `SystemTime::now()` is
