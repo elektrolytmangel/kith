@@ -60,7 +60,9 @@ Work top to bottom; check items off here as they land.
    - [ ] Branch protection on `main`: require the CI checks.
    - [ ] Enable private vulnerability reporting (Settings → Code security). Owner only.
    - [ ] Optional: mark the repository as a template.
-3. **Phase 1, Local core** (makes it usable in a real app):
+3. **Phase 1, Local core** (makes it usable in a real app). Start here, in this order
+   (decided 2026-11-03): SQLite store and key restore first, because together they let an app
+   keep its data and its device identity across restarts, which is the minimum for real integration.
    - [ ] REQ-STORE-001: SQLite `Store` in `kith-store` (native); IndexedDB store for the web package.
    - [ ] Key restore in bindings: expose key seed in/out in `bindings/ffi` and `bindings/wasm`
          (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`).
@@ -74,15 +76,16 @@ Work top to bottom; check items off here as they land.
 
 ### Open questions for the user
 
-- Start phase 1 with SQLite store + key restore? (recommended: makes real app integration possible)
-- First release as `v0.1.0-alpha.1` (recommended) or `v0.1.0`?
+None right now.
 
 ### Open issues
 
 - **macOS jobs get cancelled before starting** (0 steps): seen 4× on 2026-11-03 (PR #3, PR #10,
   release dry run, `main` after the #10 merge). Re-running always passed. Not yet investigated; possibly
   runner capacity or a macOS concurrency limit when CI and Release run at the same time.
-  Workaround: *Re-run failed jobs*.
+  The re-run on `main` was still queued after several minutes, which points at runner availability.
+  Workaround: *Re-run failed jobs*. If it keeps happening, consider running the macOS jobs only on
+  pushes to `main` and on PRs that touch Swift or Rust code.
 
 ## Decisions (don't re-litigate without the user)
 
@@ -91,6 +94,8 @@ Work top to bottom; check items off here as they land.
 | Name `kith`, owner `elektrolytmangel` | User's choice; repo renamed to `kith` | `rename.py` replaces both |
 | License MIT, copyright Marc Muehlheim | User's choice | `LICENSE`. `authors` in Cargo.toml stays "kith contributors" (user said no) |
 | Publish to GitHub Releases only | User: "not more is needed". No npm/Maven/ghcr/crates.io pushes | `release.yml`, [releasing.md](docs/guides/releasing.md) |
+| First release is the pre-release `v0.1.0-alpha.1` | The library is a phase 1 skeleton; the version should say so | Next steps 1 |
+| Phase 1 starts with SQLite store + key restore in the bindings | Minimum for an app to keep data and device identity across restarts | Next steps 3 |
 | Rust core, thin bindings | Same validation/merge logic everywhere | [ADR 0001](docs/adr/0001-monorepo-rust-core-thin-bindings.md) |
 | Requirements as code | Versioned with code, traced to tests | [ADR 0002](docs/adr/0002-requirements-as-code.md) |
 | Randomness only via `kith_core::random_bytes()` (getrandom); no `rand_core` | ed25519-dalek majors change rand_core; seed → `SigningKey::from_bytes` | `crates/kith-core/src/lib.rs`; RFC 8032 test vector guards signatures |
@@ -117,4 +122,4 @@ Work top to bottom; check items off here as they land.
 - **2026-11-03**: Structure, CI, release pipeline (PR #1). License, Gradle wrapper, owner URLs, Swift CI.
   Dependabot review: merged #3, #7; replaced #2/#4/#5/#6/#8 with #9 (ed25519-dalek 3 + sha2 0.11) and
   #10 (Gradle 9 + AGP 9 + Android CI, fixed stripped-metadata bug). Release dry run: all packages build.
-  This plan written.
+  This plan written; user accepted the recommendations (alpha pre-release, phase 1 starts with store + key restore).
