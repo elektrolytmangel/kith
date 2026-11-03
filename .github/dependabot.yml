@@ -15,6 +15,11 @@ updates:
   - package-ecosystem: gradle
     directory: /bindings/kotlin
     schedule: { interval: monthly }
+    groups:
+      # A new Android Gradle Plugin major usually needs a new Gradle major:
+      # update them in one PR so CI can build the combination.
+      android-build:
+        patterns: ["com.android.*", "gradle-wrapper"]
   - package-ecosystem: docker
     directory: /apps/relay-server
     schedule: { interval: monthly }

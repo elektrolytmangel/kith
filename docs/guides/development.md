@@ -71,6 +71,6 @@ docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7   # after editin
 ```
 
 The Swift package needs macOS: run `scripts/build-swift.sh && (cd bindings/swift && swift test)`
-on a Mac, or rely on the `swift` CI job. The Android AAR is built only by the
-Release workflow; run it manually with `dry_run` to build every package
-without creating a release.
+on a Mac, or rely on the `swift` CI job. The `android` CI job builds the AAR.
+To build every release package without creating a release, run the Release
+workflow manually with `dry_run`.
