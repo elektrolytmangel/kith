@@ -9,11 +9,11 @@ place where the protocol evolves. Every app gets fixes by bumping a version.
 
 | Platform | Add |
 | --- | --- |
-| Web / Electron / Node | `npm install @OWNER/kith-wasm` ([web guide](integration.md#web)) |
-| iOS / macOS | Swift Package from the release (or mirror repo) ([Apple guide](integration.md#ios--macos)) |
-| Android | `implementation("dev.kith:kith-android:X.Y.Z")` ([Android guide](integration.md#android)) |
-| Rust desktop / Tauri / servers | `kith-client = "X.Y"` ([Rust guide](integration.md#rust-desktop-tauri-headless)) |
-| Relay | `docker run ghcr.io/OWNER/kith-relay:X.Y` |
+| Web / Electron / Node | `npm install` the release's `kith-wasm-X.Y.Z.tgz` ([web guide](integration.md#web)) |
+| iOS / macOS | Swift package from the release ([Apple guide](integration.md#ios--macos)) |
+| Android | the release's `kith-android-X.Y.Z.aar` ([Android guide](integration.md#android)) |
+| Rust desktop / Tauri / servers | `kith-client` as a git dependency on tag `vX.Y.Z` ([Rust guide](integration.md#rust-desktop-tauri-headless)) |
+| Relay | release binary, or `docker build -f apps/relay-server/Dockerfile .` |
 
 You customize through the extension points below, not by forking.
 
@@ -32,8 +32,8 @@ Use this when you want a separately branded and versioned sync stack.
    the Kotlin package, npm scope, Docker image, env vars (`ACME_SYNC_RELAY_ADDR`)
    and the `OWNER` placeholders.
 3. Set the license in `Cargo.toml` and add `LICENSE` files.
-4. Fill in `CODEOWNERS`. In repository variables, set `NPM_SCOPE`, `NPM_REGISTRY`
-   and the others listed at the top of `.github/workflows/release.yml`.
+4. Fill in `CODEOWNERS`. Optionally set the repository variable `NPM_SCOPE`
+   (default: the repository owner).
 5. Replace `docs/requirements/*.md` with your product's requirements, or keep
    them and add new areas. Keep the IDs stable after that.
 

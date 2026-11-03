@@ -10,8 +10,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Requirements as code with traceability check; CI and release workflows.
 - CI: fmt, clippy, tests on Linux/macOS/Windows, MSRV (1.88), per-crate wasm32 check,
   npm package build + Node smoke test, UniFFI binding generation, relay image smoke test.
-- Release: relay image (amd64/arm64) and binaries, npm, Swift package, Android AAR,
-  optional crates.io; manual dry run builds everything without publishing.
+- Release: GitHub Release with relay binaries, npm tarball, Swift package, Android AAR
+  and SHA256SUMS; manual dry run builds everything without creating a release.
 - Issue templates (requirement, bug), PR template, CODEOWNERS, Dependabot.
 
 ### Fixed

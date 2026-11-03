@@ -70,16 +70,19 @@ Platform packages: `scripts/build-wasm.sh`, `scripts/build-swift.sh` (macOS),
 
 ## Packages
 
-Pushing tag `vX.Y.Z` publishes all of these at the same version ([Releasing](docs/guides/releasing.md)):
+Pushing tag `vX.Y.Z` attaches all of these to a GitHub Release at the same
+version ([Releasing](docs/guides/releasing.md)). Nothing is pushed to other registries.
 
-| Artifact | Destination (default) | For |
-| --- | --- | --- |
-| `ghcr.io/OWNER/kith-relay` | GitHub Container Registry | running the relay |
-| `kith-relay-<target>` binaries | GitHub Release | running the relay without Docker |
-| `@OWNER/kith-wasm` | GitHub Packages npm (configurable) | web, Electron, Node |
-| `KithFFI.xcframework.zip` + Swift package | GitHub Release (+ optional mirror repo) | iOS, macOS |
-| `dev.kith:kith-android` | GitHub Packages Maven (configurable) | Android |
-| `kith-*` crates | crates.io (opt-in) | Rust desktop, Tauri, servers |
+| Release asset | For |
+| --- | --- |
+| `kith-relay-<target>.tar.gz` / `.zip` | running the relay (Linux, macOS, Windows; x86_64 + arm64) |
+| `kith-wasm-X.Y.Z.tgz` | web, Electron, Node (`npm install <asset URL>`) |
+| `kith-swift-package.zip` + `KithFFI.xcframework.zip` | iOS, macOS |
+| `kith-android-X.Y.Z.aar` | Android |
+| `SHA256SUMS` | verifying downloads |
+
+Rust apps depend on the crates through a git tag, and the relay image is
+built from `apps/relay-server/Dockerfile`.
 
 ## Status
 

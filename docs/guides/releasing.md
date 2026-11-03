@@ -16,39 +16,39 @@ Android receives it as `-Pversion` and Swift through the release tag.
    git tag v0.2.0 && git push origin v0.2.0
    ```
 5. `.github/workflows/release.yml` then:
-   - checks that the tag matches `Cargo.toml` and that requirements pass,
-   - pushes `ghcr.io/OWNER/kith-relay:{0.2.0,0.2}` for amd64 and arm64,
+   - checks that the tag matches `Cargo.toml`, that requirements pass and that tests pass,
    - builds relay binaries for Linux, macOS and Windows,
-   - publishes the npm package,
-   - builds and tests the XCFramework and optionally pushes the Swift package mirror,
-   - builds and publishes the Android AAR,
-   - publishes crates to crates.io, only if `PUBLISH_CRATES=true`,
-   - creates the GitHub Release with all artifacts and generated notes.
+   - builds the npm package and smoke-tests it in Node,
+   - builds the XCFramework, tests the Swift package against it and packages it,
+   - builds the Android AAR,
+   - creates the GitHub Release with all of them, `SHA256SUMS` and generated notes.
+
+   The GitHub Release is the only publish target.
 
 To build everything without publishing, run the workflow manually under
 *Actions → Release → Run workflow* with `dry_run` checked (the default). All
-packages are attached to the run as artifacts. Unticking `dry_run` publishes,
-but only when the workflow is run on a `vX.Y.Z` tag.
+packages are attached to the run as artifacts. Unticking `dry_run` creates the
+release, but only when the workflow is run on a `vX.Y.Z` tag.
 
-If a release fails halfway, use *Re-run failed jobs* on the original run. A
-fresh run would fail on the packages that were already published, because npm
-and Maven reject an existing version.
+The release is created only after every package built. If a build fails, fix
+it and use *Re-run failed jobs*, or run the workflow on the tag with `dry_run`
+unticked.
 
 ## Configuration
 
-Set repository variables and secrets as listed at the top of
-`release.yml`. By default, everything publishes to this repository's GitHub
-Packages and Releases using `GITHUB_TOKEN`, so nothing is public until you
-choose a public registry.
+None is required: the workflow uses `GITHUB_TOKEN`. The optional repository
+variable `NPM_SCOPE` sets the npm package name `@<scope>/kith-wasm` (default:
+the repository owner).
 
 ### Private repositories
 
 - `relay-binaries` uses the `ubuntu-24.04-arm` runner. If it isn't available
   for your plan, remove that matrix entry or switch it to `ubuntu-latest` with
   [`cross`](https://github.com/cross-rs/cross).
-- Swift Package Manager downloads `KithFFI.xcframework.zip` from the release
-  without credentials. For private repositories, use a public mirror
-  (`SWIFT_PACKAGE_REPO`) or configure `.netrc` for consumers.
+- Release assets of a private repository need authentication to download.
+  Swift Package Manager fetches `KithFFI.xcframework.zip` from the release
+  URL, so consumers need a `.netrc` entry for `github.com` (or should vendor
+  the unzipped framework). The same applies to `npm install <asset URL>`.
 - macOS runner minutes count 10× for private repositories. The Swift job runs
   only in the Release workflow, not on every PR.
 

@@ -33,18 +33,6 @@ publishing {
             afterEvaluate { from(components["release"]) }
         }
     }
-    repositories {
-        // Default: GitHub Packages of this repository. Override with -PmavenUrl=...
-        maven {
-            name = "target"
-            url = uri(
-                (findProperty("mavenUrl") as String?)
-                    ?: "https://maven.pkg.github.com/${System.getenv("GITHUB_REPOSITORY") ?: "OWNER/kith"}"
-            )
-            credentials {
-                username = System.getenv("MAVEN_USERNAME") ?: System.getenv("GITHUB_ACTOR")
-                password = System.getenv("MAVEN_PASSWORD") ?: System.getenv("GITHUB_TOKEN")
-            }
-        }
-    }
+    // Releases ship the AAR as a GitHub Release asset. To try it in another
+    // project locally: `gradle publishToMavenLocal`, then add mavenLocal().
 }

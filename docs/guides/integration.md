@@ -3,10 +3,14 @@
 All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`
 and `history`. Sync, encryption and invitations will be added in later phases.
 
+Every package is a GitHub Release asset:
+`https://github.com/OWNER/kith/releases/download/vX.Y.Z/<asset>`. For a private
+repository, downloads need a GitHub token (see [Releasing](releasing.md#private-repositories)).
+
 ## Web
 
 ```sh
-npm install @OWNER/kith-wasm   # set the registry for @OWNER in .npmrc if using GitHub Packages
+npm install https://github.com/OWNER/kith/releases/download/v0.1.0/kith-wasm-0.1.0.tgz
 ```
 
 ```ts
@@ -24,8 +28,10 @@ for the main process, prefer the Rust crate through a native module.
 
 ## iOS / macOS
 
-Add the Swift package, either from the mirror repo (`SWIFT_PACKAGE_REPO`) or by
-unpacking `kith-swift-package.zip` from the GitHub release.
+Unzip `kith-swift-package.zip` from the release into your project and add it
+as a local package (Xcode: *Add Package Dependencies → Add Local*). Its
+`Package.swift` fetches `KithFFI.xcframework.zip` from the same release and
+verifies the checksum.
 
 ```swift
 import Kith
@@ -41,8 +47,12 @@ planned for phase 1.
 ## Android
 
 ```kotlin
-// settings.gradle.kts → repositories { maven("https://maven.pkg.github.com/OWNER/kith") { credentials { ... } } }
-dependencies { implementation("dev.kith:kith-android:0.1.0") }
+// Copy kith-android-0.1.0.aar from the release into app/libs/.
+dependencies {
+    implementation(files("libs/kith-android-0.1.0.aar"))
+    // A local AAR doesn't carry its dependencies; the generated code needs JNA.
+    implementation("net.java.dev.jna:jna:5.15.0@aar")
+}
 ```
 
 ```kotlin
@@ -57,7 +67,7 @@ val history = client.history(change.objectId)
 
 ```toml
 [dependencies]
-kith-client = "0.1"
+kith-client = { git = "https://github.com/OWNER/kith", tag = "v0.1.0" }
 ```
 
 ```rust
@@ -72,7 +82,13 @@ The always-on client (phase 7) is a headless Rust binary built this way.
 ## Relay
 
 ```sh
-docker run -p 8080:8080 ghcr.io/OWNER/kith-relay:0.1
+# Binary from the release (Linux/macOS/Windows, x86_64 and arm64)
+curl -fsSL https://github.com/OWNER/kith/releases/download/v0.1.0/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+./kith-relay
+
+# or as a container, built from source
+docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 8080:8080 kith-relay
+
 # or embed kith_relay::RoutingTable in your own server
 ```
 
