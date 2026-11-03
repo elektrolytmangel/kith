@@ -1,0 +1,17 @@
+[package]
+name = "kith-protocol"
+description = "Wire protocol between clients and the relay. Payloads stay opaque."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

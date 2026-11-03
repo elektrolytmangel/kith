@@ -1,0 +1,56 @@
+name: Requirement
+description: Propose a new requirement or a change to an existing one
+title: "[REQ] "
+labels: [requirement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Requirements live in `docs/requirements/`. Once accepted, this issue becomes a PR
+        that adds the requirement with `Status: proposed` (see docs/requirements/README.md).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [ID / ENC (identity, encryption), DATA / STORE, RELAY, SYNC, INV (invitations), PERM (permissions), FILE, PLAT (platform, packaging), new area]
+    validations:
+      required: true
+  - type: input
+    id: existing
+    attributes:
+      label: Existing requirement
+      description: ID if this changes an existing requirement, e.g. REQ-RELAY-004
+  - type: textarea
+    id: statement
+    attributes:
+      label: Requirement
+      description: One testable statement using must / should.
+      placeholder: The relay must reject frames from devices that have not authenticated.
+    validations:
+      required: true
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Why
+      description: The problem, who needs it, and the source (customer, design doc section, incident, ...).
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: [must, should, could]
+    validations:
+      required: true
+  - type: dropdown
+    id: verify
+    attributes:
+      label: How to verify
+      options: [test, review, manual]
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Concrete checks a test or reviewer can apply.

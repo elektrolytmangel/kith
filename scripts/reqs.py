@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Requirements checker and traceability generator.
+
+Parses docs/requirements/*.md, scans source for `REQ-XXX-NNN` references,
+validates them and (re)generates docs/requirements/TRACEABILITY.md.
+
+  python3 scripts/reqs.py           check only (CI)
+  python3 scripts/reqs.py --write   regenerate TRACEABILITY.md
+
+Standard library only, so it runs anywhere CI does.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REQ_DIR = ROOT / "docs" / "requirements"
+MATRIX = REQ_DIR / "TRACEABILITY.md"
+SKIP_FILES = {"README.md", "TRACEABILITY.md"}
+SCAN_DIRS = ["crates", "apps", "bindings", "examples", "tests"]
+SCAN_EXT = {".rs", ".swift", ".kt", ".ts", ".js", ".py"}
+
+ID_RE = re.compile(r"REQ-[A-Z]+-\d{3}")
+HEAD_RE = re.compile(r"^###\s+(REQ-[A-Z]+-\d{3}):\s*(.+?)\s*$")
+FIELD_RE = re.compile(r"\*\*(\w+):\*\*\s*([^|]+)")
+
+STATUS_ORDER = ["proposed", "accepted", "partial", "implemented", "verified", "deferred", "rejected"]
+VALID = {
+    "Priority": ["must", "should", "could"],
+    "Status": STATUS_ORDER,
+    "Verify": ["test", "review", "manual"],
+}
+REQUIRED = ["Priority", "Phase", "Status", "Verify", "Source"]
+DONE = {"implemented", "verified"}
+
+
+@dataclass
+class Req:
+    id: str
+    title: str
+    file: str
+    line: int
+    meta: dict[str, str] = field(default_factory=dict)
+    tests: list[str] = field(default_factory=list)
+    code: list[str] = field(default_factory=list)
+
+
+def parse_requirements(errors: list[str]) -> dict[str, Req]:
+    reqs: dict[str, Req] = {}
+    for path in sorted(REQ_DIR.glob("*.md")):
+        if path.name in SKIP_FILES:
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            m = HEAD_RE.match(line)
+            if not m:
+                if line.startswith("### ") and "REQ-" in line:
+                    errors.append(f"{path.name}:{i+1}: malformed requirement heading")
+                continue
+            rid, title = m.groups()
+            if rid in reqs:
+                errors.append(f"{path.name}:{i+1}: duplicate {rid} (first in {reqs[rid].file})")
+                continue
+            req = Req(rid, title, path.name, i + 1)
+            meta_line = next((l for l in lines[i + 1 : i + 4] if "**Priority:**" in l), "")
+            req.meta = {k: v.strip() for k, v in FIELD_RE.findall(meta_line)}
+            for key in REQUIRED:
+                if key not in req.meta:
+                    errors.append(f"{path.name}:{i+1}: {rid} missing field {key}")
+            for key, allowed in VALID.items():
+                v = req.meta.get(key)
+                if v is not None and v not in allowed:
+                    errors.append(f"{path.name}:{i+1}: {rid} {key}={v!r}, expected one of {allowed}")
+            reqs[rid] = req
+    return reqs
+
+
+def is_test_context(lines: list[str], idx: int, path: Path) -> bool:
+    """A reference counts as a test if it sits in a test file or directly
+    above a #[test] / test function (within a few lines)."""
+    p = str(path)
+    if "/tests/" in p or p.endswith(("_test.rs", "Tests.swift", "Test.kt", ".test.ts")):
+        return True
+    window = lines[idx : idx + 4]
+    return any(("#[test]" in l or "#[tokio::test]" in l or "fn test" in l or "@Test" in l) for l in window)
+
+
+def scan_code(reqs: dict[str, Req], errors: list[str]) -> None:
+    for d in SCAN_DIRS:
+        base = ROOT / d
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.suffix not in SCAN_EXT or "target" in path.parts or "node_modules" in path.parts:
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            rel = path.relative_to(ROOT).as_posix()
+            for i, line in enumerate(lines):
+                for rid in ID_RE.findall(line):
+                    if rid not in reqs:
+                        errors.append(f"{rel}:{i+1}: reference to unknown {rid}")
+                        continue
+                    # File-level (no line numbers) so the matrix only changes
+                    # when traceability actually changes.
+                    target = reqs[rid].tests if is_test_context(lines, i, path) else reqs[rid].code
+                    if rel not in target:
+                        target.append(rel)
+
+
+def check_coverage(reqs: dict[str, Req], errors: list[str]) -> None:
+    for r in reqs.values():
+        if r.meta.get("Status") in DONE and r.meta.get("Verify") == "test" and not r.tests:
+            errors.append(f"{r.file}:{r.line}: {r.id} is {r.meta['Status']} with Verify=test but no test references it")
+
+
+def render(reqs: dict[str, Req]) -> str:
+    out = [
+        "# Traceability matrix",
+        "",
+        "<!-- Generated by scripts/reqs.py --write. Do not edit by hand. -->",
+        "",
+    ]
+    statuses: dict[str, int] = {}
+    for r in reqs.values():
+        statuses[r.meta.get("Status", "?")] = statuses.get(r.meta.get("Status", "?"), 0) + 1
+    order = STATUS_ORDER
+    summary = ", ".join(
+        f"{s}: {statuses[s]}" for s in sorted(statuses, key=lambda s: order.index(s) if s in order else 99)
+    )
+    out += [f"{len(reqs)} requirements ({summary}).", ""]
+    out += ["| ID | Title | Pri | Phase | Status | Verify | Tests | Code refs |", "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for rid in sorted(reqs, key=lambda x: (reqs[x].file, x)):
+        r = reqs[rid]
+        link = f"[{rid}]({r.file}#{slug(rid, r.title)})"
+        tests = "<br>".join(f"`{t}`" for t in r.tests) or "—"
+        code = "<br>".join(f"`{c}`" for c in r.code) or "—"
+        m = r.meta
+        out.append(
+            f"| {link} | {r.title} | {m.get('Priority','')} | {m.get('Phase','')} | {m.get('Status','')} | {m.get('Verify','')} | {tests} | {code} |"
+        )
+    return "\n".join(out) + "\n"
+
+
+def slug(rid: str, title: str) -> str:
+    s = f"{rid}: {title}".lower()
+    s = re.sub(r"[^\w\- ]", "", s)
+    return s.replace(" ", "-")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--write", action="store_true", help="regenerate TRACEABILITY.md")
+    args = ap.parse_args()
+
+    errors: list[str] = []
+    reqs = parse_requirements(errors)
+    scan_code(reqs, errors)
+    check_coverage(reqs, errors)
+    matrix = render(reqs)
+
+    if args.write:
+        MATRIX.write_text(matrix, encoding="utf-8")
+        print(f"wrote {MATRIX.relative_to(ROOT)}")
+    elif not MATRIX.exists() or MATRIX.read_text(encoding="utf-8") != matrix:
+        errors.append(f"{MATRIX.relative_to(ROOT)} is out of date: run `python3 scripts/reqs.py --write`")
+
+    for e in errors:
+        print(f"error: {e}", file=sys.stderr)
+    traced = sum(1 for r in reqs.values() if r.tests)
+    print(f"{len(reqs)} requirements, {traced} with tests, {len(errors)} errors")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

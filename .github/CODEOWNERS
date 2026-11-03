@@ -1,0 +1,13 @@
+# Requested automatically as reviewers; make reviews required under
+# Settings → Branches → main. Personal accounts can't have teams, so this lists
+# users. In an organization, prefer teams such as @org/maintainers and @org/security.
+*                              @elektrolytmangel
+
+# Security-sensitive: protocol, envelope, crypto
+/crates/kith-core/             @elektrolytmangel
+/crates/kith-crypto/           @elektrolytmangel
+/crates/kith-protocol/         @elektrolytmangel
+/docs/adr/                     @elektrolytmangel
+
+# Release pipeline
+/.github/workflows/            @elektrolytmangel

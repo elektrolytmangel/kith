@@ -1,0 +1,31 @@
+# Rust
+/target/
+
+# WASM / npm (scripts/build-wasm.sh)
+/bindings/wasm/pkg/
+node_modules/
+
+# Swift (scripts/build-swift.sh). Generated sources are ignored, hand-written ones are not.
+/bindings/swift/KithFFI.xcframework/
+/bindings/swift/KithFFI.xcframework.zip
+/bindings/swift/KithFFI.xcframework.zip.sha256
+/bindings/swift/Sources/Kith/*
+!/bindings/swift/Sources/Kith/Extensions.swift
+/bindings/swift/.build/
+/bindings/swift/.swiftpm/
+*.xcodeproj/xcuserdata/
+
+# Android (scripts/build-android.sh). Generated sources and native libs are ignored.
+/bindings/kotlin/kith/src/main/jniLibs/
+/bindings/kotlin/kith/src/main/kotlin/dev/kith/*
+!/bindings/kotlin/kith/src/main/kotlin/dev/kith/Extensions.kt
+/bindings/kotlin/.gradle/
+/bindings/kotlin/**/build/
+/bindings/kotlin/local.properties
+.kotlin/
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store

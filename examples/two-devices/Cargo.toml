@@ -1,0 +1,10 @@
+[package]
+name = "example-two-devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kith-client.workspace = true
+kith-sync.workspace = true

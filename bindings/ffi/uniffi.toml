@@ -1,0 +1,9 @@
+# UniFFI code generation settings (picked up automatically in library mode).
+[bindings.swift]
+module_name = "Kith"
+ffi_module_name = "KithFFI"
+ffi_module_filename = "KithFFI"
+
+[bindings.kotlin]
+package_name = "dev.kith"
+cdylib_name = "kith_ffi"

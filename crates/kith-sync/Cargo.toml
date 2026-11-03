@@ -1,0 +1,15 @@
+[package]
+name = "kith-sync"
+description = "Sans-IO catch-up and reconciliation state machines."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kith-core.workspace = true

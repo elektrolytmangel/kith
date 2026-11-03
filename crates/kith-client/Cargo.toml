@@ -1,0 +1,23 @@
+[package]
+name = "kith-client"
+description = "High-level client SDK that apps embed (directly or via bindings)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kith-core.workspace = true
+kith-crypto.workspace = true
+kith-store.workspace = true
+kith-sync.workspace = true
+kith-protocol.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys.workspace = true
