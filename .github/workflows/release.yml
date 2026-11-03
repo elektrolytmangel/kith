@@ -1,0 +1,325 @@
+# Builds and publishes every package at the version in Cargo.toml.
+#
+# Triggers
+#   push tag vX.Y.Z           build + publish + GitHub Release
+#   Run workflow (manual)     build only (dry_run, default). Unticking dry_run
+#                             publishes, but only when run on a vX.Y.Z tag
+#                             (useful to retry a failed release).
+#
+# Configuration (Settings → Secrets and variables → Actions). All optional;
+# defaults publish to this repository's GitHub Packages with GITHUB_TOKEN.
+#
+#   Variables
+#     NPM_SCOPE           npm scope without '@'       default: repository owner (lowercase)
+#     NPM_REGISTRY        npm registry URL            default: https://npm.pkg.github.com
+#     NPM_ACCESS          public | restricted         default: registry default
+#     MAVEN_URL           Maven repository URL        default: GitHub Packages of this repo
+#     SWIFT_PACKAGE_REPO  owner/repo of a Swift Package mirror; empty = no mirror
+#     PUBLISH_CRATES      "true" to publish crates to crates.io
+#   Secrets
+#     NPM_TOKEN           needed when NPM_REGISTRY is not GitHub Packages
+#     MAVEN_USERNAME, MAVEN_PASSWORD   needed when MAVEN_URL is not GitHub Packages
+#     SWIFT_PACKAGE_TOKEN PAT with contents:write on SWIFT_PACKAGE_REPO
+#     CARGO_REGISTRY_TOKEN             needed when PUBLISH_CRATES is "true"
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build only, publish nothing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+      owner: ${{ steps.v.outputs.owner }}
+      npm_scope: ${{ steps.v.outputs.npm_scope }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          NPM_SCOPE: ${{ vars.NPM_SCOPE }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          publish=false
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1; }
+            if [ "$EVENT" = push ] || [ "$DRY_RUN" = false ]; then publish=true; fi
+          elif [ "$DRY_RUN" = false ]; then
+            echo "::error::publishing needs a vX.Y.Z tag; run the workflow on a tag or keep dry_run"; exit 1
+          fi
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          scope="${NPM_SCOPE:-$owner}"
+          {
+            echo "version=$version"; echo "publish=$publish"
+            echo "owner=$owner"; echo "npm_scope=${scope,,}"
+          } >> "$GITHUB_OUTPUT"
+          echo "### Release $version (publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+      - run: python3 scripts/reqs.py
+      - run: cargo test --workspace --locked
+
+  relay-image:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: needs.verify.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ needs.verify.outputs.owner }}/kith-relay
+          tags: |
+            type=raw,value=${{ needs.verify.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.verify.outputs.version }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/relay-server/Dockerfile
+          # arm64 is built under QEMU: slow (tens of minutes) but needs no extra runners.
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.verify.outputs.publish == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  relay-binaries:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked -p kith-relay-server --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="kith-relay-$TARGET"
+          mkdir -p dist
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/kith-relay.exe" dist/
+            (cd dist && 7z a "../$name.zip" kith-relay.exe >/dev/null)
+          else
+            cp "target/$TARGET/release/kith-relay" dist/
+            tar -czf "$name.tar.gz" -C dist kith-relay
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ matrix.target }}
+          path: kith-relay-${{ matrix.target }}.*
+
+  npm:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      NPM_REGISTRY: ${{ vars.NPM_REGISTRY || 'https://npm.pkg.github.com' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: ${{ env.NPM_REGISTRY }}
+          scope: "@${{ needs.verify.outputs.npm_scope }}"
+      - run: scripts/build-wasm.sh web
+        env:
+          NPM_SCOPE: ${{ needs.verify.outputs.npm_scope }}
+      - run: node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg
+      - name: Check package version
+        run: |
+          v=$(jq -r .version bindings/wasm/pkg/package.json)
+          [ "$v" = "${{ needs.verify.outputs.version }}" ] || { echo "::error::package.json has $v"; exit 1; }
+      - run: npm pack --pack-destination "$GITHUB_WORKSPACE"
+        working-directory: bindings/wasm/pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm
+          path: "*.tgz"
+      - name: Publish
+        if: needs.verify.outputs.publish == 'true'
+        working-directory: bindings/wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || secrets.GITHUB_TOKEN }}
+          NPM_ACCESS: ${{ vars.NPM_ACCESS }}
+        run: npm publish ${NPM_ACCESS:+--access "$NPM_ACCESS"}
+
+  swift:
+    needs: verify
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/build-swift.sh
+      - name: Test the package against the freshly built framework
+        run: swift test
+        working-directory: bindings/swift
+      - name: Assemble release package (binary target points at the release asset)
+        run: |
+          checksum=$(cat bindings/swift/KithFFI.xcframework.zip.sha256)
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/KithFFI.xcframework.zip"
+          out=dist/kith-swift-package; mkdir -p "$out"
+          cp -R bindings/swift/Sources "$out/"
+          cat > "$out/Package.swift" <<EOF
+          // swift-tools-version:5.9
+          // Generated by .github/workflows/release.yml for v$VERSION.
+          import PackageDescription
+
+          let package = Package(
+              name: "Kith",
+              platforms: [.iOS(.v15), .macOS(.v12)],
+              products: [.library(name: "Kith", targets: ["Kith"])],
+              targets: [
+                  .binaryTarget(name: "KithFFI", url: "$url", checksum: "$checksum"),
+                  .target(name: "Kith", dependencies: ["KithFFI"], path: "Sources/Kith"),
+              ]
+          )
+          EOF
+          (cd dist && zip -qry kith-swift-package.zip kith-swift-package)
+          cp bindings/swift/KithFFI.xcframework.zip dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swift
+          path: |
+            dist/kith-swift-package.zip
+            dist/KithFFI.xcframework.zip
+      - name: Push to Swift Package mirror
+        if: needs.verify.outputs.publish == 'true' && vars.SWIFT_PACKAGE_REPO != ''
+        env:
+          REPO: ${{ vars.SWIFT_PACKAGE_REPO }}
+          TOKEN: ${{ secrets.SWIFT_PACKAGE_TOKEN }}
+        run: |
+          git clone "https://x-access-token:$TOKEN@github.com/$REPO.git" mirror
+          find mirror -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R dist/kith-swift-package/. mirror/
+          cd mirror
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Release $VERSION"
+          git tag "$VERSION"
+          git push origin HEAD "$VERSION"
+
+  android:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11"
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # The runner image ships an NDK; ANDROID_NDK_LATEST_HOME points at it.
+      - run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" scripts/build-android.sh
+      - run: gradle assembleRelease -Pversion="$VERSION"
+        working-directory: bindings/kotlin
+      - run: cp bindings/kotlin/kith/build/outputs/aar/kith-release.aar "kith-android-$VERSION.aar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: kith-android-*.aar
+      - name: Publish
+        if: needs.verify.outputs.publish == 'true'
+        working-directory: bindings/kotlin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAVEN_URL: ${{ vars.MAVEN_URL }}
+          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        run: gradle publishReleasePublicationToTargetRepository -Pversion="$VERSION" ${MAVEN_URL:+-PmavenUrl="$MAVEN_URL"}
+
+  crates:
+    needs: verify
+    if: needs.verify.outputs.publish == 'true' && vars.PUBLISH_CRATES == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Publishes all publishable workspace crates in dependency order.
+      - run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  github-release:
+    needs: [verify, relay-image, relay-binaries, npm, swift, android, crates]
+    # crates is skipped unless enabled; everything else must have succeeded.
+    if: >-
+      always() && needs.verify.outputs.publish == 'true'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ needs.verify.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.verify.outputs.version, '-') }}
+          files: assets/*

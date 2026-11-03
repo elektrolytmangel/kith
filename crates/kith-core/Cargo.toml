@@ -1,0 +1,29 @@
+[package]
+name = "kith-core"
+description = "Core data model: identifiers, signed hash-linked change envelopes. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+serde = { workspace = true, optional = true }
+
+# OsRng needs a randomness source in the browser (crypto.getRandomValues).
+# Lives here, not in bindings/wasm, so every crate above core builds for wasm on its own.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde"]

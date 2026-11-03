@@ -1,0 +1,12 @@
+# Replace with real teams or users. Owners are requested for review automatically;
+# make reviews required under Settings → Branches → main.
+*                              @OWNER/maintainers
+
+# Security-sensitive: protocol, envelope, crypto
+/crates/kith-core/             @OWNER/security
+/crates/kith-crypto/           @OWNER/security
+/crates/kith-protocol/         @OWNER/security
+/docs/adr/                     @OWNER/security
+
+# Release pipeline
+/.github/workflows/            @OWNER/maintainers

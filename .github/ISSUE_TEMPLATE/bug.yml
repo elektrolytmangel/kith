@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [Rust crates, relay server, web / npm, Swift, Android, docs, CI / release]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal code or commands. Never paste keys or decrypted user data.
+    validations:
+      required: true
+  - type: input
+    id: requirement
+    attributes:
+      label: Related requirement
+      description: e.g. REQ-SYNC-002, if you know it

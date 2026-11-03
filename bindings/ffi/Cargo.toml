@@ -1,0 +1,30 @@
+[package]
+name = "kith-ffi"
+description = "UniFFI bindings for kith: Swift (iOS/macOS) and Kotlin (Android/JVM)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "kith_ffi"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+kith-client.workspace = true
+uniffi.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,11 @@
+# Only the Rust workspace is needed to build the relay image.
+.git
+.github
+target
+docs
+design-docs
+bindings/wasm/pkg
+bindings/swift
+bindings/kotlin
+**/node_modules
+**/.DS_Store

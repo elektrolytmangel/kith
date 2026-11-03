@@ -1,0 +1,25 @@
+[package]
+name = "kith-relay-server"
+description = "Standalone RAM-only kith relay (WebSocket). Ships as a Docker image."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kith-relay"
+path = "src/main.rs"
+
+[dependencies]
+kith-relay.workspace = true
+kith-protocol.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

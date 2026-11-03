@@ -1,0 +1,16 @@
+[package]
+name = "kith-store"
+description = "Local storage: storage trait plus in-memory and SQLite backends."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kith-core.workspace = true
+thiserror.workspace = true
