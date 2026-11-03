@@ -10,7 +10,9 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR pushes are cancelled; every commit on main gets a full run
+  # (otherwise each merge cancels the previous main run's queued macOS jobs).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

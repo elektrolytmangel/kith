@@ -80,12 +80,13 @@ None right now.
 
 ### Open issues
 
-- **macOS jobs get cancelled before starting** (0 steps): seen 4× on 2026-11-03 (PR #3, PR #10,
-  release dry run, `main` after the #10 merge). Re-running always passed. Not yet investigated; possibly
-  runner capacity or a macOS concurrency limit when CI and Release run at the same time.
-  The re-run on `main` was still queued after several minutes, which points at runner availability.
-  Workaround: *Re-run failed jobs*. If it keeps happening, consider running the macOS jobs only on
-  pushes to `main` and on PRs that touch Swift or Rust code.
+- **macOS jobs get cancelled or wait long** (diagnosed 2026-11-03 from job annotations). Causes:
+  1. GitHub macOS arm64 capacity: "The job was not acquired by Runner … even after multiple attempts"
+     (PR #3, PR #10). Not our code; *Re-run failed jobs*.
+  2. CI concurrency cancelled `main` runs on every merge. Fixed: `cancel-in-progress` only for PRs.
+  3. Manual cancellations from the UI (release dry run, one `main` run).
+  If capacity problems persist: merge the `test (macos-latest)` and `Swift package` jobs into one
+  macOS job (the Swift build already compiles the Rust crates for macOS), halving macOS runner demand.
 
 ## Decisions (don't re-litigate without the user)
 
@@ -123,3 +124,4 @@ None right now.
   Dependabot review: merged #3, #7; replaced #2/#4/#5/#6/#8 with #9 (ed25519-dalek 3 + sha2 0.11) and
   #10 (Gradle 9 + AGP 9 + Android CI, fixed stripped-metadata bug). Release dry run: all packages build.
   This plan written; user accepted the recommendations (alpha pre-release, phase 1 starts with store + key restore).
+  macOS cancellations diagnosed; CI no longer cancels runs on `main`.
