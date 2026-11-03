@@ -70,5 +70,7 @@ scripts/build-wasm.sh web && node bindings/wasm/tests/smoke.mjs   # needs wasm-p
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7   # after editing workflows
 ```
 
-The Swift package needs macOS, so the only full end-to-end check is the
-Release workflow run manually with `dry_run` (builds every package, publishes nothing).
+The Swift package needs macOS: run `scripts/build-swift.sh && (cd bindings/swift && swift test)`
+on a Mac, or rely on the `swift` CI job. The Android AAR is built only by the
+Release workflow; run it manually with `dry_run` to build every package
+without creating a release.

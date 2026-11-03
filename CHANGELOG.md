@@ -9,7 +9,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Signed, hash-linked change envelope (REQ-DATA-001..003), in-memory store, naive reconciliation, relay routing table.
 - Requirements as code with traceability check; CI and release workflows.
 - CI: fmt, clippy, tests on Linux/macOS/Windows, MSRV (1.88), per-crate wasm32 check,
-  npm package build + Node smoke test, UniFFI binding generation, relay image smoke test.
+  npm package build + Node smoke test, UniFFI binding generation, Swift package build +
+  `swift test` on macOS, relay image smoke test.
 - Release: GitHub Release with relay binaries, npm tarball, Swift package, Android AAR
   and SHA256SUMS; manual dry run builds everything without creating a release.
 - Issue templates (requirement, bug), PR template, CODEOWNERS, Dependabot.

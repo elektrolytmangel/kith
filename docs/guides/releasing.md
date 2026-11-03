@@ -52,8 +52,9 @@ from this template:
   Swift Package Manager fetches `KithFFI.xcframework.zip` from the release
   URL, so consumers need a `.netrc` entry for `github.com` (or should vendor
   the unzipped framework). The same applies to `npm install <asset URL>`.
-- macOS runner minutes count 10× for private repositories. The Swift job runs
-  only in the Release workflow, not on every PR.
+- macOS runner minutes count 10× for private repositories, and CI builds the
+  Swift package on every PR. Consider limiting the `swift` job in `ci.yml` to
+  pushes to `main`.
 
 ## Versioning policy
 

@@ -80,14 +80,28 @@ jobs:
   ffi:
     name: UniFFI bindings
     runs-on: ubuntu-latest
-    # Catches binding breakage on every PR. The full Swift and Android packages
-    # are built by the Release workflow (run it manually for a dry run).
+    # Catches binding breakage cheaply. The Swift package is built and tested
+    # below; the Android AAR only in the Release workflow (manual dry run).
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked -p kith-ffi
       - run: scripts/gen-bindings.sh swift target/debug/libkith_ffi.so target/gen/swift
       - run: scripts/gen-bindings.sh kotlin target/debug/libkith_ffi.so target/gen/kotlin
+
+  swift:
+    name: Swift package
+    runs-on: macos-latest
+    # Same build as the release: XCFramework for iOS device, iOS simulator and
+    # macOS, then the package's tests against it. macOS runners are free for
+    # public repositories; in a private copy of this template, consider
+    # limiting this job to pushes to main.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/build-swift.sh
+      - run: swift test
+        working-directory: bindings/swift
 
   requirements:
     name: requirements
