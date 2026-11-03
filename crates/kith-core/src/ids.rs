@@ -78,10 +78,7 @@ byte_id!(
 impl ObjectId {
     /// Generate a new random object ID from the OS RNG.
     pub fn random() -> Self {
-        use rand_core::{OsRng, RngCore};
-        let mut b = [0u8; 16];
-        OsRng.fill_bytes(&mut b);
-        Self(b)
+        Self(crate::random_bytes())
     }
 }
 
