@@ -37,6 +37,8 @@ Use this when you want a separately branded and versioned sync stack.
    (default: the repository owner).
 5. Replace `docs/requirements/*.md` with your product's requirements, or keep
    them and add new areas. Keep the IDs stable after that.
+6. Reset [`PLAN.md`](../../PLAN.md) to your project's state (keep the structure; `CLAUDE.md`
+   tells agents to keep it current).
 
 ## Extension points
 

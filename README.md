@@ -86,6 +86,8 @@ built from `apps/relay-server/Dockerfile`.
 
 ## Status
 
+Current state, decisions and next steps: [PLAN.md](PLAN.md).
+
 Phase 1 skeleton. Working today: change envelope with signing and verification,
 history and fork detection, in-memory store, naive reconciliation, relay
 routing, and a relay server without authentication yet. See the
