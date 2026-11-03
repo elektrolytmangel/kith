@@ -25,7 +25,7 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -39,7 +39,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
       - run: cargo run --locked -p example-two-devices
@@ -48,7 +48,7 @@ jobs:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install "$MSRV" --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
@@ -60,7 +60,7 @@ jobs:
     name: wasm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - name: Core crates compile for wasm32 on their own
         run: |
@@ -71,7 +71,7 @@ jobs:
         with:
           tool: wasm-pack
       - run: scripts/build-wasm.sh web
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Smoke test the npm package
@@ -83,7 +83,7 @@ jobs:
     # Catches binding breakage cheaply. The Swift package is built and tested
     # below; the Android AAR only in the Release workflow (manual dry run).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked -p kith-ffi
       - run: scripts/gen-bindings.sh swift target/debug/libkith_ffi.so target/gen/swift
@@ -97,7 +97,7 @@ jobs:
     # public repositories; in a private copy of this template, consider
     # limiting this job to pushes to main.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - run: scripts/build-swift.sh
       - run: swift test
@@ -107,8 +107,8 @@ jobs:
     name: requirements
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python3 scripts/reqs.py
@@ -120,9 +120,9 @@ jobs:
     name: relay image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: apps/relay-server/Dockerfile
