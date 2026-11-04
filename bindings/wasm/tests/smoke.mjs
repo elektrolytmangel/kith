@@ -120,8 +120,18 @@ if (process.env.KITH_RELAY_BIN) {
     assert.equal(a.groupMembers(org).length, 2);
     await waitFor(evA, (e) => e.type === "presence" && e.online.length === 2, "b online with its certificate");
 
+    // Permissions: only admins write "config"; b is an editor. b first needs the
+    // policy, which arrives with its catch-up after joining.
+    await waitFor(evB, (e) => e.type === "syncReceived" && e.stored > 0, "b to catch up");
+    assert.equal(a.roleOf(org, a.deviceId()), "admin");
+    assert.equal(b.roleOf(org, b.deviceId()), "editor");
+    a.setWriteRule("config", "admin");
+    await waitFor(evB, (e) => e.type === "received" && e.from === a.deviceId(), "b to get the policy change");
+    assert.throws(() => b.create("config", new Uint8Array([1])), /not allowed/);
+    assert.throws(() => b.setWriteRule("config", "editor"), /not an admin/);
+
     const objectId = a.create("acme.note", new TextEncoder().encode("from a"));
-    const got = await waitFor(evB, (e) => e.type === "received", "b to receive a's change");
+    const got = await waitFor(evB, (e) => e.type === "received" && e.objectId === objectId, "b to receive a's change");
     assert.equal(got.objectId, objectId);
     assert.equal(got.from, a.deviceId());
     assert.equal(got.isNew, true);

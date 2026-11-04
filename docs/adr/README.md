@@ -12,7 +12,7 @@ Open questions from the design doc that are waiting for an ADR:
 - [x] Org identity, membership proofs, invitations (REQ-ID-003, REQ-INV-*, REQ-RELAY-004): [ADR 0005](0005-org-root-key-certificates-invites.md)
 - [x] 30 s relay buffer vs. "no persistence" (REQ-RELAY-005): no buffer (user, 2026-11-04); always-on client instead
 - [ ] Push token persistence (REQ-RELAY-007)
-- [ ] Rule for changes concurrent with a revocation (REQ-PERM-004)
+- [x] Rule for changes concurrent with a revocation (REQ-PERM-004): [ADR 0006](0006-policy-object-roles-revocation.md)
 - [ ] Always-on client required or optional
 - [ ] Root key recovery
 - [ ] Compaction policy (REQ-DATA-005)

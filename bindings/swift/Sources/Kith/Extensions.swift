@@ -102,12 +102,23 @@ public final class RelayConnection {
 
     /// Make a member an admin (only the org's creator can).
     public func grantAdmin(_ deviceId: String) throws {
-        send(try session.grantAdmin(device: deviceId))
+        for frame in try session.grantAdmin(device: deviceId) { send(frame) }
     }
 
     /// Remove a device from the org's group.
     public func removeMember(_ deviceId: String) throws {
-        send(try session.removeMember(device: deviceId))
+        for frame in try session.removeMember(device: deviceId) { send(frame) }
+    }
+
+    /// Set a member's role: "viewer", "editor" or "admin" (admin only from the
+    /// org's creator). Admins only.
+    public func setRole(_ deviceId: String, role: String) throws {
+        send(try session.setRole(device: deviceId, role: role))
+    }
+
+    /// Set the minimum role that may write objects of `objectType`. Admins only.
+    public func setWriteRule(_ objectType: String, role: String) throws {
+        send(try session.setWriteRule(objectType: objectType, role: role))
     }
 
     /// Rotate this device's group key; call it periodically (e.g. weekly).

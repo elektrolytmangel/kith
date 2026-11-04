@@ -478,16 +478,49 @@ impl RelaySession {
             .reject_claim(&self.org, &device);
     }
 
-    /// Make a member an admin (only the org's creator can). Send the returned frame.
-    pub fn grant_admin(&self, device: String) -> Result<Vec<u8>, KithError> {
+    /// Make a member an admin (only the org's creator can). Send the returned
+    /// frames in order.
+    pub fn grant_admin(&self, device: String) -> Result<Vec<Vec<u8>>, KithError> {
         let mut c = self.client.inner.lock().unwrap();
-        encode_frame(&c.grant_admin(&self.org, &device)?)
+        c.grant_admin(&self.org, &device)?
+            .iter()
+            .map(encode_frame)
+            .collect()
     }
 
-    /// Remove `device` (hex) from the org's group. Send the returned frame.
-    pub fn remove_member(&self, device: String) -> Result<Vec<u8>, KithError> {
+    /// Remove `device` (hex) from the org: out of the encrypted group and revoked
+    /// in the policy (admins only). Send the returned frames in order.
+    pub fn remove_member(&self, device: String) -> Result<Vec<Vec<u8>>, KithError> {
         let mut c = self.client.inner.lock().unwrap();
-        encode_frame(&c.remove_member(&self.org, &device)?)
+        c.remove_member(&self.org, &device)?
+            .iter()
+            .map(encode_frame)
+            .collect()
+    }
+
+    /// Set a member's role (`viewer`, `editor`, `admin`; admin only from the org's
+    /// creator). Admins only. Send the returned frame.
+    pub fn set_role(&self, device: String, role: String) -> Result<Vec<u8>, KithError> {
+        let role = parse_role(&role)?;
+        let mut c = self.client.inner.lock().unwrap();
+        let change = c.set_role(&self.org, &device, role)?;
+        encode_frame(&c.broadcast_frame(&self.org, &change)?)
+    }
+
+    /// Set the minimum role (`viewer`, `editor`, `admin`) that may write objects of
+    /// `object_type`. Admins only. Send the returned frame.
+    pub fn set_write_rule(&self, object_type: String, role: String) -> Result<Vec<u8>, KithError> {
+        let role = parse_role(&role)?;
+        let mut c = self.client.inner.lock().unwrap();
+        let change = c.set_write_rule(&self.org, &object_type, role)?;
+        encode_frame(&c.broadcast_frame(&self.org, &change)?)
+    }
+
+    /// A device's role: `viewer`, `editor`, `admin`, or `nil`/`null` if revoked.
+    pub fn role_of(&self, device: String) -> Result<Option<String>, KithError> {
+        let c = self.client.inner.lock().unwrap();
+        Ok(c.role_of(&self.org, &device)?
+            .map(|r| r.as_str().to_string()))
     }
 
     /// Rotate this device's group key (do it periodically, e.g. weekly). Send the
@@ -507,6 +540,12 @@ impl RelaySession {
         })?;
         encode_frame(&c.broadcast_frame(&self.org, &change)?)
     }
+}
+
+fn parse_role(s: &str) -> Result<kith_client::Role, KithError> {
+    kith_client::Role::parse(s).ok_or_else(|| KithError::Failed {
+        msg: format!("unknown role {s:?}: use viewer, editor or admin"),
+    })
 }
 
 fn encode_frame(f: &kith_protocol::Frame) -> Result<Vec<u8>, KithError> {
@@ -711,6 +750,24 @@ mod tests {
         out.replies[1..].to_vec()
     }
 
+    /// Relay `frames` sent by `first` back and forth until nobody replies.
+    fn bounce(
+        first: (&KithClient, &RelaySession),
+        second: (&KithClient, &RelaySession),
+        frames: Vec<Vec<u8>>,
+    ) {
+        let mut queue: Vec<(bool, Vec<u8>)> = frames.into_iter().map(|f| (true, f)).collect();
+        while let Some((from_first, f)) = queue.pop() {
+            let (from, to) = if from_first {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let out = relay_to(from.0, to.1, &f);
+            queue.extend(out.replies.into_iter().map(|r| (!from_first, r)));
+        }
+    }
+
     /// `a` created an org; sessions for it on `a` and `b` (not a member yet).
     fn pair() -> (
         Arc<KithClient>,
@@ -780,11 +837,31 @@ mod tests {
             rotate.event,
             Some(RelayEvent::GroupChanged { removed: false, .. })
         ));
-        let removal = relay_to(&a, &sb, &sa.remove_member(b.device_id()).unwrap());
+        // Roles: b first catches up (it gets the policy), then a demotes and removes it.
+        bounce((&b, &sb), (&a, &sa), vec![sb.catch_up().unwrap()]);
+        let demote = relay_to(
+            &a,
+            &sb,
+            &sa.set_role(b.device_id(), "viewer".into()).unwrap(),
+        );
+        assert!(matches!(demote.event, Some(RelayEvent::Received { .. })));
+        assert_eq!(
+            sb.role_of(b.device_id()).unwrap().as_deref(),
+            Some("viewer")
+        );
+        assert!(b.create("note".into(), b"no".to_vec()).is_err());
+        assert!(sa.set_role(b.device_id(), "boss".into()).is_err());
+        assert!(
+            sb.set_write_rule("note".into(), "viewer".into()).is_err(),
+            "not an admin"
+        );
+        let frames = sa.remove_member(b.device_id()).unwrap();
+        let removal = relay_to(&a, &sb, &frames[0]);
         assert!(matches!(
             removal.event,
             Some(RelayEvent::GroupChanged { removed: true, .. })
         ));
+        assert_eq!(sa.role_of(b.device_id()).unwrap(), None);
     }
 
     /// req: REQ-SYNC-003
@@ -801,19 +878,22 @@ mod tests {
         let served = relay_to(&b, &sa, &replies[0]);
         assert!(matches!(served.event, Some(RelayEvent::SyncServed { .. })));
         let compared = relay_to(&a, &sb, &served.replies[0]);
-        assert!(matches!(
-            compared.event,
-            Some(RelayEvent::SyncCompared { wanting: 2, .. })
-        ));
+        assert!(
+            matches!(
+                compared.event,
+                Some(RelayEvent::SyncCompared { wanting: 3, .. })
+            ),
+            "2 notes + the policy genesis"
+        );
         let asked = relay_to(&b, &sa, &compared.replies[0]);
         assert!(matches!(
             asked.event,
-            Some(RelayEvent::SyncReceived { requested: 2, .. })
+            Some(RelayEvent::SyncReceived { requested: 3, .. })
         ));
         let received = relay_to(&a, &sb, &asked.replies[0]);
         assert!(matches!(
             received.event,
-            Some(RelayEvent::SyncReceived { stored: 2, .. })
+            Some(RelayEvent::SyncReceived { stored: 3, .. })
         ));
         assert_eq!(b.history(created.object_id.clone()).unwrap().len(), 2);
         // And catch_up works the same way later: nothing to do now.
