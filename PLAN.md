@@ -57,7 +57,7 @@ Work top to bottom; check items off here as they land.
    - [ ] After merge, the user tags `v0.1.0-alpha.1`. The workflow marks versions with `-` as pre-release.
 2. **Repository settings** (need the owner or explicit approval):
    - [ ] Create label `requirement` (the Requirement issue form applies it; it doesn't exist).
-   - [ ] Branch protection on `main`: require the CI checks.
+   - [x] Branch protection on `main`: require the CI checks (done by the user 2026-11-04).
    - [ ] Enable private vulnerability reporting (Settings → Code security). Owner only.
    - [ ] Optional: mark the repository as a template.
 3. **Phase 1, Local core** (makes it usable in a real app). Start here, in this order
@@ -128,4 +128,5 @@ None right now.
   This plan written; user accepted the recommendations (alpha pre-release, phase 1 starts with store + key restore).
   macOS cancellations diagnosed; CI no longer cancels runs on `main`.
 - **2026-11-04**: Opened the `0.1.0-alpha.1` version-bump PR (Next steps 1). Next: user merges and tags.
+- **2026-11-04**: PR #13 merged. User set up branch protection on `main`.
 - **2026-11-04**: Added `SqliteStore` (PR `feat/sqlite-store`). Next: key restore in bindings, then store selection in constructors.
