@@ -21,9 +21,11 @@ Android receives it as `-Pversion` and Swift through the release tag.
    - builds the npm package and smoke-tests it in Node,
    - builds the XCFramework, tests the Swift package against it and packages it,
    - builds the Android AAR,
+   - builds the relay and always-on container images and pushes them to ghcr.io (`docker/Dockerfile`),
    - creates the GitHub Release with all of them, `SHA256SUMS` and generated notes.
 
-   The GitHub Release is the only publish target.
+   GitHub (the Release and GitHub Packages) is the only publish target. After the first release with
+   images, make both packages public once, see [deployment.md](deployment.md#publishing-the-images-maintainers).
 
 To build everything without publishing, run the workflow manually under
 *Actions → Release → Run workflow* with `dry_run` checked (the default). All

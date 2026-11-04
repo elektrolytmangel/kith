@@ -1,5 +1,6 @@
 # Builds every package at the version in Cargo.toml and attaches them to a
-# GitHub Release. Nothing is pushed to any other registry.
+# GitHub Release, and the relay and always-on container images to ghcr.io.
+# Nothing is pushed to any other registry.
 #
 # Triggers
 #   push tag vX.Y.Z           build + GitHub Release
@@ -207,8 +208,77 @@ jobs:
           name: android
           path: kith-android-*.aar
 
+  # Container images from the release binaries, on GitHub Packages (ghcr.io).
+  # A dry run builds them without pushing. The first push creates the packages
+  # as private; make them public once (see docs/guides/deployment.md).
+  containers:
+    needs: [verify, relay-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: kith-relay, target: relay }
+          - { image: kith-always-on, target: always-on }
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      PUSH: ${{ needs.verify.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: relay-*-unknown-linux-gnu
+          path: artifacts
+          merge-multiple: true
+      - name: Build context
+        run: |
+          mkdir -p ctx/amd64 ctx/arm64 ctx/data
+          touch ctx/data/.keep
+          for bin in kith-relay kith-always-on; do
+            tar -xzf "artifacts/$bin-x86_64-unknown-linux-gnu.tar.gz" -C ctx/amd64
+            tar -xzf "artifacts/$bin-aarch64-unknown-linux-gnu.tar.gz" -C ctx/arm64
+          done
+          cp docker/Dockerfile ctx/Dockerfile
+      - uses: docker/setup-buildx-action@v4
+      - name: Smoke test (amd64)
+        run: |
+          docker buildx build --platform linux/amd64 --target "${{ matrix.target }}" --load -t smoke ctx
+          if [ "${{ matrix.target }}" = relay ]; then
+            docker run -d --name smoke -p 8080:8080 smoke
+            for _ in $(seq 1 20); do curl -fsS localhost:8080/healthz && exit 0; sleep 1; done
+            docker logs smoke; exit 1
+          else
+            # No arguments: prints the usage and exits with 2, which proves the binary starts.
+            code=0; docker run --rm smoke --help || code=$?
+            [ "$code" = 2 ] || { echo "unexpected exit code $code"; exit 1; }
+          fi
+      - uses: docker/login-action@v4
+        if: env.PUSH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=${{ needs.verify.outputs.version }}
+            type=raw,value=latest,enable=${{ !contains(needs.verify.outputs.version, '-') }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: ctx
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
   github-release:
-    needs: [verify, relay-binaries, npm, swift, android]
+    needs: [verify, relay-binaries, containers, npm, swift, android]
     if: needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:

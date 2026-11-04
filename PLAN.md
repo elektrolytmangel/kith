@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (road to release agreed; CI skips docs-only PRs)
+- **Last updated:** 2026-11-04 (CI skips docs-only PRs, #47; container images in PR `feat/containers`)
 - **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices) under
   *Unreleased* in the changelog, for the next alpha.
 - **State of `main` (99f6acf, #44 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -94,7 +94,7 @@ Blockers, in suggested order:
 4. [ ] **Closing known gaps:** relay-level certificate revocation (REQ-INV-004), always-on client as the supported
    way to sync offline devices (push wake-ups REQ-RELAY-007 later), resumable large syncs (REQ-SYNC-005),
    history compaction (REQ-DATA-005; the web store keeps all history in memory).
-5. [ ] **Containers for the relay and the always-on client** (replaces "publish packages"; user decision
+5. [x] **Containers for the relay and the always-on client** (PR `feat/containers`; dry run of `release.yml` still to check) (replaces "publish packages"; user decision
    2026-11-04: nothing is published outside GitHub). Plan: `release.yml` builds a multi-arch image per binary from
    the release binaries (no Rust compile in the image) and pushes it to GitHub Packages (ghcr.io) with
    `GITHUB_TOKEN`; plus a `docker-compose.yml` example and a deployment guide. Chosen over "Dockerfile that
@@ -314,3 +314,6 @@ None.
 - **2026-11-04**: User asked what a proper release needs; proposal written under *Road to a release users can use*.
 - **2026-11-04**: User agreed the road to a release and replaced the package-registry step by containers on ghcr.io.
   First: CI skips docs-only changes (PR `ci/skip-docs-only`). Next: step 1 onwards (containers, then the rest).
+- **2026-11-04**: #47 merged (docs-only CI filter). Container images (PR `feat/containers`): `docker/Dockerfile`, `containers` job in
+  `release.yml` (ghcr.io, amd64+arm64, no `latest` for pre-releases), `deploy/docker-compose.yml`, deployment guide.
+  After the first release with images, the user makes the packages public once. Next: step 1 (compatibility policy), then 3.

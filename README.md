@@ -5,7 +5,8 @@ from each other through a relay that stores nothing.
 
 - **Library** for web (WASM/npm), iOS/macOS (Swift Package), Android (AAR),
   and desktop/Rust (crates).
-- **Generic relay** as a container image or embeddable Rust crate.
+- **Generic relay** and **always-on client** as container images (GitHub Packages, see the
+  [deployment guide](docs/guides/deployment.md)), or the relay as an embeddable Rust crate.
 - **Requirements as code**, with traceability checked in CI.
 
 > `kith` is a working name. `scripts/rename.py` rebrands the whole repository

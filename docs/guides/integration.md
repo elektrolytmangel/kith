@@ -342,7 +342,7 @@ Binaries are release assets (`kith-always-on-<target>.tar.gz`); in Rust, use the
 curl -fsSL https://github.com/elektrolytmangel/kith/releases/download/v0.1.0-alpha.2/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 ./kith-relay
 
-# or as a container, built from source
+# or as a container from GitHub Packages (docs/guides/deployment.md), or built from source
 docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 8080:8080 kith-relay
 
 # or embed kith_relay::RoutingTable in your own server
