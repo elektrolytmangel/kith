@@ -149,6 +149,15 @@ impl<S: Store> LiveClient<S> {
         Ok(change)
     }
 
+    /// Ask one online peer for the changes this device lacks, and offer it ours
+    /// (catch-up, REQ-SYNC-001..003). Works from an empty store (a new device).
+    /// The result arrives through [`next_event`](Self::next_event): `Event::Receipt`
+    /// (empty `delivered`: no peer online, try later), then `Event::SyncReceived`.
+    pub async fn catch_up(&mut self) -> Result<(), NetError> {
+        let frame = self.client.sync_request_frame(&self.org)?;
+        self.conn.send(&frame).await
+    }
+
     /// Wait for the next frame from the relay and handle it. Peers' changes are
     /// validated and stored (`Event::Received`); bad ones are reported as
     /// `Event::Rejected`. Returns `Ok(None)` once the relay closes the
@@ -156,12 +165,19 @@ impl<S: Store> LiveClient<S> {
     pub async fn next_event(&mut self) -> Result<Option<Event>, NetError> {
         match self.conn.recv().await? {
             None => Ok(None),
-            Some(frame) => match self.client.handle_frame(frame)? {
-                Event::RelayError { code, message } if is_fatal(&code) => {
-                    Err(NetError::Refused(format!("{code}: {message}")))
+            Some(frame) => {
+                let handled = self.client.handle_frame(frame)?;
+                // Catch-up replies (what a peer asked for) go out right away.
+                for reply in &handled.replies {
+                    self.conn.send(reply).await?;
                 }
-                ev => Ok(Some(ev)),
-            },
+                match handled.event {
+                    Event::RelayError { code, message } if is_fatal(&code) => {
+                        Err(NetError::Refused(format!("{code}: {message}")))
+                    }
+                    ev => Ok(Some(ev)),
+                }
+            }
         }
     }
 }
@@ -255,6 +271,61 @@ mod tests {
         })
         .await;
         assert_eq!(a.client().history(&oid).unwrap().len(), 2);
+    }
+
+    /// req: REQ-SYNC-003
+    /// req: REQ-SYNC-001
+    #[tokio::test]
+    async fn a_new_device_catches_up_from_an_online_peer() {
+        let url = relay().await;
+        // `a` has history from before it went online.
+        let mut seed = new_client();
+        let created = seed
+            .create(ObjectType::new("note"), b"v1".to_vec())
+            .unwrap();
+        let oid = created.body.object_id;
+        seed.edit(oid, b"v2".to_vec()).unwrap();
+        let mut a = LiveClient::connect(&url, "org", seed).await.unwrap();
+        // `a` keeps answering requests in the background.
+        let a_task = tokio::spawn(async move { while let Ok(Some(_)) = a.next_event().await {} });
+
+        let mut b = LiveClient::connect(&url, "org", new_client())
+            .await
+            .unwrap();
+        until(&mut b, |e| match e {
+            Event::Presence { online, .. } if online.len() == 2 => Some(()),
+            _ => None,
+        })
+        .await;
+        b.catch_up().await.unwrap();
+        let stored = until(&mut b, |e| match e {
+            Event::SyncReceived { stored, .. } => Some(stored),
+            _ => None,
+        })
+        .await;
+        assert_eq!(stored, 2);
+        assert_eq!(b.client().history(&oid).unwrap().len(), 2);
+        a_task.abort();
+    }
+
+    /// req: REQ-SYNC-001
+    #[tokio::test]
+    async fn catch_up_with_nobody_online_is_reported_not_an_error() {
+        let url = relay().await;
+        let mut only = LiveClient::connect(&url, "org", new_client())
+            .await
+            .unwrap();
+        until(&mut only, |e| {
+            matches!(e, Event::Presence { .. }).then_some(())
+        })
+        .await;
+        only.catch_up().await.unwrap();
+        let delivered = until(&mut only, |e| match e {
+            Event::Receipt { delivered } => Some(delivered),
+            _ => None,
+        })
+        .await;
+        assert!(delivered.is_empty());
     }
 
     /// req: REQ-SYNC-004

@@ -95,8 +95,19 @@ if (process.env.KITH_RELAY_BIN) {
     await waitFor(evA, (e) => e.type === "received" && e.from === b.deviceId(), "a to receive b's edit");
     assert.equal(a.historyLength(objectId), 2);
 
+    // Catch-up: a new device downloads the history from an online peer.
+    const evC = listen();
+    const c = new kith.KithClient();
+    c.connect(url, "org", (e) => evC.push(e));
+    await waitFor(evC, (e) => e.type === "presence" && e.online.length === 3, "c online");
+    c.catchUp();
+    await waitFor(evC, (e) => e.type === "syncReceived" && e.stored > 0, "c to catch up");
+    assert.equal(c.historyLength(objectId), 2);
+    assert.throws(() => new kith.KithClient().catchUp(), /not connected/);
+
     a.disconnect();
     b.disconnect();
+    c.disconnect();
     console.log("ok: live sync through the relay");
   } finally {
     relay.kill();

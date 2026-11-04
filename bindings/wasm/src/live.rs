@@ -71,6 +71,30 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "from", from);
             set(&o, "reason", reason);
         }
+        Event::SyncServed {
+            from,
+            sending,
+            wanting,
+        } => {
+            set(&o, "type", "syncServed");
+            set(&o, "from", from);
+            set(&o, "sending", sending as f64);
+            set(&o, "wanting", wanting as f64);
+        }
+        Event::SyncReceived {
+            from,
+            stored,
+            known,
+            rejected,
+            requested,
+        } => {
+            set(&o, "type", "syncReceived");
+            set(&o, "from", from);
+            set(&o, "stored", stored as f64);
+            set(&o, "known", known as f64);
+            set(&o, "rejected", rejected as f64);
+            set(&o, "requested", requested as f64);
+        }
         Event::Presence { org, online } => {
             set(&o, "type", "presence");
             set(&o, "org", org);
@@ -149,10 +173,13 @@ impl Live {
                     return;
                 }
                 // Release the borrow before calling into JS, which may call back into the client.
-                let event = client.borrow_mut().handle_frame(frame);
-                match event {
-                    Ok(ev) => {
-                        if let Some(o) = to_js(ev) {
+                let handled = client.borrow_mut().handle_frame(frame);
+                match handled {
+                    Ok(h) => {
+                        for reply in &h.replies {
+                            send_frame(&ws, reply);
+                        }
+                        if let Some(o) = to_js(h.event) {
                             emit(&on_event, o);
                         }
                     }
@@ -187,6 +214,16 @@ impl Live {
             _on_close: on_close,
             _on_error: on_error,
         })
+    }
+
+    /// Ask one online peer for the changes we lack and offer ours.
+    pub fn catch_up(&self, client: &SharedClient) -> Result<(), String> {
+        let frame = client
+            .borrow()
+            .sync_request_frame(&self.org)
+            .map_err(|e| e.to_string())?;
+        send_frame(&self.ws, &frame);
+        Ok(())
     }
 
     /// Tell the other online devices about a new local change.

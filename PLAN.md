@@ -23,7 +23,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 ### What the library can do today (phase 1 skeleton)
 
-Requirements: 9 implemented, 13 partial, 19 accepted/proposed.
+Requirements: 12 implemented, 10 partial, 19 accepted/proposed.
 
 Works: signed, hash-linked changes; per-object history and fork detection;
 in-memory store; device keys; naive reconciliation; relay routing table; relay
@@ -34,7 +34,7 @@ WebSocket server; the `create` / `edit` / `history` API on every platform.
 | Gap | Effect | Requirement |
 | --- | --- | --- |
 | `Transport` is only a trait; no WebSocket client | Clients can't talk to the relay | REQ-SYNC-004 |
-| Live sync reaches only online devices; bodies are plaintext | No catch-up, no confidentiality | REQ-SYNC-001..003, REQ-ENC-001 |
+| Sync needs another device online; ID exchange caps at ~32,000 changes; bodies are plaintext | Offline-only devices can't catch up; no confidentiality | REQ-RELAY-005, REQ-ENC-001 |
 | Relay checks device keys but not org membership proofs (any device can join any org id) | Don't expose it publicly | REQ-RELAY-004 |
 | No encryption (MLS) | Payloads are not end-to-end encrypted | REQ-ENC-001..004 |
 | Concurrent edits stay forked (no CRDT merge) | No conflict-free merging | REQ-DATA-004 |
@@ -85,7 +85,10 @@ Work top to bottom; check items off here as they land.
          Swift `RelayConnection` helper (PR `feat/ffi-live-sync`). The Swift/Kotlin glue is only compiled in CI, not run against a relay.
    - [ ] Expose merged state (REQ-DATA-004 in bindings;
          moved here from phase 1 because without sync an app cannot create a fork).
-5. **Phase 3, Catch-up sync**: finish REQ-SYNC-001..003.
+5. **Phase 3, Catch-up sync**:
+   - [x] REQ-SYNC-001..003 via `SyncRequest` → one online peer → `Offer` replies (PR `feat/catch-up-sync`; `crates/kith-client/src/sync.rs`). Rust, web, Swift/Kotlin.
+   - [ ] Replace the naive full-ID exchange with range-based reconciliation (Negentropy); today `SyncTooLarge` above ~32,000 changes.
+   - [ ] Offline peers: catch-up needs another device online (REQ-RELAY-005 buffer / always-on client are later phases).
 6. **Phase 4, Encryption (MLS / OpenMLS)**: REQ-ENC-001..004. **Required before any real user data.**
 7. Phases 5–8: invitations, permissions, files + always-on client, hardening (see requirements).
 
@@ -159,3 +162,4 @@ None right now.
 - **2026-11-04**: `kith-net` + `Client::handle_frame` live sync (PR `feat/live-sync`); relay now a lib + bin and sends a close frame. Next: browser WebSocket client, then bindings.
 - **2026-11-04**: Web live sync (`KithClient.connect`, PR `feat/web-live-sync`), smoke-tested against the real relay. Next: Swift/Kotlin connect, then phase 3 catch-up.
 - **2026-11-04**: Swift/Kotlin live sync via sans-IO `RelaySession` + Swift `RelayConnection` (PR `feat/ffi-live-sync`). Next: phase 3 catch-up sync (REQ-SYNC-001..003).
+- **2026-11-04**: Catch-up sync (PR `feat/catch-up-sync`): `sync_request_frame` + offers, `Handled` replies, all bindings; e2e test through the relay. Next: phase 4 (MLS) needs a design discussion (OpenMLS, key packages, ADR).

@@ -64,6 +64,17 @@ public final class RelayConnection {
         }
     }
 
+    /// Ask one online peer for the changes this device lacks and offer it ours. Call it
+    /// once a `.presence` event shows another device; use it on a new device to download
+    /// the history. Answers arrive as `.syncReceived` / `.syncServed` events.
+    public func catchUp() {
+        do {
+            send(try session.catchUp())
+        } catch {
+            onClose(error)
+        }
+    }
+
     /// Close the connection.
     public func stop() {
         task.cancel(with: .normalClosure, reason: nil)

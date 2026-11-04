@@ -103,6 +103,19 @@ impl KithClient {
         Ok(())
     }
 
+    /// Ask one online peer for the changes this device lacks and offer it ours
+    /// (catch-up). Use it after connecting, once a `presence` event shows another
+    /// device, and on a new device to download the full history. The peer's
+    /// answer arrives as `syncReceived` / `syncServed` events; a `receipt` with an
+    /// empty `delivered` list means nobody was online.
+    #[wasm_bindgen(js_name = catchUp)]
+    pub fn catch_up(&self) -> Result<(), JsError> {
+        match &self.live {
+            Some(live) => live.catch_up(&self.inner).map_err(|e| JsError::new(&e)),
+            None => Err(JsError::new("not connected: call connect first")),
+        }
+    }
+
     /// Close the relay connection, if any.
     pub fn disconnect(&mut self) {
         if let Some(live) = self.live.take() {
