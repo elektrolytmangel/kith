@@ -90,9 +90,11 @@ built from `apps/relay-server/Dockerfile`.
 
 Current state, decisions and next steps: [PLAN.md](PLAN.md).
 
-Phase 1 skeleton. Working today: change envelope with signing and verification,
-history and fork detection, in-memory store, naive reconciliation, relay
-routing, and a relay server without authentication yet. See the
+Alpha. Working today on Rust, web, Swift and Kotlin: signed change history, SQLite /
+IndexedDB persistence, JSON documents that merge (Automerge), live sync and catch-up
+(range-based reconciliation) through an authenticated relay, and end-to-end
+encryption with one MLS group per organization. Not yet: invitations, permissions,
+files, offline relay buffering. See the
 [traceability matrix](docs/requirements/TRACEABILITY.md) for per-requirement status.
 
 ## License

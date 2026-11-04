@@ -9,22 +9,21 @@
 //! **Inner** (plaintext of an MLS application message), `[kind][payload]`:
 //!
 //! - `Change`: one encoded change (live updates, REQ-SYNC-004).
-//! - `Have`: all change IDs the sender has. Sent as a `SyncRequest`, which the
-//!   relay hands to one online peer.
-//! - `Offer`: the changes the receiver of a `Have` lacks, plus the IDs the sender
-//!   of the offer wants back. Sent as a `Direct` to the requester, which answers
-//!   with a second `Offer` carrying what the partner wanted.
-//!
-//! The set comparison is the naive full-ID exchange of `kith_sync::diff`; the
-//! `Have` message therefore caps at about 32,000 changes per device until range
-//! based reconciliation (Negentropy) replaces it.
+//! - `Query` / `Reply`: rounds of range-based set reconciliation (Negentropy,
+//!   `kith_sync`). The first `Query` is sent as a `SyncRequest`, which the relay
+//!   hands to one online peer; the rest go `Direct`. The requester ends up knowing
+//!   what each side lacks (REQ-SYNC-001..003).
+//! - `Offer`: changes the receiver lacks, plus IDs the sender wants back. The
+//!   requester sends one when reconciliation is done; the partner answers with an
+//!   `Offer` carrying what was wanted.
 
 use kith_core::{Change, ChangeId, DeviceId};
-use kith_protocol::MAX_BODY_BYTES;
 
 const KIND_CHANGE: u8 = 1;
-const KIND_HAVE: u8 = 2;
+// 2 was the full-ID `Have` before range-based reconciliation.
 const KIND_OFFER: u8 = 3;
+const KIND_QUERY: u8 = 4;
+const KIND_REPLY: u8 = 5;
 
 /// Stay well below the frame limit: the body is JSON-encoded by the relay protocol
 /// only after this check, and one oversized change must not block the others.
@@ -151,7 +150,10 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
 /// A parsed inner (decrypted) message.
 pub(crate) enum Message {
     Change(Change),
-    Have(Vec<ChangeId>),
+    /// A reconciliation round from the requester.
+    Query(Vec<u8>),
+    /// The partner's answer to a `Query`.
+    Reply(Vec<u8>),
     Offer {
         want: Vec<ChangeId>,
         /// Encoded changes, decoded one by one so a bad one cannot hide the rest.
@@ -165,49 +167,58 @@ pub(crate) fn change_body(change: &Change) -> Vec<u8> {
     out
 }
 
-/// Largest number of IDs a `Have` can carry.
-pub(crate) const MAX_HAVE_IDS: usize = (MAX_BODY_BYTES - 5) / ChangeId::LEN;
-
-pub(crate) fn have_body(ids: &[ChangeId]) -> Vec<u8> {
-    let mut out = vec![KIND_HAVE];
-    put_ids(&mut out, ids);
+pub(crate) fn query_body(msg: &[u8]) -> Vec<u8> {
+    let mut out = vec![KIND_QUERY];
+    out.extend_from_slice(msg);
     out
 }
 
-/// One or more `Offer` bodies carrying `changes`, split to stay under the size
-/// limit. `want` goes into the first one. Always returns at least one body.
-/// Changes too large for a frame are skipped.
+pub(crate) fn reply_body(msg: &[u8]) -> Vec<u8> {
+    let mut out = vec![KIND_REPLY];
+    out.extend_from_slice(msg);
+    out
+}
+
+/// Most IDs one `Offer` asks for, so a long want list is split too.
+const MAX_WANT_IDS: usize = MAX_OFFER_BYTES / ChangeId::LEN;
+
+/// One or more `Offer` bodies carrying `changes` and asking for `want`, split to
+/// stay under the size limit. Always returns at least one body. Changes too large
+/// for a frame are skipped.
 pub(crate) fn offer_bodies(want: &[ChangeId], changes: &[Change]) -> Vec<Vec<u8>> {
     let mut bodies = Vec::new();
-    let mut want = Some(want);
+    let mut want_chunks = want.chunks(MAX_WANT_IDS);
     let mut batch: Vec<Vec<u8>> = Vec::new();
     let mut size = 0;
-    let mut flush = |batch: &mut Vec<Vec<u8>>, want: &mut Option<&[ChangeId]>| {
-        let mut out = vec![KIND_OFFER];
-        put_ids(&mut out, want.take().unwrap_or(&[]));
-        out.extend_from_slice(&(batch.len() as u32).to_be_bytes());
-        for c in batch.drain(..) {
-            out.extend_from_slice(&(c.len() as u32).to_be_bytes());
-            out.extend_from_slice(&c);
-        }
-        bodies.push(out);
-    };
     for c in changes {
         let enc = kith_store::codec::encode_change(c);
         if enc.len() > MAX_OFFER_BYTES {
             continue;
         }
         if size + enc.len() > MAX_OFFER_BYTES {
-            flush(&mut batch, &mut want);
+            bodies.push(offer_body(want_chunks.next().unwrap_or(&[]), &batch));
+            batch.clear();
             size = 0;
         }
         size += enc.len();
         batch.push(enc);
     }
-    if !batch.is_empty() || want.is_some() {
-        flush(&mut batch, &mut want);
+    if !batch.is_empty() || bodies.is_empty() {
+        bodies.push(offer_body(want_chunks.next().unwrap_or(&[]), &batch));
     }
+    bodies.extend(want_chunks.map(|chunk| offer_body(chunk, &[])));
     bodies
+}
+
+fn offer_body(want: &[ChangeId], changes: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = vec![KIND_OFFER];
+    put_ids(&mut out, want);
+    out.extend_from_slice(&(changes.len() as u32).to_be_bytes());
+    for c in changes {
+        out.extend_from_slice(&(c.len() as u32).to_be_bytes());
+        out.extend_from_slice(c);
+    }
+    out
 }
 
 fn put_ids(out: &mut Vec<u8>, ids: &[ChangeId]) {
@@ -224,7 +235,8 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
         KIND_CHANGE => {
             Message::Change(kith_store::codec::decode_change(rest).map_err(|e| e.to_string())?)
         }
-        KIND_HAVE => Message::Have(r.ids()?),
+        KIND_QUERY => Message::Query(rest.to_vec()),
+        KIND_REPLY => Message::Reply(rest.to_vec()),
         KIND_OFFER => {
             let want = r.ids()?;
             let n = r.u32()? as usize;
@@ -240,7 +252,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
         }
         other => return Err(format!("unknown message kind {other}")),
     };
-    if kind != KIND_CHANGE && !r.0.is_empty() {
+    if kind == KIND_OFFER && !r.0.is_empty() {
         return Err("trailing bytes".into());
     }
     Ok(msg)
@@ -285,20 +297,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn have_roundtrip_and_rejects_garbage() {
+    fn offer_roundtrip_and_rejects_garbage() {
         let ids = vec![ChangeId([1; 32]), ChangeId([2; 32])];
-        let Message::Have(back) = parse(&have_body(&ids)).unwrap() else {
-            panic!("have expected")
+        let body = offer_bodies(&ids, &[]).remove(0);
+        let Message::Offer { want, changes } = parse(&body).unwrap() else {
+            panic!("offer expected")
         };
-        assert_eq!(back, ids);
-        let body = have_body(&ids);
+        assert_eq!(want, ids);
+        assert!(changes.is_empty());
         for len in 0..body.len() {
             assert!(parse(&body[..len]).is_err(), "len {len}");
         }
         assert!(parse(&[]).is_err());
         assert!(parse(&[99, 0, 0, 0, 0]).is_err());
+        assert!(parse(&[2, 0, 0, 0, 0]).is_err(), "the old Have is gone");
         // Claims a billion IDs but carries none.
-        assert!(parse(&[KIND_HAVE, 0x3b, 0x9a, 0xca, 0x00]).is_err());
+        assert!(parse(&[KIND_OFFER, 0x3b, 0x9a, 0xca, 0x00]).is_err());
+        assert!(matches!(parse(&query_body(b"q")).unwrap(), Message::Query(q) if q == b"q"));
+        assert!(matches!(parse(&reply_body(b"r")).unwrap(), Message::Reply(r) if r == b"r"));
+    }
+
+    #[test]
+    fn long_want_lists_are_split() {
+        let want: Vec<ChangeId> = (0..40_000u32)
+            .map(|i| {
+                let mut b = [0; 32];
+                b[..4].copy_from_slice(&i.to_be_bytes());
+                ChangeId(b)
+            })
+            .collect();
+        let bodies = offer_bodies(&want, &[]);
+        assert!(bodies.len() >= 3);
+        let back: Vec<ChangeId> = bodies
+            .iter()
+            .flat_map(|b| match parse(b).unwrap() {
+                Message::Offer { want, .. } => want,
+                _ => panic!(),
+            })
+            .collect();
+        assert_eq!(back, want);
+        assert!(bodies.iter().all(|b| b.len() <= MAX_OFFER_BYTES + 16));
     }
 
     #[test]
@@ -331,8 +369,9 @@ mod tests {
     /// req: REQ-ENC-001
     #[test]
     fn plaintext_data_bodies_are_refused() {
-        let ids = vec![ChangeId([1; 32])];
-        assert!(parse_outer(&have_body(&ids)).is_err());
+        // Inner messages sent without MLS are refused by the outer parser.
+        assert!(parse_outer(&query_body(b"q")).is_err());
+        assert!(parse_outer(&reply_body(b"r")).is_err());
         assert!(parse_outer(&offer_bodies(&[], &[]).remove(0)).is_err());
     }
 

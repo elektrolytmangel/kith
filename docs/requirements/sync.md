@@ -19,11 +19,9 @@ Implemented as `sync_request_frame` → the relay picks one online peer
 Catch-up must reconcile sets of change IDs and transfer only missing changes,
 in both directions.
 
-Today the comparison is the naive exchange of all change IDs (`kith_sync::diff`), so a
-device can have about 32,000 changes before `sync_request_frame` refuses with
-`SyncTooLarge`. Replacing it with range-based reconciliation (Negentropy) keeps the
-same interface; it is the reason this is verified by tests but still on the roadmap
-(PLAN.md, phase 3 follow-up).
+The comparison is range-based set reconciliation (Negentropy, `kith_sync::Reconciliation`):
+traffic grows with the difference, not the history, every message stays under 256 KiB,
+and there is no limit on the number of changes.
 
 ### REQ-SYNC-003: Join from empty
 

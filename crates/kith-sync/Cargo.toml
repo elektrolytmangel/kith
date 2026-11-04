@@ -13,3 +13,5 @@ workspace = true
 
 [dependencies]
 kith-core.workspace = true
+negentropy.workspace = true
+thiserror.workspace = true

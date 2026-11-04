@@ -240,8 +240,12 @@ pub enum RelayEvent {
         from: String,
         reason: String,
     },
-    /// We answered a peer's catch-up request (sent what it lacks, asked for what we lack).
-    SyncServed {
+    /// We answered a round of a peer's catch-up request.
+    SyncServed { from: String },
+    /// Our catch-up is reconciled: we sent `from` the `sending` changes it lacks and
+    /// asked for the `wanting` changes we lack (they arrive as `SyncReceived`).
+    /// Both zero: in sync with that peer.
+    SyncCompared {
         from: String,
         sending: u64,
         wanting: u64,
@@ -442,11 +446,12 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
             is_new,
         },
         Event::Rejected { org, from, reason } => RelayEvent::Rejected { org, from, reason },
-        Event::SyncServed {
+        Event::SyncServed { from } => RelayEvent::SyncServed { from },
+        Event::SyncCompared {
             from,
             sending,
             wanting,
-        } => RelayEvent::SyncServed {
+        } => RelayEvent::SyncCompared {
             from,
             sending: sending as u64,
             wanting: wanting as u64,
@@ -695,26 +700,38 @@ mod tests {
         let created = a.create("note".into(), b"v1".to_vec()).unwrap();
         a.edit(created.object_id.clone(), b"v2".to_vec()).unwrap();
 
-        // Joining asks for the history on its own; a answers, b stores.
+        // Joining asks for the history on its own: a answers the reconciliation,
+        // b asks for the 2 changes it lacks, a sends them.
         let replies = join(&a, &sa, &b, &sb);
         assert_eq!(replies.len(), 1);
         let served = relay_to(&b, &sa, &replies[0]);
+        assert!(matches!(served.event, Some(RelayEvent::SyncServed { .. })));
+        let compared = relay_to(&a, &sb, &served.replies[0]);
         assert!(matches!(
-            served.event,
-            Some(RelayEvent::SyncServed { sending: 2, .. })
+            compared.event,
+            Some(RelayEvent::SyncCompared { wanting: 2, .. })
         ));
-        assert_eq!(served.replies.len(), 1);
-        let received = relay_to(&a, &sb, &served.replies[0]);
+        let asked = relay_to(&b, &sa, &compared.replies[0]);
+        assert!(matches!(
+            asked.event,
+            Some(RelayEvent::SyncReceived { requested: 2, .. })
+        ));
+        let received = relay_to(&a, &sb, &asked.replies[0]);
         assert!(matches!(
             received.event,
             Some(RelayEvent::SyncReceived { stored: 2, .. })
         ));
         assert_eq!(b.history(created.object_id.clone()).unwrap().len(), 2);
-        // And catch_up works the same way later.
+        // And catch_up works the same way later: nothing to do now.
         let served = relay_to(&b, &sa, &sb.catch_up().unwrap());
+        let compared = relay_to(&a, &sb, &served.replies[0]);
         assert!(matches!(
-            served.event,
-            Some(RelayEvent::SyncServed { sending: 0, .. })
+            compared.event,
+            Some(RelayEvent::SyncCompared {
+                sending: 0,
+                wanting: 0,
+                ..
+            })
         ));
     }
 

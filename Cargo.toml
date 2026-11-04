@@ -38,6 +38,8 @@ automerge = "0.12"
 rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.11"
 hex = "0.4"
+# Range-based set reconciliation for catch-up (REQ-SYNC-002); sans-IO, no dependencies.
+negentropy = "0.5"
 # Keys are created from getrandom bytes (kith_core::random_bytes), so no RNG trait
 # crate is needed and rand_core majors in ed25519-dalek do not affect us.
 ed25519-dalek = "3"

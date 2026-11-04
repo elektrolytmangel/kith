@@ -44,7 +44,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | A device added by the losing side of an MLS fork must be admitted again | Rare (two admins at once); app sees `JoinRequested` | ADR 0004 |
 | Relay checks device keys but not org membership proofs (any device can join any org id) | Don't expose it publicly | REQ-RELAY-004 |
 | No permission checks on incoming changes | Any device can write anything | REQ-PERM-002 |
-| Sync needs another device online; ID exchange caps at ~32,000 changes per device (`SyncTooLarge`) | Offline-only devices can't catch up | REQ-RELAY-005, REQ-SYNC-002 |
+| Sync needs another device online | Offline-only devices can't catch up | REQ-RELAY-005 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
 
 Fine for: building and testing an integration. Not fine for: any real user data.
@@ -72,8 +72,8 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
      losing commit added must be admitted again (app sees `JoinRequested`). Periodic `rotate_key` stays app-driven.
 2. [x] **Merged state in the bindings** (REQ-DATA-004): JSON documents (`createDocument`, `updateDocument` with RFC 7396
    merge patches, `documentJson`) on all platforms (PR `feat/documents`). wasm: 1.97 MB → 3.18 MB with Automerge.
-3. **Phase 3 follow-ups**: replace the naive full-ID exchange with range-based reconciliation (Negentropy, same
-   interface in `kith-sync`); offline peers (REQ-RELAY-005 buffer or an always-on client, phase 7).
+3. **Phase 3 follow-ups**: [x] range-based reconciliation (Negentropy in `kith-sync`, PR `feat/negentropy`);
+   [ ] offline peers (REQ-RELAY-005 buffer or an always-on client, phase 7; needs the user's decision, see *Open questions*).
 4. **Phases 5-8**: invitations + org root key (then relay membership proofs, REQ-RELAY-004), permissions
    (REQ-PERM-002), files + always-on client, hardening (see requirements).
 5. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
@@ -82,7 +82,9 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 
 ### Open questions for the user
 
-- Release a `v0.1.0-alpha.2` now, or wait for encryption?
+- Release a `v0.1.0-alpha.2` now? Encryption, documents and range-based catch-up are on `main` (tags stay the user's).
+- Offline peers (REQ-RELAY-005): a short RAM buffer in the relay (e.g. 30 s) vs. strictly "no persistence" and
+  relying on an always-on client (phase 7)?
 
 ### Open issues
 
@@ -175,3 +177,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: #28 merged. Client + bindings on MLS (PR `feat/mls-client`): encrypted bodies, join flow, commit catch-up, re-add, `Store` meta. Smoke test (web, real relay) passes locally. Next: 4d or REQ-DATA-004 bindings.
 - **2026-11-04**: MLS fork resolution (PR `feat/mls-forks`): lower committer ID wins, losers re-added; tests cover both orders and a device that missed the winning commit. Next: REQ-DATA-004 merged state in bindings.
 - **2026-11-04**: JSON documents in all bindings (PR `feat/documents`), wasm 3.18 MB. Next: phase 3 follow-ups (Negentropy).
+- **2026-11-04**: Negentropy reconciliation replaces the full-ID exchange (PR `feat/negentropy`); new `SyncCompared` event. Next: phase 5 invitations (design questions first).

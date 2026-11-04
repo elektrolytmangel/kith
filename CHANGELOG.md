@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Changed
+- Catch-up uses range-based set reconciliation (Negentropy, `kith_sync::Reconciliation` / `respond`)
+  instead of exchanging all change IDs: no more ~32,000-change limit (`ClientError::SyncTooLarge` is
+  gone), traffic grows with the difference. `Event::SyncServed` no longer has counts; the requester
+  gets the new `Event::SyncCompared { sending, wanting }` (both 0: in sync). Offers split long want
+  lists. Inner body kinds: `2` (have) replaced by `4` (query) / `5` (reply).
+
 ### Added
 - JSON documents in all bindings (REQ-DATA-004): `createDocument`, `updateDocument` (RFC 7396 merge
   patch) and `documentJson` on web, Swift and Kotlin; `Client::create_document`, `update_document`,
