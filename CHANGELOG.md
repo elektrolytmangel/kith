@@ -5,6 +5,17 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Catch-up sync (REQ-SYNC-001..003): a returning or new device asks one online peer for what it
+  lacks and offers what the peer lacks (`Client::sync_request_frame`; answers through
+  `Client::handle_frame`, which now returns `Handled { event, replies }`). `LiveClient::catch_up` (Rust),
+  `client.catchUp()` (web), `RelaySession.catchUp()` and `RelayConnection.catchUp()` (Swift/Kotlin).
+  The ID comparison is still the naive full-set exchange (about 32,000 changes per device).
+
+### Changed
+- Relay frame bodies now start with a kind byte (`1` change, `2` have, `3` offer). Not compatible
+  with 0.1.0-alpha.1 clients (alpha; the relay itself is unaffected, it never reads bodies).
+
+### Added
 - Swift/Kotlin: `KithClient.relaySession(org)` → `RelaySession` (`hello`, `receive`, `broadcast`) for live sync;
   the app owns the WebSocket. Swift: `RelayConnection` on `URLSessionWebSocketTask`. `kith_client::handshake_reply`
   is shared by the web and UniFFI bindings (REQ-SYNC-004).

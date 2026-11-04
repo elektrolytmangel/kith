@@ -48,8 +48,15 @@ client.connect("wss://relay.example.com/v1/ws", "my-org", (e) => {
 client.create("acme.note", bytes); // now also broadcast to the other online devices
 ```
 
-Only devices that are online at the same time are reached, and message bodies are
-not encrypted yet (phase 4); don't use it for real user data. Node 22+ has a global
+Catch up on changes made while this device was offline (and download the history on a
+new device) by asking one online peer; the answer arrives as `syncReceived` events:
+
+```ts
+client.catchUp(); // after connecting, once a "presence" event shows another device
+```
+
+Live updates only reach devices that are online at the same time, and message bodies
+are not encrypted yet (phase 4); don't use it for real user data. Node 22+ has a global
 `WebSocket`; older Node needs a polyfill.
 
 Bundlers: build with `scripts/build-wasm.sh bundler` for webpack and Vite
@@ -84,7 +91,9 @@ let change = try client.create(type: "acme.note", text: "hi")
 conn.broadcast(change)   // to the other online devices
 ```
 
-Only devices that are online at the same time are reached, and message bodies are not
+Call `conn.catchUp()` once a `.presence` event shows another device to download what this
+device missed (or the whole history on a new device); answers arrive as `.syncReceived`
+events. Live updates only reach devices online at the same time, and message bodies are not
 encrypted yet (phase 4); don't use it for real user data.
 
 Keep the device key in the Keychain: after the first launch save
@@ -128,7 +137,9 @@ val ws = okHttp.newWebSocket(Request.Builder().url("wss://relay.example.com/v1/w
 ws.send(session.broadcast(change.changeId).toByteString())
 ```
 
-Same limits as above (online devices only, not encrypted yet).
+Catch up with `ws.send(session.catchUp().toByteString())` once a `RelayEvent.Presence` shows
+another device (answers come back through `receive` as `RelayEvent.SyncReceived`). Same
+limits as above (online devices only, not encrypted yet).
 
 Keep the device key in the Android Keystore: save `client.secretKey()` (encrypted with a
 Keystore key) and restore with `KithClient.withSecretKey(bytes)`.

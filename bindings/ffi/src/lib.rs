@@ -177,6 +177,21 @@ pub enum RelayEvent {
         from: String,
         reason: String,
     },
+    /// We answered a peer's catch-up request (sent what it lacks, asked for what we lack).
+    SyncServed {
+        from: String,
+        sending: u64,
+        wanting: u64,
+    },
+    /// A peer sent changes for catch-up: `stored` are new. `requested` is how many it
+    /// asked us to send back (the replies are in `SessionOutput.replies`).
+    SyncReceived {
+        from: String,
+        stored: u64,
+        known: u64,
+        rejected: u64,
+        requested: u64,
+    },
     /// Devices currently online in an organization.
     Presence { org: String, online: Vec<String> },
     /// Which devices a broadcast of ours reached.
@@ -237,10 +252,25 @@ impl RelaySession {
                 event: None,
             });
         }
+        let handled = c.handle_frame(frame)?;
         Ok(SessionOutput {
-            replies: vec![],
-            event: relay_event(c.handle_frame(frame)?),
+            replies: handled
+                .replies
+                .iter()
+                .map(encode_frame)
+                .collect::<Result<_, _>>()?,
+            event: relay_event(handled.event),
         })
+    }
+
+    /// The frame that asks one online peer for the changes this device lacks and
+    /// offers it ours (catch-up). Send it after the connection is up (for example
+    /// once a `Presence` event shows another device); also use it on a new device
+    /// to download the full history. The relay's `Receipt` event has an empty
+    /// `delivered` list if nobody was online. Answers arrive through `receive`.
+    pub fn catch_up(&self) -> Result<Vec<u8>, KithError> {
+        let c = self.client.inner.lock().unwrap();
+        encode_frame(&c.sync_request_frame(&self.org)?)
     }
 
     /// The frame that tells the other online devices about a local change
@@ -275,6 +305,28 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
             is_new,
         },
         Event::Rejected { org, from, reason } => RelayEvent::Rejected { org, from, reason },
+        Event::SyncServed {
+            from,
+            sending,
+            wanting,
+        } => RelayEvent::SyncServed {
+            from,
+            sending: sending as u64,
+            wanting: wanting as u64,
+        },
+        Event::SyncReceived {
+            from,
+            stored,
+            known,
+            rejected,
+            requested,
+        } => RelayEvent::SyncReceived {
+            from,
+            stored: stored as u64,
+            known: known as u64,
+            rejected: rejected as u64,
+            requested: requested as u64,
+        },
         Event::Presence { org, online } => RelayEvent::Presence { org, online },
         Event::Receipt { delivered } => RelayEvent::Receipt { delivered },
         Event::RelayError { code, message } => RelayEvent::RelayError { code, message },
@@ -399,6 +451,51 @@ mod tests {
         }
         assert_eq!(b.history(created.object_id).unwrap().len(), 1);
         assert!(sa.broadcast("00".repeat(32)).is_err(), "unknown change");
+    }
+
+    /// Deliver a frame one session sent to the other, as the relay would.
+    fn relay_to(from: &KithClient, to: &RelaySession, frame: &[u8]) -> SessionOutput {
+        use kith_protocol::Frame;
+        let (Frame::SyncRequest { org, body }
+        | Frame::Broadcast { org, body }
+        | Frame::Direct { org, body, .. }) = kith_protocol::decode(frame).unwrap()
+        else {
+            panic!("frame with a body expected")
+        };
+        let deliver = Frame::Deliver {
+            org,
+            from: from.device_id(),
+            body,
+        };
+        to.receive(kith_protocol::encode(&deliver).unwrap())
+            .unwrap()
+    }
+
+    /// req: REQ-SYNC-003
+    #[test]
+    fn catch_up_downloads_the_history_into_an_empty_client() {
+        let a = Arc::new(KithClient::new());
+        let b = Arc::new(KithClient::new());
+        let (sa, sb) = (
+            a.clone().relay_session("org".into()),
+            b.clone().relay_session("org".into()),
+        );
+        let created = a.create("note".into(), b"v1".to_vec()).unwrap();
+        a.edit(created.object_id.clone(), b"v2".to_vec()).unwrap();
+
+        // b asks, a answers, b stores.
+        let served = relay_to(&b, &sa, &sb.catch_up().unwrap());
+        assert!(matches!(
+            served.event,
+            Some(RelayEvent::SyncServed { sending: 2, .. })
+        ));
+        assert_eq!(served.replies.len(), 1);
+        let received = relay_to(&a, &sb, &served.replies[0]);
+        assert!(matches!(
+            received.event,
+            Some(RelayEvent::SyncReceived { stored: 2, .. })
+        ));
+        assert_eq!(b.history(created.object_id).unwrap().len(), 2);
     }
 
     /// req: REQ-SYNC-004
