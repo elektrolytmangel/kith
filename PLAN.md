@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (REQ-ID-002 merged, #44; alpha.2 released)
+- **Last updated:** 2026-11-04 (REQ-ID-002 merged, #44; alpha.2 released; road-to-release proposal added)
 - **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices) under
   *Unreleased* in the changelog, for the next alpha.
 - **State of `main` (99f6acf, #44 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -76,6 +76,25 @@ Work top to bottom; check items off here as they land.
    (REQ-SYNC-004 partial); the remaining `partial` platform requirements (REQ-PLAT-002..005, REQ-RELAY-001);
    mark the repository as a template (owner only). The next step needs the user's pick (nothing else is
    unblocked): the platform requirements, or one of the deferred items.
+
+### Road to a release users can use (proposal 2026-11-04, awaiting the user's pick)
+
+Blockers, in suggested order:
+
+1. [ ] **Security review** of the crypto and protocol (MLS use, certificates, policy, backups, relay). Nothing is
+   claimed safe for real data until this is done.
+2. [ ] **Compatibility promise:** versioned wire/storage formats with migrations (alpha.1 data already breaks on
+   `main`), a stated semver policy, and the first non-alpha version number.
+3. [ ] **Run on real devices:** Swift/Kotlin live-sync glue against a relay (REQ-SYNC-004), the `partial` platform
+   requirements (REQ-PLAT-002..005, REQ-RELAY-001).
+4. [ ] **Closing known gaps:** relay-level certificate revocation (REQ-INV-004), always-on client as the supported
+   way to sync offline devices (push wake-ups REQ-RELAY-007 later), resumable large syncs (REQ-SYNC-005),
+   history compaction (REQ-DATA-005; the web store keeps all history in memory).
+5. [ ] **Distribution:** today only GitHub Releases (tarball, XCFramework, AAR). App developers will expect
+   `npm install`, Swift Package Manager by URL and Maven coordinates. Needs the user to revisit the
+   "GitHub Releases only" decision.
+6. [ ] **Docs for adopters:** per-platform getting started, a small example app, relay deployment guide (TLS,
+   limits, always-on client), threat model and the known limits above.
 
 ### Completed phases (reference)
 
@@ -284,3 +303,4 @@ None.
   Implemented own devices (PR `feat/own-devices`, ADR 0011). Next: merge when CI is green; then the small items.
 - **2026-11-04**: #44 merged (REQ-ID-002, all 11 checks green). The user merged #42 and tagged `v0.1.0-alpha.2`.
   PLAN updated. Next: small items or a deferred item, user's choice.
+- **2026-11-04**: User asked what a proper release needs; proposal written under *Road to a release users can use*.
