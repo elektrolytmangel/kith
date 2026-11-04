@@ -23,10 +23,14 @@ devices received them.
 
 ### REQ-RELAY-004: Device authentication and membership proofs
 
-- **Priority:** must | **Phase:** 2 | **Status:** accepted | **Verify:** test | **Source:** design §Connection
+- **Priority:** must | **Phase:** 2 | **Status:** partial | **Verify:** test | **Source:** design §Connection
 
 Devices must prove key ownership by signing a server challenge and announce
 organizations with proofs the relay can check without decrypting anything.
+
+Done: challenge/response with the device key (nothing else is accepted before it,
+unauthenticated connections time out, a reconnecting device replaces its old
+connection). Open: checking membership proofs against the org root key (phase 5).
 
 ### REQ-RELAY-005: Handover buffer
 

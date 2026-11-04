@@ -8,7 +8,7 @@
 mod change;
 mod ids;
 
-pub use change::{Change, ChangeError, Signer, UnsignedChange};
+pub use change::{Change, ChangeError, Signer, UnsignedChange, verify_signature};
 pub use ids::{ChangeId, DeviceId, IdError, ObjectId, ObjectType};
 
 /// `N` bytes from the operating system's secure random number generator

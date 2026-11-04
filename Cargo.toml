@@ -41,7 +41,9 @@ hex = "0.4"
 # Keys are created from getrandom bytes (kith_core::random_bytes), so no RNG trait
 # crate is needed and rand_core majors in ed25519-dalek do not affect us.
 ed25519-dalek = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 axum = { version = "0.8", features = ["ws"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -127,6 +127,18 @@ pub enum CodecError {
     TooLarge(usize),
 }
 
+/// The bytes a device signs to answer a [`Frame::Challenge`]: a domain tag, the
+/// device ID and the nonce (both as sent on the wire). The tag keeps the signature
+/// from being valid for anything else, such as a change.
+pub fn auth_message(device: &str, nonce: &str) -> Vec<u8> {
+    let mut m = Vec::with_capacity(32 + device.len() + nonce.len());
+    m.extend_from_slice(b"kith/relay-auth/v1\0");
+    m.extend_from_slice(device.as_bytes());
+    m.push(0);
+    m.extend_from_slice(nonce.as_bytes());
+    m
+}
+
 /// Serialize a frame for the wire.
 pub fn encode(frame: &Frame) -> Result<Vec<u8>, CodecError> {
     if let Some(n) = body_len(frame).filter(|n| *n > MAX_BODY_BYTES) {
@@ -166,6 +178,13 @@ mod tests {
             body: vec![1, 2, 3],
         };
         assert_eq!(decode(&encode(&f).unwrap()).unwrap(), f);
+    }
+
+    #[test]
+    fn auth_message_binds_device_and_nonce() {
+        assert_ne!(auth_message("a", "n"), auth_message("b", "n"));
+        assert_ne!(auth_message("a", "n"), auth_message("a", "m"));
+        assert_ne!(auth_message("ab", "c"), auth_message("a", "bc"));
     }
 
     /// req: REQ-RELAY-006
