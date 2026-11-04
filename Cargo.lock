@@ -765,6 +765,7 @@ name = "kith-ffi"
 version = "0.1.0-alpha.1"
 dependencies = [
  "kith-client",
+ "kith-store",
  "thiserror",
  "uniffi",
 ]

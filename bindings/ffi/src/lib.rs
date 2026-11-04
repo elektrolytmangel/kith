@@ -8,7 +8,8 @@
 
 use std::sync::Mutex;
 
-use kith_client::{Client, DeviceKey, MemoryStore, ObjectId, ObjectType};
+use kith_client::{Client, DeviceKey, MemoryStore, ObjectId, ObjectType, Store};
+use kith_store::SqliteStore;
 
 uniffi::setup_scaffolding!();
 
@@ -27,7 +28,29 @@ macro_rules! into_kith_error {
         }
     )*};
 }
-into_kith_error!(kith_client::ClientError, kith_client::IdError);
+into_kith_error!(
+    kith_client::ClientError,
+    kith_client::IdError,
+    kith_client::StoreError
+);
+
+type DynStore = Box<dyn Store + Send>;
+
+fn seed_from(secret_key: Vec<u8>) -> Result<DeviceKey, KithError> {
+    let seed: [u8; 32] = secret_key
+        .try_into()
+        .map_err(|v: Vec<u8>| KithError::Failed {
+            msg: format!("secret key must be 32 bytes, got {}", v.len()),
+        })?;
+    Ok(DeviceKey::from_secret_bytes(&seed))
+}
+
+/// A new random 32-byte device secret key. Save it in the platform's secure
+/// storage before first use, then pass it to `KithClient.open`.
+#[uniffi::export]
+pub fn generate_secret_key() -> Vec<u8> {
+    DeviceKey::generate().secret_bytes().to_vec()
+}
 
 /// Library version.
 #[uniffi::export]
@@ -62,7 +85,7 @@ impl From<kith_client::Change> for ChangeInfo {
 /// Client handle exposed to Swift/Kotlin.
 #[derive(uniffi::Object)]
 pub struct KithClient {
-    inner: Mutex<Client<MemoryStore>>,
+    inner: Mutex<Client<DynStore>>,
 }
 
 #[uniffi::export]
@@ -71,11 +94,14 @@ impl KithClient {
     ///
     /// The identity is lost when the client is dropped unless the app saves
     /// `secret_key()` and restores it with `with_secret_key`.
-    /// TODO(phase 1): database path / store selection.
+    /// For persistence use `open`.
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Client::new(DeviceKey::generate(), MemoryStore::new())),
+            inner: Mutex::new(Client::new(
+                DeviceKey::generate(),
+                Box::new(MemoryStore::new()),
+            )),
         }
     }
 
@@ -83,16 +109,22 @@ impl KithClient {
     /// (as returned by `secret_key()`), with an in-memory store.
     #[uniffi::constructor]
     pub fn with_secret_key(secret_key: Vec<u8>) -> Result<Self, KithError> {
-        let seed: [u8; 32] = secret_key
-            .try_into()
-            .map_err(|v: Vec<u8>| KithError::Failed {
-                msg: format!("secret key must be 32 bytes, got {}", v.len()),
-            })?;
         Ok(Self {
             inner: Mutex::new(Client::new(
-                DeviceKey::from_secret_bytes(&seed),
-                MemoryStore::new(),
+                seed_from(secret_key)?,
+                Box::new(MemoryStore::new()),
             )),
+        })
+    }
+
+    /// Persistent client: SQLite database at `db_path` (created if missing)
+    /// and the device identity from `secret_key`. Reopening the same path with
+    /// the same key restores all data and the identity.
+    #[uniffi::constructor]
+    pub fn open(db_path: String, secret_key: Vec<u8>) -> Result<Self, KithError> {
+        let store = SqliteStore::open(db_path)?;
+        Ok(Self {
+            inner: Mutex::new(Client::new(seed_from(secret_key)?, Box::new(store))),
         })
     }
 
@@ -147,6 +179,41 @@ mod tests {
         let c = b.create("note".into(), b"x".to_vec()).unwrap();
         assert_eq!(c.author, a.device_id());
         assert_ne!(KithClient::new().device_id(), a.device_id());
+    }
+
+    /// req: REQ-PLAT-002
+    /// req: REQ-STORE-001
+    #[test]
+    fn open_persists_data_and_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "kith-ffi-{}",
+            generate_secret_key()[0..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kith.db").to_string_lossy().into_owned();
+        let key = generate_secret_key();
+
+        let first = KithClient::open(path.clone(), key.clone()).unwrap();
+        let created = first.create("note".into(), b"v1".to_vec()).unwrap();
+        first
+            .edit(created.object_id.clone(), b"v2".to_vec())
+            .unwrap();
+        let device = first.device_id();
+        drop(first);
+
+        let second = KithClient::open(path, key).unwrap();
+        assert_eq!(second.device_id(), device);
+        assert_eq!(second.history(created.object_id).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn open_rejects_bad_key_and_bad_path() {
+        assert!(KithClient::open("/nonexistent-dir/x.db".into(), generate_secret_key()).is_err());
+        assert!(KithClient::open(":memory:".into(), vec![1; 5]).is_err());
     }
 
     /// req: REQ-PLAT-002

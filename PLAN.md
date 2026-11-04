@@ -33,7 +33,7 @@ WebSocket server; the `create` / `edit` / `history` API on every platform.
 
 | Gap | Effect | Requirement |
 | --- | --- | --- |
-| Bindings still use the in-memory store (`SqliteStore` exists in Rust but is not wired in; web needs IndexedDB) | Data lost on restart | REQ-STORE-001 |
+| Web package still uses the in-memory store (needs IndexedDB; Swift/Kotlin persist via `KithClient.open`) | Web data lost on reload | REQ-STORE-001 |
 | `Transport` is only a trait; no WebSocket client | Clients can't talk to the relay | REQ-SYNC-004 |
 | Relay has no device authentication | Don't expose it publicly | REQ-RELAY-004 |
 | No encryption (MLS) | Payloads are not end-to-end encrypted | REQ-ENC-001..004 |
@@ -67,7 +67,8 @@ Work top to bottom; check items off here as they land.
    - [ ] REQ-STORE-001, web: IndexedDB store for the web package.
    - [x] Key restore in bindings: `secretKey()` / `withSecretKey(...)` in `bindings/ffi` and `bindings/wasm`
          (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`). PR `feat/key-restore`.
-   - [ ] Database path / store selection in the binding constructors (`TODO(phase 1)` in `bindings/ffi/src/lib.rs`, `bindings/wasm/src/lib.rs`).
+   - [x] Store selection, Swift/Kotlin: `KithClient.open(dbPath, secretKey)` + `generateSecretKey()` (PR `feat/ffi-sqlite`).
+         Web: remains the `TODO(phase 1)` in `bindings/wasm/src/lib.rs` until the IndexedDB store exists.
    - [ ] REQ-DATA-004: Automerge objects so concurrent edits merge.
 4. **Phase 2, Relay and live sync**: WebSocket `Transport` (tokio native, browser WebSocket on web),
    REQ-RELAY-004 device auth (challenge/response in `apps/relay-server/src/main.rs` TODOs), REQ-SYNC-004 live updates.
@@ -130,3 +131,4 @@ None right now.
 - **2026-11-04**: PR #13 merged. User set up branch protection on `main`.
 - **2026-11-04**: Added `SqliteStore` (PR `feat/sqlite-store`). Next: key restore in bindings, then store selection in constructors.
 - **2026-11-04**: `v0.1.0-alpha.1` released; label, vulnerability reporting set up; #15 merged. Added key restore to bindings (PR `feat/key-restore`). Next: store selection (SQLite path) in binding constructors.
+- **2026-11-04**: Swift/Kotlin can persist (`KithClient.open`, PR `feat/ffi-sqlite`). Cross-compiling bundled SQLite for iOS/Android is only verified by CI. Next: IndexedDB store for web, then REQ-DATA-004 (Automerge).

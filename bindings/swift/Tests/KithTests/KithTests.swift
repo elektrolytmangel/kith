@@ -10,6 +10,23 @@ final class KithTests: XCTestCase {
         XCTAssertFalse(kithVersion().isEmpty)
     }
 
+    /// req: REQ-STORE-001
+    func testOpenPersistsDataAndIdentity() throws {
+        let path = NSTemporaryDirectory() + "kith-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let key = generateSecretKey()
+        var objectId = ""
+        var deviceId = ""
+        do {
+            let first = try KithClient.open(dbPath: path, secretKey: key)
+            objectId = try first.create(type: "note", text: "hello").objectId
+            deviceId = first.deviceId()
+        }
+        let second = try KithClient.open(dbPath: path, secretKey: key)
+        XCTAssertEqual(second.deviceId(), deviceId)
+        XCTAssertEqual(try second.history(objectId: objectId).count, 1)
+    }
+
     /// req: REQ-PLAT-002
     func testRestoredKeyKeepsDeviceIdentity() throws {
         let first = KithClient()
