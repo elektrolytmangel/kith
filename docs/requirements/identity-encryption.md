@@ -17,10 +17,11 @@ user can have several devices.
 
 ### REQ-ID-003: Organization root of trust
 
-- **Priority:** must | **Phase:** 5 | **Status:** accepted | **Verify:** test | **Source:** design §Identity
+- **Priority:** must | **Phase:** 5 | **Status:** partial | **Verify:** test | **Source:** design §Identity
 
-The creator's device key must be the organization root key and first admin.
-Every member must learn the root public key through its invitation.
+Creating an organization must create its root key, held by the creator's device;
+the root public key is the org ID, and the creator's device is the first admin
+(ADR 0005). Every member must learn the root public key through its invitation.
 
 ### REQ-ENC-001: End-to-end encryption with MLS
 

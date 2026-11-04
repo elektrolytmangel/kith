@@ -73,18 +73,24 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 2. [x] **Merged state in the bindings** (REQ-DATA-004): JSON documents (`createDocument`, `updateDocument` with RFC 7396
    merge patches, `documentJson`) on all platforms (PR `feat/documents`). wasm: 1.97 MB → 3.18 MB with Automerge.
 3. **Phase 3 follow-ups**: [x] range-based reconciliation (Negentropy in `kith-sync`, PR `feat/negentropy`);
-   [ ] offline peers (REQ-RELAY-005 buffer or an always-on client, phase 7; needs the user's decision, see *Open questions*).
-4. **Phases 5-8**: invitations + org root key (then relay membership proofs, REQ-RELAY-004), permissions
-   (REQ-PERM-002), files + always-on client, hardening (see requirements).
-5. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
+   offline peers: decided, no relay buffer; the always-on client (phase 7) covers it.
+4. **Phase 5, invitations** (decisions in *Decisions*; ADR 0005):
+   - [x] 5a `kith-core::membership`: org root key per org (org ID = its public key), membership certificates
+     (root → admin, admin → member; chain of ≤ 2), invite links (org, relay, token, secret, expiry), claim proof
+     (HMAC over the KeyPackage) and 6-digit short code. Pure library + tests (PR `feat/membership`).
+   - [ ] 5b Relay: verify certificate chains on `announce` (REQ-RELAY-004); devices without one are *pending*
+     (may only send `invite-claim` and receive `direct`); claims go to the org's online admins.
+   - [ ] 5c Client + bindings: `create_org`, `create_invite`, `claim_frame`, `InviteClaimed { code }` →
+     `accept_claim`, Welcome carries the member certificate, re-announce with it; `grant_admin`; remove
+     `create_group` / open `JoinRequested` admission; e2e through the relay; smoke test.
+5. **Phases 6-8**: permissions (REQ-PERM-002, policy object, revocation), files + always-on client, hardening.
+6. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
    against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
    many changes (persistence, merge, relay auth, live and catch-up sync) and the relay body format changed.
 
 ### Open questions for the user
 
 - Release a `v0.1.0-alpha.2` now? Encryption, documents and range-based catch-up are on `main` (tags stay the user's).
-- Offline peers (REQ-RELAY-005): a short RAM buffer in the relay (e.g. 30 s) vs. strictly "no persistence" and
-  relying on an always-on client (phase 7)?
 
 ### Open issues
 
@@ -100,6 +106,10 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Org ID = root public key (hex); members carry a root-signed membership certificate the relay checks statelessly | User choice (2026-11-04) | Phase 5, REQ-RELAY-004 |
+| Only admins invite/admit (root + devices the root certifies as admin); members may still re-add themselves | User choice (2026-11-04), until phase 6 roles | Phase 5 |
+| Invites: single-use, expiring (e.g. 24 h), claim proves the secret; 6-digit short code optional (app decides) | User choice (2026-11-04) | Phase 5 |
+| No relay buffer for offline devices; reliability comes from the always-on client (phase 7) | User choice (2026-11-04); keeps "stores nothing" | REQ-RELAY-005 |
 | MLS ciphersuite `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, OpenMLS + RustCrypto provider | User choice (2026-11-04): reuses Ed25519 device key, pure Rust, builds on wasm32 | Phase 4 ADR 0004 |
 | KeyPackages travel `direct` to an online admin; relay stays stateless | User choice (2026-11-04) | Phase 4 / 5 |
 | Until phase 5: creator makes the group (first admin), low-level `add_member(key_package)` → commit + Welcome | User choice (2026-11-04); invitations wrap it later | Phase 4 |
@@ -178,3 +188,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: MLS fork resolution (PR `feat/mls-forks`): lower committer ID wins, losers re-added; tests cover both orders and a device that missed the winning commit. Next: REQ-DATA-004 merged state in bindings.
 - **2026-11-04**: JSON documents in all bindings (PR `feat/documents`), wasm 3.18 MB. Next: phase 3 follow-ups (Negentropy).
 - **2026-11-04**: Negentropy reconciliation replaces the full-ID exchange (PR `feat/negentropy`); new `SyncCompared` event. Next: phase 5 invitations (design questions first).
+- **2026-11-04**: User decided phase 5 questions (see *Decisions*). 5a `kith_core::membership` + ADR 0005 (PR `feat/membership`). Next: 5b relay checks.

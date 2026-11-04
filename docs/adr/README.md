@@ -8,11 +8,12 @@ Open questions from the design doc that are waiting for an ADR:
 
 - [x] Automerge for all types vs. detect-and-resolve (REQ-DATA-004): [ADR 0003](0003-merge-automerge-default-pluggable.md)
 - [x] MLS implementation, ciphersuite, KeyPackage distribution (REQ-ENC-001..004): [ADR 0004](0004-mls-openmls-rustcrypto.md)
-- [ ] Ordering of concurrent MLS commits (REQ-ENC-001, see ADR 0004)
-- [ ] 30 s relay buffer vs. "no persistence" (REQ-RELAY-005)
+- [x] Ordering of concurrent MLS commits (REQ-ENC-001): fork resolution in [ADR 0004](0004-mls-openmls-rustcrypto.md)
+- [x] Org identity, membership proofs, invitations (REQ-ID-003, REQ-INV-*, REQ-RELAY-004): [ADR 0005](0005-org-root-key-certificates-invites.md)
+- [x] 30 s relay buffer vs. "no persistence" (REQ-RELAY-005): no buffer (user, 2026-11-04); always-on client instead
 - [ ] Push token persistence (REQ-RELAY-007)
 - [ ] Rule for changes concurrent with a revocation (REQ-PERM-004)
 - [ ] Always-on client required or optional
 - [ ] Root key recovery
 - [ ] Compaction policy (REQ-DATA-005)
-- [ ] Membership proof privacy (REQ-RELAY-004)
+- [ ] Membership proof privacy (REQ-RELAY-004): certificates reveal org and device IDs to the relay (ADR 0005)
