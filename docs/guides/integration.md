@@ -11,7 +11,7 @@ is public, so no token is needed (for private projects started from this templat
 ## Web
 
 ```sh
-npm install https://github.com/elektrolytmangel/kith/releases/download/v0.1.0/kith-wasm-0.1.0.tgz
+npm install https://github.com/elektrolytmangel/kith/releases/download/v0.1.0-alpha.1/kith-wasm-0.1.0-alpha.1.tgz
 ```
 
 ```ts
@@ -48,9 +48,9 @@ planned for phase 1.
 ## Android
 
 ```kotlin
-// Copy kith-android-0.1.0.aar from the release into app/libs/.
+// Copy kith-android-0.1.0-alpha.1.aar from the release into app/libs/.
 dependencies {
-    implementation(files("libs/kith-android-0.1.0.aar"))
+    implementation(files("libs/kith-android-0.1.0-alpha.1.aar"))
     // A local AAR doesn't carry its dependencies; the generated code needs JNA.
     implementation("net.java.dev.jna:jna:5.15.0@aar")
 }
@@ -68,7 +68,7 @@ val history = client.history(change.objectId)
 
 ```toml
 [dependencies]
-kith-client = { git = "https://github.com/elektrolytmangel/kith", tag = "v0.1.0" }
+kith-client = { git = "https://github.com/elektrolytmangel/kith", tag = "v0.1.0-alpha.1" }
 ```
 
 ```rust
@@ -84,7 +84,7 @@ The always-on client (phase 7) is a headless Rust binary built this way.
 
 ```sh
 # Binary from the release (Linux/macOS/Windows, x86_64 and arm64)
-curl -fsSL https://github.com/elektrolytmangel/kith/releases/download/v0.1.0/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -fsSL https://github.com/elektrolytmangel/kith/releases/download/v0.1.0-alpha.1/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 ./kith-relay
 
 # or as a container, built from source

@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "example-two-devices"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kith-client",
  "kith-sync",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "kith-client"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "js-sys",
  "kith-core",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "kith-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "kith-crypto"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "kith-ffi"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kith-client",
  "thiserror",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "kith-protocol"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -728,14 +728,14 @@ dependencies = [
 
 [[package]]
 name = "kith-relay"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kith-protocol",
 ]
 
 [[package]]
 name = "kith-relay-server"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "axum",
  "kith-protocol",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "kith-store"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kith-core",
  "thiserror",
@@ -755,14 +755,14 @@ dependencies = [
 
 [[package]]
 name = "kith-sync"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kith-core",
 ]
 
 [[package]]
 name = "kith-wasm"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "kith-client",
  "wasm-bindgen",
