@@ -5,6 +5,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Web: `generateSecretKey()` and `await KithClient.open(dbName, secretKey)` persist changes in
+  IndexedDB (write-through cache, REQ-STORE-001). `kith_store::codec` encodes changes as bytes.
+
+### Added
 - Swift/Kotlin: `generateSecretKey()` and `KithClient.open(dbPath, secretKey)` persist changes in
   SQLite (REQ-STORE-001). `Store` is implemented for `Box<dyn Store>`.
 

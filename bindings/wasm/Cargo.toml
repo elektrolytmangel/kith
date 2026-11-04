@@ -17,7 +17,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 kith-client.workspace = true
+kith-store.workspace = true
 wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys.workspace = true
 
 [package.metadata.wasm-pack.profile.release]
 # Rust >= 1.87 enables these wasm features by default for wasm32-unknown-unknown;

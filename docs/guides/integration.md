@@ -3,9 +3,9 @@
 All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`,
 `history`, and `secretKey` / `withSecretKey` to keep the device identity across
 restarts (store the key in the platform's secure storage).
-On Swift and Kotlin, `generateSecretKey()` and `KithClient.open(dbPath, secretKey)`
-also persist the data in a SQLite file; the web package is still in memory only
-(IndexedDB store pending). `KithClient()` stays ephemeral. Sync, encryption and invitations will be added in later phases.
+`generateSecretKey()` and `KithClient.open(...)` also persist the data: in a SQLite
+file on Swift and Kotlin (`dbPath`), in IndexedDB on the web (`dbName`, returns a
+Promise). `KithClient()` stays ephemeral. Sync, encryption and invitations will be added in later phases.
 
 Every package is a GitHub Release asset:
 `https://github.com/elektrolytmangel/kith/releases/download/vX.Y.Z/<asset>`. The repository
@@ -26,6 +26,17 @@ const client = new KithClient();
 const id = client.create("acme.note", new TextEncoder().encode("hello"));
 client.edit(id, new TextEncoder().encode("hello world"));
 ```
+
+Persist data and identity in IndexedDB. Save the key once (for example wrapped with
+the Web Crypto API; never log it) and reopen the same database later:
+
+```ts
+const key = generateSecretKey();                // first launch only; store it
+const client = await KithClient.open("my-app", key); // Promise
+```
+
+Changes are kept in memory and written through to IndexedDB (database `my-app`).
+`new KithClient()` stays ephemeral.
 
 Bundlers: build with `scripts/build-wasm.sh bundler` for webpack and Vite
 without an `init()` call. Electron renderer processes work like the web;

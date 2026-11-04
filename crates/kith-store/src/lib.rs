@@ -5,6 +5,7 @@
 //! reference implementation used in tests. [`SqliteStore`] (feature
 //! `sqlite`, native only) persists to disk (REQ-STORE-001).
 
+pub mod codec;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 #[cfg(feature = "sqlite")]
