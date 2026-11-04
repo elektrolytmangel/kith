@@ -5,6 +5,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Container images for the relay and the always-on client on GitHub Packages (ghcr.io), built from the
+  release binaries by `release.yml` (amd64, arm64); `deploy/docker-compose.yml` (relay with TLS) and
+  [deployment guide](docs/guides/deployment.md).
 - A member adds its own devices (REQ-ID-002, ADR 0011): `create_own_device_invite` (web
   `createOwnDeviceInvite`, FFI `createOwnDeviceInvite`), policy op `LinkDevice`, own-device
   membership certificates (chains of up to 3), `InviteClaim.to` so the relay routes the claim to the

@@ -1,0 +1,49 @@
+# Relay with automatic TLS (Caddy), plus an optional always-on client.
+# Guide: docs/guides/deployment.md
+#
+#   export KITH_VERSION=0.1.0-alpha.3   # an image tag from the Packages page
+#   export DOMAIN=relay.example.com     # DNS must point at this host
+#   docker compose up -d
+#
+# Clients connect to wss://$DOMAIN/ (the relay itself speaks plain ws).
+services:
+  relay:
+    image: ghcr.io/elektrolytmangel/kith-relay:${KITH_VERSION:?set KITH_VERSION to an image tag}
+    restart: unless-stopped
+    read_only: true # the relay writes nothing to disk
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      RUST_LOG: info
+      # Optional limits, see the relay table in the README:
+      # KITH_RELAY_MAX_CONNECTIONS: "10000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [relay]
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the relay's host name}
+    command: ["caddy", "reverse-proxy", "--from", "${DOMAIN}", "--to", "relay:8080"]
+    volumes:
+      - caddy-data:/data
+
+  # Not started by default. First run (joins an org, needs an invite link):
+  #   docker compose run --rm always-on --join '<invite link>'
+  # Then keep it running:
+  #   docker compose --profile always-on up -d
+  always-on:
+    profiles: ["always-on"]
+    image: ghcr.io/elektrolytmangel/kith-always-on:${KITH_VERSION:?set KITH_VERSION to an image tag}
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      RUST_LOG: info
+    volumes:
+      - always-on-data:/data
+
+volumes:
+  caddy-data:
+  always-on-data:
