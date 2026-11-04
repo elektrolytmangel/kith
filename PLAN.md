@@ -24,7 +24,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 ### What the library can do today (alpha, phases 1-5 and 6a done)
 
-Requirements: 25 implemented, 9 partial, 8 accepted/proposed.
+Requirements: 25 implemented, 10 partial, 7 accepted/proposed.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -94,7 +94,12 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
      admin at that point. Every incoming change validated (REQ-PERM-002); invalid parents make children invalid;
      policy tightening re-checks stored changes and hides invalid ones from history, merge and sync.
      `remove_member` also revokes. Bindings: `setRole`, `setWriteRule`, `roleOf`; events `PolicyChanged`.
-   - [ ] 6b Read-restricted subgroups (REQ-PERM-003).
+   - [x] 6b-1 Scope in the change envelope (ADR 0007) (`kith/change/v2`): `Scope` = org, `org/name` or `local` (never synced);
+     codec v2, SQLite schema 3 (refuses older non-empty databases), `Store::scope_ids`; sync, live delivery and
+     policy checks per scope; `create` uses the default scope (the only org, else `local`), `create_in(scope, …)`
+     for several orgs. Lifts the "one org per store" limit (PR `feat/scope`).
+   - [ ] 6b-2 Subgroups (REQ-PERM-003): policy ops for subgroup membership, one MLS group per subgroup (group key
+     `org/name`), subgroup-scoped catch-up and encryption; removal rotates keys.
 6. **Phases 7-8**: files + always-on client, hardening.
 7. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
    against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
@@ -105,10 +110,6 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - Release a `v0.1.0-alpha.2` now? Encryption, documents and range-based catch-up are on `main` (tags stay the user's).
 
 ### Open issues
-
-- **One org per store**: objects carry no org, and catch-up offers every stored change to any org peer. Fine with one
-  org per `KithClient`/database (the bindings' model); a device in two orgs must use two stores. Make it explicit
-  (or scope objects by org) before apps rely on multiple orgs.
 
 - **macOS jobs get cancelled or wait long** (diagnosed 2026-11-03 from job annotations). Causes:
   1. GitHub macOS arm64 capacity: "The job was not acquired by Runner … even after multiple attempts"
@@ -122,6 +123,9 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Every signed change names its scope (org or org/subgroup); sync, encryption, permissions per scope | User choice (2026-11-04); also lifts "one org per store" | Phase 6b |
+| Subgroups are managed by org admins through policy ops; one MLS group per subgroup | User choice (2026-11-04) | Phase 6b |
+| After 6b: phase 7 (always-on client, then files) before phase 8 hardening | User choice (2026-11-04) | Plan order |
 | Permissions: one signed `kith.policy` object per org, admin-written, validated like any object | User choice (2026-11-04) | Phase 6, REQ-PERM-001 |
 | Fixed roles admin / editor / viewer; per object type a minimum write role | User choice (2026-11-04) | Phase 6 |
 | Revocation wins: a restricted device's changes count only if the admin had seen them (keep list); dependents of rejected changes are rejected | User choice (2026-11-04) | Phase 6, REQ-PERM-004 |
@@ -211,3 +215,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: User decided phase 5 questions (see *Decisions*). 5a `kith_core::membership` + ADR 0005 (PR `feat/membership`). Next: 5b relay checks.
 - **2026-11-04**: Invitations end to end (PR `feat/invitations`): relay checks certificate chains, pending devices, claim/accept flow in all bindings; smoke test joins by invite. Next: phase 6 permissions (design questions).
 - **2026-11-04**: User decided phase 6 questions. Policy object, roles, rules, revocation with keep lists, quarantine (PR `feat/policy`, ADR 0006). Next: 6b read-restricted subgroups, or phase 7.
+- **2026-11-04**: User decided 6b questions (scope in envelope, admins manage subgroups, then phase 7). 6b-1 scopes (PR `feat/scope`, ADR 0007). Next: 6b-2 subgroups.

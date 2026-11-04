@@ -1,7 +1,7 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-use crate::{ChangeId, DeviceId, ObjectId, ObjectType};
+use crate::{ChangeId, DeviceId, ObjectId, ObjectType, Scope};
 
 /// Something that can sign changes on behalf of a device.
 ///
@@ -32,6 +32,8 @@ pub enum ChangeError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnsignedChange {
+    /// Where the object belongs (org, subgroup or local); fixed per object.
+    pub scope: Scope,
     /// Object this change belongs to.
     pub object_id: ObjectId,
     /// Type tag of the object.
@@ -108,13 +110,15 @@ pub fn verify_signature(
 ///
 /// Changing this breaks every existing signature: bump the domain tag.
 fn canonical_bytes(c: &UnsignedChange, author: &DeviceId) -> Vec<u8> {
-    const DOMAIN: &[u8] = b"kith/change/v1";
+    // v2: the scope is signed too (phase 6b).
+    const DOMAIN: &[u8] = b"kith/change/v2";
     let mut out = Vec::with_capacity(128 + c.payload.len());
     let mut put = |b: &[u8]| {
         out.extend_from_slice(&(b.len() as u64).to_be_bytes());
         out.extend_from_slice(b);
     };
     put(DOMAIN);
+    put(c.scope.as_str().as_bytes());
     put(c.object_id.as_bytes());
     put(c.object_type.as_str().as_bytes());
     put(&(c.parents.len() as u64).to_be_bytes());
@@ -164,6 +168,7 @@ mod tests {
 
     fn body(parents: Vec<ChangeId>) -> UnsignedChange {
         UnsignedChange {
+            scope: Scope::local(),
             object_id: ObjectId([7; 16]),
             object_type: ObjectType::new("note"),
             parents,

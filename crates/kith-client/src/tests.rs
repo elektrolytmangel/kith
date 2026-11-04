@@ -227,10 +227,30 @@ fn broadcasts_are_encrypted_and_reach_members() {
 fn plaintext_and_outsiders_are_refused() {
     let mut net = Net::org(2);
     let mut outsider = client();
-    let c = outsider
+    // Not a member: it cannot create in the org, and its local data stays local.
+    assert!(
+        outsider
+            .create_in(Scope::parse(&ORG).unwrap(), ObjectType::new("note"), vec![])
+            .is_err()
+    );
+    let local = outsider
         .create(ObjectType::new("note"), b"x".to_vec())
         .unwrap();
-    // No group: an outsider cannot even produce a broadcast.
+    assert!(local.body.scope.is_local());
+    assert!(outsider.broadcast_frame(&ORG, &local).is_err());
+    // A modified client signs a change for the org anyway.
+    let c = Change::sign(
+        UnsignedChange {
+            scope: Scope::parse(&ORG).unwrap(),
+            object_id: ObjectId::random(),
+            object_type: ObjectType::new("note"),
+            parents: vec![],
+            timestamp_ms: 1,
+            payload: b"x".to_vec(),
+        },
+        outsider.signer(),
+    );
+    // No group: it cannot produce a broadcast.
     assert!(matches!(
         outsider.broadcast_frame(&ORG, &c),
         Err(ClientError::Group(_))
@@ -967,6 +987,7 @@ fn spread(net: &mut Net, who: usize, change: &Change) -> Vec<(usize, Event)> {
 fn forged(net: &Net, who: usize, ty: &str, parents: Vec<ChangeId>, object: ObjectId) -> Change {
     Change::sign(
         UnsignedChange {
+            scope: Scope::parse(&ORG).unwrap(),
             object_id: object,
             object_type: ObjectType::new(ty),
             parents,
@@ -1138,4 +1159,83 @@ fn the_policy_reaches_new_members_and_survives_restarts() {
             .is_err()
     );
     assert!(net.devs[1].create(ObjectType::new("note"), vec![1]).is_ok());
+}
+
+// ---- scopes (phase 6b-1) ----
+
+/// req: REQ-PERM-003
+#[test]
+fn one_store_holds_two_orgs_without_mixing_them() {
+    let mut x = client();
+    let a = x.create_org().unwrap();
+    let b = x.create_org_with_root_key(&[9; 32]).unwrap();
+    // With two orgs the scope must be explicit.
+    assert!(matches!(
+        x.create(ObjectType::new("note"), vec![]),
+        Err(ClientError::AmbiguousScope)
+    ));
+    let in_a = x
+        .create_in(
+            Scope::parse(&a).unwrap(),
+            ObjectType::new("note"),
+            b"a".to_vec(),
+        )
+        .unwrap();
+    let in_b = x
+        .create_in(
+            Scope::parse(&b).unwrap(),
+            ObjectType::new("note"),
+            b"b".to_vec(),
+        )
+        .unwrap();
+    // Catch-up for org A only ever sees A's changes.
+    let a_ids = x.store().scope_ids(&Scope::parse(&a).unwrap()).unwrap();
+    assert!(a_ids.contains(&in_a.change_id) && !a_ids.contains(&in_b.change_id));
+    // A change of org B cannot be broadcast to org A.
+    assert!(x.broadcast_frame(&a, &in_b).is_err());
+    // A device that is only in org A refuses B's changes.
+    let mut net = Net::org(2);
+    let foreign = in_b.clone();
+    assert!(matches!(
+        net.devs[1].receive(foreign),
+        Err(ClientError::Forbidden(_))
+    ));
+    // Even inside a valid frame of its own org.
+    let body = net.devs[0]
+        .app_body(&ORG, &sync::change_body(&in_b))
+        .unwrap();
+    let from = hex(&net.devs[0]);
+    let h = net.devs[1]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body,
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }));
+    assert!(!net.devs[1].store().contains(&in_b.change_id).unwrap());
+}
+
+#[test]
+fn local_data_stays_local_and_edits_keep_their_scope() {
+    let mut net = Net::new(1);
+    let note = net.devs[0]
+        .create(ObjectType::new("note"), b"before joining".to_vec())
+        .unwrap();
+    assert!(note.body.scope.is_local());
+    net.devs[0].create_org_with_root_key(&ROOT_SECRET).unwrap();
+    // The old object stays local; new ones go to the org.
+    let edit = net.devs[0]
+        .edit(note.body.object_id, b"still local".to_vec())
+        .unwrap();
+    assert!(edit.body.scope.is_local());
+    let fresh = net.devs[0]
+        .create(ObjectType::new("note"), b"org".to_vec())
+        .unwrap();
+    assert_eq!(fresh.body.scope.as_str(), ORG.as_str());
+    let ids = net.devs[0]
+        .store()
+        .scope_ids(&Scope::parse(&ORG).unwrap())
+        .unwrap();
+    assert!(!ids.contains(&note.change_id) && ids.contains(&fresh.change_id));
 }

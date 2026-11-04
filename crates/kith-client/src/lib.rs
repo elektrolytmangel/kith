@@ -18,7 +18,8 @@
 //! - object types and payload formats are application-defined.
 
 pub use kith_core::{
-    Change, ChangeId, DeviceId, IdError, ObjectId, ObjectType, Signer, UnsignedChange,
+    Change, ChangeId, DeviceId, IdError, ObjectId, ObjectType, Scope, ScopeError, Signer,
+    UnsignedChange,
 };
 pub use kith_crypto::{DeviceKey, GroupError, Groups};
 #[cfg(feature = "automerge")]
@@ -69,6 +70,9 @@ pub enum ClientError {
     /// Not a valid device ID.
     #[error(transparent)]
     Id(#[from] IdError),
+    /// This device belongs to several orgs: say which one (`create_in`).
+    #[error("several orgs: choose a scope with create_in")]
+    AmbiguousScope,
     /// The policy does not allow this change (REQ-PERM-002).
     #[error("not allowed: {0}")]
     Forbidden(String),
@@ -389,14 +393,61 @@ impl<S: Store, K: Signer> Client<S, K> {
         self.key.device_id()
     }
 
-    /// Create a new object with an initial payload. Fails with
-    /// [`ClientError::Forbidden`] if the org's policy does not let this device
-    /// write objects of type `ty`.
+    /// Create a new object with an initial payload, in the default scope: the org
+    /// this device belongs to, or `local` (never synced) before it joins one. With
+    /// several orgs use [`Self::create_in`]. Fails with [`ClientError::Forbidden`]
+    /// if the org's policy does not let this device write objects of type `ty`.
     pub fn create(&mut self, ty: ObjectType, payload: Vec<u8>) -> Result<Change, ClientError> {
+        let scope = self.default_scope()?;
+        self.create_in(scope, ty, payload)
+    }
+
+    /// Create a new object in `scope` (an org this device belongs to, or `local`).
+    pub fn create_in(
+        &mut self,
+        scope: Scope,
+        ty: ObjectType,
+        payload: Vec<u8>,
+    ) -> Result<Change, ClientError> {
         if ty.as_str() == POLICY_TYPE {
             return Err(ClientError::Forbidden("use the policy methods".into()));
         }
-        self.commit(ObjectId::random(), ty, vec![], payload)
+        self.check_scope(&scope)?;
+        self.commit(scope, ObjectId::random(), ty, vec![], payload)
+    }
+
+    /// The scope `create` uses: the only org this device is a member of, else `local`.
+    pub fn default_scope(&self) -> Result<Scope, ClientError> {
+        let mut orgs = self
+            .orgs
+            .0
+            .iter()
+            .filter(|(_, st)| st.chain.is_some())
+            .map(|(o, _)| o);
+        match (orgs.next(), orgs.next()) {
+            (None, _) => Ok(Scope::local()),
+            (Some(org), None) => {
+                Ok(Scope::parse(org).map_err(|e| ClientError::Forbidden(e.to_string()))?)
+            }
+            _ => Err(ClientError::AmbiguousScope),
+        }
+    }
+
+    /// `local`, or an org (or subgroup of one) this device is a member of.
+    fn check_scope(&self, scope: &Scope) -> Result<(), ClientError> {
+        match scope.org_id() {
+            None => Ok(()),
+            Some(org)
+                if self
+                    .orgs
+                    .0
+                    .get(&org.to_hex())
+                    .is_some_and(|s| s.chain.is_some()) =>
+            {
+                Ok(())
+            }
+            Some(org) => Err(ClientError::Forbidden(format!("not a member of org {org}"))),
+        }
     }
 
     /// Append a change to an existing object, building on its current heads.
@@ -404,15 +455,13 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// layer resolves (REQ-DATA-004).
     pub fn edit(&mut self, object: ObjectId, payload: Vec<u8>) -> Result<Change, ClientError> {
         let hist = self.history(&object)?;
-        let ty = hist
-            .first()
-            .map(|c| c.body.object_type.clone())
-            .ok_or(ClientError::UnknownObject(object))?;
+        let first = hist.first().ok_or(ClientError::UnknownObject(object))?;
+        let (ty, scope) = (first.body.object_type.clone(), first.body.scope.clone());
         if ty.as_str() == POLICY_TYPE {
             return Err(ClientError::Forbidden("use the policy methods".into()));
         }
         let parents = self.valid_heads(&object)?;
-        self.commit(object, ty, parents, payload)
+        self.commit(scope, object, ty, parents, payload)
     }
 
     /// Heads of an object among the changes the policy allows.
@@ -437,6 +486,15 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Policy changes trigger a re-check of everything stored.
     pub fn receive(&mut self, change: Change) -> Result<bool, ClientError> {
         change.verify()?;
+        // Only orgs we belong to; an object never moves between scopes.
+        self.check_scope(&change.body.scope)?;
+        if let Some(first) = self.store.history(&change.body.object_id)?.first()
+            && first.body.scope != change.body.scope
+        {
+            return Err(ClientError::Forbidden(
+                "object belongs to another scope".into(),
+            ));
+        }
         let new = self.store.put(change.clone())?;
         if change.body.object_type.as_str() == POLICY_TYPE {
             if new {
@@ -462,14 +520,18 @@ impl<S: Store, K: Signer> Client<S, K> {
                 "builds on rejected change {p}"
             )));
         }
-        for (org, policy) in &self.policies {
-            if policy.creator.is_some() && !policy.allows(change) {
-                return Err(ClientError::Forbidden(format!(
-                    "{} may not write {} in {org}",
-                    change.author,
-                    change.body.object_type.as_str()
-                )));
-            }
+        // The policy of the org the change belongs to.
+        let org = change.body.scope.org_id().map(|o| o.to_hex());
+        if let Some(policy) = org.as_ref().and_then(|o| self.policies.get(o))
+            && policy.creator.is_some()
+            && !policy.allows(change)
+        {
+            return Err(ClientError::Forbidden(format!(
+                "{} may not write {} in {}",
+                change.author,
+                change.body.object_type.as_str(),
+                org.unwrap_or_default()
+            )));
         }
         Ok(())
     }
@@ -633,6 +695,7 @@ impl<S: Store, K: Signer> Client<S, K> {
         let parents = self.store.heads(&pid)?;
         let change = Change::sign(
             UnsignedChange {
+                scope: Scope::org(&org_id),
                 object_id: pid,
                 object_type: ObjectType::new(POLICY_TYPE),
                 parents,
@@ -962,6 +1025,12 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Frame that broadcasts a new change, encrypted for `org`'s group, to the
     /// other online devices (REQ-SYNC-004).
     pub fn broadcast_frame(&mut self, org: &str, change: &Change) -> Result<Frame, ClientError> {
+        if change.body.scope.as_str() != org {
+            return Err(ClientError::Forbidden(format!(
+                "change belongs to scope {}, not org {org}",
+                change.body.scope
+            )));
+        }
         let body = self.app_body(org, &sync::change_body(change))?;
         self.save_groups()?;
         Ok(Frame::Broadcast {
@@ -987,7 +1056,8 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     /// Start (or restart) our reconciliation for `org`; returns the encrypted first query.
     fn start_reconcile(&mut self, org: &str) -> Result<Vec<u8>, ClientError> {
-        let (r, first) = kith_sync::Reconciliation::start(&self.store.all_ids()?)?;
+        let ids = self.store.scope_ids(&org_scope(org)?)?;
+        let (r, first) = kith_sync::Reconciliation::start(&ids)?;
         let body = self.app_body(org, &sync::query_body(&first))?;
         self.reconciling.insert(org.into(), r);
         Ok(body)
@@ -1339,6 +1409,9 @@ impl<S: Store, K: Signer> Client<S, K> {
             Err(e) => return Ok(rejected(e)),
         };
         match msg {
+            Message::Change(change) if change.body.scope.as_str() != org => {
+                Ok(rejected("change belongs to another scope".into()))
+            }
             Message::Change(change) => match self.receive(change.clone()) {
                 Ok(is_new) => Ok(Handled::event(Event::Received {
                     org,
@@ -1350,17 +1423,19 @@ impl<S: Store, K: Signer> Client<S, K> {
                 Err(ClientError::Forbidden(e)) => Ok(rejected(e)),
                 Err(e) => Err(e),
             },
-            Message::Query(query) => match kith_sync::respond(&self.store.all_ids()?, &query) {
-                Ok(answer) => Ok(Handled {
-                    replies: vec![direct(
-                        &org,
-                        &from,
-                        self.app_body(&org, &sync::reply_body(&answer))?,
-                    )],
-                    event: Event::SyncServed { from },
-                }),
-                Err(e) => Ok(rejected(e.to_string())),
-            },
+            Message::Query(query) => {
+                match kith_sync::respond(&self.store.scope_ids(&org_scope(&org)?)?, &query) {
+                    Ok(answer) => Ok(Handled {
+                        replies: vec![direct(
+                            &org,
+                            &from,
+                            self.app_body(&org, &sync::reply_body(&answer))?,
+                        )],
+                        event: Event::SyncServed { from },
+                    }),
+                    Err(e) => Ok(rejected(e.to_string())),
+                }
+            }
             Message::Reply(answer) => {
                 let Some(r) = self.reconciling.get_mut(&org) else {
                     // Not reconciling (any more): a late or duplicate answer.
@@ -1377,7 +1452,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                     }),
                     Ok(kith_sync::Step::Done(diff)) => {
                         self.reconciling.remove(&org);
-                        let to_send = self.changes_for(&diff.to_send)?;
+                        let to_send = self.changes_for(&org, &diff.to_send)?;
                         let replies = if to_send.is_empty() && diff.to_request.is_empty() {
                             vec![]
                         } else {
@@ -1408,6 +1483,10 @@ impl<S: Store, K: Signer> Client<S, K> {
                             continue;
                         }
                     };
+                    if change.body.scope.as_str() != org {
+                        rejected_n += 1;
+                        continue;
+                    }
                     match self.receive(change) {
                         Ok(true) => stored += 1,
                         Ok(false) => known += 1,
@@ -1421,7 +1500,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 let replies = if want.is_empty() {
                     vec![]
                 } else {
-                    let wanted = self.changes_for(&want)?;
+                    let wanted = self.changes_for(&org, &want)?;
                     self.offer_frames(&org, &from, &[], &wanted)?
                 };
                 Ok(Handled {
@@ -1438,13 +1517,15 @@ impl<S: Store, K: Signer> Client<S, K> {
         }
     }
 
-    /// The stored changes with these IDs (unknown IDs are skipped), oldest first.
-    /// Includes changes the policy rejects: the peer must see them to reject them
-    /// (and their dependents) too.
-    fn changes_for(&self, ids: &[ChangeId]) -> Result<Vec<Change>, ClientError> {
+    /// The stored changes of `org`'s scope with these IDs (unknown IDs and other
+    /// scopes are skipped), oldest first. Includes changes the policy rejects: the
+    /// peer must see them to reject them (and their dependents) too.
+    fn changes_for(&self, org: &str, ids: &[ChangeId]) -> Result<Vec<Change>, ClientError> {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            if let Some(c) = self.store.get(id)? {
+            if let Some(c) = self.store.get(id)?
+                && c.body.scope.as_str() == org
+            {
                 out.push(c);
             }
         }
@@ -1500,6 +1581,7 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     fn commit(
         &mut self,
+        scope: Scope,
         object_id: ObjectId,
         object_type: ObjectType,
         parents: Vec<ChangeId>,
@@ -1507,6 +1589,7 @@ impl<S: Store, K: Signer> Client<S, K> {
     ) -> Result<Change, ClientError> {
         let change = Change::sign(
             UnsignedChange {
+                scope,
                 object_id,
                 object_type,
                 parents,
@@ -1521,20 +1604,36 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 }
 
+fn org_scope(org: &str) -> Result<Scope, ClientError> {
+    Scope::parse(org).map_err(|e| ClientError::Forbidden(e.to_string()))
+}
+
 /// JSON documents (REQ-DATA-004): objects whose changes are Automerge changes,
 /// read and written as JSON. Concurrent patches of different keys both survive;
 /// the same key gets the same winner on every device.
 #[cfg(feature = "automerge")]
 impl<S: Store, K: Signer> Client<S, K> {
-    /// Create a document from a JSON object. Broadcast the returned change like any other.
+    /// Create a document from a JSON object, in the default scope (see
+    /// [`Client::create`]). Broadcast the returned change like any other.
     pub fn create_document(&mut self, ty: ObjectType, json: &str) -> Result<Change, ClientError> {
+        let scope = self.default_scope()?;
+        self.create_document_in(scope, ty, json)
+    }
+
+    /// [`Self::create_document`] in `scope`.
+    pub fn create_document_in(
+        &mut self,
+        scope: Scope,
+        ty: ObjectType,
+        json: &str,
+    ) -> Result<Change, ClientError> {
         let patch = parse_object(json)?;
         let mut doc = automerge_merger::automerge::AutoCommit::new();
         let payload =
             automerge_merger::author(&mut doc, |d| automerge_merger::merge_patch(d, &patch))?
                 // An empty object still needs a change to exist.
                 .unwrap_or_default();
-        self.create(ty, payload)
+        self.create_in(scope, ty, payload)
     }
 
     /// Change a document with an RFC 7396 JSON merge patch (`null` removes a key,

@@ -5,13 +5,14 @@
 
 use std::path::Path;
 
-use kith_core::{Change, ChangeId, DeviceId, ObjectId, ObjectType, UnsignedChange};
+use kith_core::{Change, ChangeId, DeviceId, ObjectId, ObjectType, Scope, UnsignedChange};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::{Store, StoreError};
 
-/// 2: `meta` table (MLS state).
-const SCHEMA_VERSION: i64 = 2;
+/// 2: `meta` table (MLS state). 3: `scope` column (phase 6b; older envelopes
+/// do not verify any more, so older non-empty databases are refused).
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS changes (
@@ -19,12 +20,14 @@ CREATE TABLE IF NOT EXISTS changes (
     change_id    BLOB NOT NULL UNIQUE,
     object_id    BLOB NOT NULL,
     object_type  TEXT NOT NULL,
+    scope        TEXT NOT NULL,
     author       BLOB NOT NULL,
     timestamp_ms INTEGER NOT NULL,
     payload      BLOB NOT NULL,
     signature    BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS changes_by_object ON changes(object_id, seq);
+CREATE INDEX IF NOT EXISTS changes_by_scope ON changes(scope, seq);
 CREATE TABLE IF NOT EXISTS change_parents (
     change_id BLOB NOT NULL,
     ord       INTEGER NOT NULL,
@@ -101,6 +104,21 @@ impl SqliteStore {
                 "database schema version {version} is newer than supported {SCHEMA_VERSION}"
             )));
         }
+        if (1..3).contains(&version) {
+            // Changes from before scopes were signed (alpha) cannot be verified any more.
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM changes", [], |r| r.get(0))
+                .map_err(backend)?;
+            if rows > 0 {
+                return Err(StoreError::Backend(format!(
+                    "database from an older kith alpha (schema {version}); its changes cannot be read by this version"
+                )));
+            }
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS changes; DROP TABLE IF EXISTS change_parents; DROP TABLE IF EXISTS objects;",
+            )
+            .map_err(backend)?;
+        }
         conn.execute_batch(SCHEMA).map_err(backend)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
             .map_err(backend)?;
@@ -171,9 +189,12 @@ impl SqliteStore {
         let change_id = ChangeId(arr(r.get(0).map_err(backend)?, "change_id")?);
         let ty: String = r.get(2).map_err(backend)?;
         let ts: i64 = r.get(4).map_err(backend)?;
+        let scope: String = r.get(7).map_err(backend)?;
+        let scope = Scope::parse(&scope).map_err(|_| corrupt("scope"))?;
         Ok(Change {
             change_id,
             body: UnsignedChange {
+                scope,
                 object_id: ObjectId(arr(r.get(1).map_err(backend)?, "object_id")?),
                 object_type: ObjectType::new(ty),
                 parents: self.parents_of(&change_id)?,
@@ -196,7 +217,7 @@ impl SqliteStore {
     }
 }
 
-const SELECT: &str = "SELECT change_id, object_id, object_type, author, timestamp_ms, payload, signature FROM changes";
+const SELECT: &str = "SELECT change_id, object_id, object_type, author, timestamp_ms, payload, signature, scope FROM changes";
 
 impl Store for SqliteStore {
     fn put(&mut self, change: Change) -> Result<bool, StoreError> {
@@ -206,8 +227,8 @@ impl Store for SqliteStore {
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO changes
-                 (change_id, object_id, object_type, author, timestamp_ms, payload, signature)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (change_id, object_id, object_type, author, timestamp_ms, payload, signature, scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     id.as_bytes().as_slice(),
                     b.object_id.as_bytes().as_slice(),
@@ -216,6 +237,7 @@ impl Store for SqliteStore {
                     b.timestamp_ms as i64,
                     b.payload,
                     change.signature.as_slice(),
+                    b.scope.as_str(),
                 ],
             )
             .map_err(backend)?;
@@ -293,6 +315,18 @@ impl Store for SqliteStore {
             .collect()
     }
 
+    fn scope_ids(&self, scope: &Scope) -> Result<Vec<ChangeId>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT change_id FROM changes WHERE scope = ?1 ORDER BY seq")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([scope.as_str()], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(backend)?;
+        rows.map(|r| Ok(ChangeId(arr(r.map_err(backend)?, "change_id")?)))
+            .collect()
+    }
+
     fn heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, StoreError> {
         let mut stmt = self
             .conn
@@ -349,6 +383,7 @@ mod tests {
     fn change(key: &DeviceKey, object: ObjectId, parents: Vec<ChangeId>, payload: &[u8]) -> Change {
         Change::sign(
             UnsignedChange {
+                scope: Scope::local(),
                 object_id: object,
                 object_type: ObjectType::new("note"),
                 parents,

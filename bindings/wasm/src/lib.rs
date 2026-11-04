@@ -335,6 +335,26 @@ impl KithClient {
         Ok(c.body.object_id.to_hex())
     }
 
+    /// Create an object in `scope` (an org ID this device is a member of, or
+    /// `"local"`); returns its object ID. `create` uses the only org, or `local`
+    /// before joining one.
+    #[wasm_bindgen(js_name = createIn)]
+    pub fn create_in(
+        &mut self,
+        scope: &str,
+        object_type: &str,
+        payload: &[u8],
+    ) -> Result<String, JsError> {
+        let scope = kith_client::Scope::parse(scope).map_err(js_err)?;
+        let c = self
+            .inner
+            .borrow_mut()
+            .create_in(scope, ObjectType::new(object_type), payload.to_vec())
+            .map_err(js_err)?;
+        self.broadcast(&c);
+        Ok(c.body.object_id.to_hex())
+    }
+
     /// Append a change; returns the change ID (hex).
     pub fn edit(&mut self, object_id: &str, payload: &[u8]) -> Result<String, JsError> {
         let oid = ObjectId::from_hex(object_id).map_err(|e| JsError::new(&e.to_string()))?;

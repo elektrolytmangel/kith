@@ -19,9 +19,13 @@ device decides the same, ADR 0006).
 
 ### REQ-PERM-003: Read-restricted subgroups
 
-- **Priority:** must | **Phase:** 6 | **Status:** accepted | **Verify:** test | **Source:** design §Restricted read
+- **Priority:** must | **Phase:** 6 | **Status:** partial | **Verify:** test | **Source:** design §Restricted read
 
 Data readable by only some members must live in a separate MLS group.
+
+Every change is signed with its scope (org or `org/subgroup`) and sync runs per
+scope ([ADR 0007](../adr/0007-scope-in-change-envelope.md)); subgroups with their
+own MLS group are phase 6b-2.
 
 ### REQ-PERM-004: Deterministic concurrent permission changes
 

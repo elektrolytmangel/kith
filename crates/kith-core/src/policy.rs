@@ -343,7 +343,10 @@ impl Policy {
 
     /// Apply one policy change if it is valid at this point; returns whether it counted.
     fn apply(&mut self, org: &DeviceId, c: &Change) -> bool {
-        if c.body.object_type.as_str() != POLICY_TYPE || c.body.object_id != policy_object_id(org) {
+        if c.body.object_type.as_str() != POLICY_TYPE
+            || c.body.object_id != policy_object_id(org)
+            || c.body.scope != crate::Scope::org(org)
+        {
             return false;
         }
         let Ok(op) = PolicyOp::decode(&c.body.payload) else {
@@ -456,6 +459,7 @@ mod tests {
         fn op(&self, by: &K, parents: Vec<ChangeId>, op: PolicyOp) -> Change {
             Change::sign(
                 UnsignedChange {
+                    scope: crate::Scope::org(&self.id),
                     object_id: policy_object_id(&self.id),
                     object_type: ObjectType::new(POLICY_TYPE),
                     parents,
@@ -470,6 +474,7 @@ mod tests {
     fn data(by: &K, ty: &str) -> Change {
         Change::sign(
             UnsignedChange {
+                scope: crate::Scope::local(),
                 object_id: ObjectId::random(),
                 object_type: ObjectType::new(ty),
                 parents: vec![],
