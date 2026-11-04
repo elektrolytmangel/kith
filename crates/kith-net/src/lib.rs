@@ -197,8 +197,8 @@ impl<S: Store> LiveClient<S> {
     /// The result arrives through [`next_event`](Self::next_event): `Event::Receipt`
     /// (empty `delivered`: no peer online, try later), then `Event::SyncReceived`.
     pub async fn catch_up(&mut self) -> Result<(), NetError> {
-        let frame = self.client.sync_request_frame(&self.org)?;
-        self.conn.send(&frame).await
+        let frames = self.client.sync_request_frames(&self.org)?;
+        self.send(&frames).await
     }
 
     /// Wait for the next frame from the relay and handle it. Peers' changes are

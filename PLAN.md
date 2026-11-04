@@ -22,9 +22,9 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41 (#20), automerge 0.12, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
-### What the library can do today (alpha, phases 1-5 and 6a done)
+### What the library can do today (alpha, phases 1-6 done)
 
-Requirements: 25 implemented, 10 partial, 7 accepted/proposed.
+Requirements: 26 implemented, 9 partial, 7 accepted/proposed.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -34,6 +34,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - catch-up: a new or returning device downloads what it lacks from one online peer (`catchUp`);
 - invitations: `createOrg`, one-time invite links with short codes, admins, relay-checked certificates;
 - write permissions: roles (viewer/editor/admin), per-type write rules, revocation; enforced on every device;
+- scopes (one store, several orgs) and read-restricted subgroups with their own encryption;
 - end-to-end encryption (MLS, one group per org): create group, join request + admit, remove, key rotation,
   automatic commit catch-up, re-add and fork resolution; the relay sees only routing metadata;
 - merging concurrent edits: JSON documents on Automerge on every platform (`createDocument`, `updateDocument`,
@@ -45,7 +46,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | --- | --- | --- |
 | A device added by the losing side of an MLS fork must be admitted again | Rare (two admins at once); app sees `JoinRequested` | ADR 0004 |
 | A removed device keeps a valid certificate for the relay (connects, sees metadata; cannot decrypt; its writes are revoked) | Relay-level revocation open | REQ-INV-004 |
-| Read access is all-or-nothing per org | Subgroups are phase 6b | REQ-PERM-003 |
+| Subgroup membership changes need the subgroup's owner device online; ownership cannot move | ADR 0008 | REQ-PERM-003 |
 | No rate limits on the relay | Floodable | Phase 8 |
 | Sync needs another device online | Offline-only devices can't catch up | REQ-RELAY-005 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
@@ -98,8 +99,11 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
      codec v2, SQLite schema 3 (refuses older non-empty databases), `Store::scope_ids`; sync, live delivery and
      policy checks per scope; `create` uses the default scope (the only org, else `local`), `create_in(scope, …)`
      for several orgs. Lifts the "one org per store" limit (PR `feat/scope`).
-   - [ ] 6b-2 Subgroups (REQ-PERM-003): policy ops for subgroup membership, one MLS group per subgroup (group key
-     `org/name`), subgroup-scoped catch-up and encryption; removal rotates keys.
+   - [x] 6b-2 Subgroups (REQ-PERM-003, PR `feat/subgroups`, ADR 0008): policy op `SetSubgroup { name, members, keep }` (admins);
+     the creating device is the subgroup's MLS owner (group key `org/name`) and is the only one that adds/removes in
+     MLS (no forks); members listed in the policy send it a KeyPackage. A decrypted message's MLS group is its scope,
+     so catch-up/offers run per subgroup with no new fields; MLS catch-up messages get a group field. Writes in
+     `org/S` need membership of S + role. Limit: membership changes wait for the owner device to be online.
 6. **Phases 7-8**: files + always-on client, hardening.
 7. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
    against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
@@ -216,3 +220,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: Invitations end to end (PR `feat/invitations`): relay checks certificate chains, pending devices, claim/accept flow in all bindings; smoke test joins by invite. Next: phase 6 permissions (design questions).
 - **2026-11-04**: User decided phase 6 questions. Policy object, roles, rules, revocation with keep lists, quarantine (PR `feat/policy`, ADR 0006). Next: 6b read-restricted subgroups, or phase 7.
 - **2026-11-04**: User decided 6b questions (scope in envelope, admins manage subgroups, then phase 7). 6b-1 scopes (PR `feat/scope`, ADR 0007). Next: 6b-2 subgroups.
+- **2026-11-04**: #36 merged. Subgroups (PR `feat/subgroups`, ADR 0008); smoke test covers them. Next: phase 7 (always-on client, then files).

@@ -948,7 +948,7 @@ fn strangers_cannot_join_without_an_invite() {
     let mut net = Net::org(1);
     net.devs.push(client());
     let to = hex(&net.devs[0]);
-    let f = net.devs[1].readd_request_frame(&ORG, &to).unwrap();
+    let f = net.devs[1].readd_request_frame(&ORG, &ORG, &to).unwrap();
     let events = net.send(1, vec![f]);
     assert!(
         events
@@ -1238,4 +1238,137 @@ fn local_data_stays_local_and_edits_keep_their_scope() {
         .scope_ids(&Scope::parse(&ORG).unwrap())
         .unwrap();
     assert!(!ids.contains(&note.change_id) && ids.contains(&fresh.change_id));
+}
+
+// ---- subgroups (phase 6b-2) ----
+
+fn finance() -> Scope {
+    Scope::subgroup(&DeviceId::from_hex(&ORG).unwrap(), "finance").unwrap()
+}
+
+fn stored_in(net: &Net, who: usize, c: &Change) -> bool {
+    net.devs[who].store().contains(&c.change_id).unwrap()
+}
+
+/// `members` join subgroup "finance" created by device 0.
+fn with_finance(net: &mut Net, members: &[usize]) {
+    let hexes: Vec<String> = members.iter().map(|&i| hex(&net.devs[i])).collect();
+    let frames = net.devs[0]
+        .create_subgroup(&ORG, "finance", &hexes)
+        .unwrap();
+    net.send(0, frames);
+    for &i in members {
+        assert_eq!(
+            net.devs[i].my_subgroups(&ORG),
+            vec!["finance".to_string()],
+            "device {i}"
+        );
+    }
+}
+
+/// req: REQ-PERM-003
+#[test]
+fn subgroup_data_reaches_only_its_members() {
+    let mut net = Net::org(3);
+    with_finance(&mut net, &[1]);
+    assert!(net.devs[2].my_subgroups(&ORG).is_empty());
+    assert_eq!(
+        net.devs[2].subgroup_members(&ORG, "finance").unwrap().len(),
+        2
+    );
+    // The owner writes; member 1 reads it, device 2 cannot even decrypt it.
+    let ledger = net.devs[0]
+        .create_in(finance(), ObjectType::new("ledger"), b"salary".to_vec())
+        .unwrap();
+    let events = spread(&mut net, 0, &ledger);
+    assert_eq!(received_by(&events, 1), 1);
+    assert!(stored_in(&net, 1, &ledger));
+    assert!(!stored_in(&net, 2, &ledger));
+    // Member 1 writes back; device 2 can neither write nor read.
+    let reply = net.devs[1]
+        .edit(ledger.body.object_id, b"approved".to_vec())
+        .unwrap();
+    let events = spread(&mut net, 1, &reply);
+    assert_eq!(received_by(&events, 0), 1);
+    assert!(!stored_in(&net, 2, &reply));
+    assert!(matches!(
+        net.devs[2].create_in(finance(), ObjectType::new("ledger"), vec![]),
+        Err(ClientError::Forbidden(_))
+    ));
+    // Catch-up in the org never carries subgroup data to device 2.
+    let f = net.devs[2].sync_request_frame(&ORG).unwrap();
+    net.send(2, vec![f]);
+    assert!(!stored_in(&net, 2, &ledger));
+}
+
+/// req: REQ-PERM-003
+#[test]
+fn a_late_member_gets_the_subgroup_history() {
+    let mut net = Net::org(3);
+    with_finance(&mut net, &[]);
+    let before = net.devs[0]
+        .create_in(finance(), ObjectType::new("ledger"), b"q1".to_vec())
+        .unwrap();
+    spread(&mut net, 0, &before);
+    let d2 = hex(&net.devs[2]);
+    let frames = net.devs[0]
+        .set_subgroup_members(&ORG, "finance", &[d2])
+        .unwrap();
+    net.send(0, frames);
+    assert_eq!(net.devs[2].my_subgroups(&ORG), vec!["finance".to_string()]);
+    assert!(stored_in(&net, 2, &before), "history arrives on joining");
+    assert!(!stored_in(&net, 1, &before));
+    // Later catch-ups include the subgroup too.
+    let more = net.devs[0]
+        .create_in(finance(), ObjectType::new("ledger"), b"q2".to_vec())
+        .unwrap();
+    let _ = more;
+    let frames = net.devs[2].sync_request_frames(&ORG).unwrap();
+    assert_eq!(frames.len(), 2, "org + finance");
+    net.send(2, frames);
+    assert!(stored_in(&net, 2, &more));
+}
+
+/// req: REQ-PERM-003
+#[test]
+fn removed_subgroup_members_lose_read_and_write_access() {
+    let mut net = Net::org(2);
+    with_finance(&mut net, &[1]);
+    let theirs = net.devs[1]
+        .create_in(finance(), ObjectType::new("ledger"), b"mine".to_vec())
+        .unwrap();
+    spread(&mut net, 1, &theirs);
+    // Removed: the owner takes it out of the MLS group (keys rotate).
+    let frames = net.devs[0]
+        .set_subgroup_members(&ORG, "finance", &[])
+        .unwrap();
+    let events = net.send(0, frames);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 1 && matches!(e, Event::GroupChanged { removed: true, .. }))
+    );
+    assert!(net.devs[1].my_subgroups(&ORG).is_empty());
+    // New subgroup data does not reach it...
+    let after = net.devs[0]
+        .create_in(finance(), ObjectType::new("ledger"), b"after".to_vec())
+        .unwrap();
+    spread(&mut net, 0, &after);
+    assert!(!stored_in(&net, 1, &after));
+    // ...it cannot write there any more, and its earlier change still counts.
+    assert!(
+        net.devs[1]
+            .create_in(finance(), ObjectType::new("ledger"), vec![])
+            .is_err()
+    );
+    assert_eq!(
+        net.devs[0].history(&theirs.body.object_id).unwrap().len(),
+        1
+    );
+    // Only admins manage subgroups.
+    assert!(
+        net.devs[1]
+            .set_subgroup_members(&ORG, "finance", &[])
+            .is_err()
+    );
 }

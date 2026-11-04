@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- Read-restricted subgroups (REQ-PERM-003, ADR 0008): policy op `SetSubgroup`, one MLS group per
+  subgroup run by its owner (members send it their KeyPackage automatically), data in scope
+  `<org>/<name>` encrypted for and synced within the subgroup. `Client::create_subgroup`,
+  `set_subgroup_members`, `subgroup_members`, `my_subgroups`, `sync_request_frames` (org +
+  subgroups); `Event::MemberAdded`. Web `createSubgroup`, `setSubgroupMembers`, `subgroupMembers`,
+  `mySubgroups`; FFI `RelaySession.createSubgroup` & co.
+
+### Changed
+- `RelaySession.catchUp` (FFI) returns several frames; MLS catch-up messages carry their group.
+
 ### Changed
 - **Breaking:** every change is signed with its scope (`kith/change/v2`, ADR 0007): `local`, an org,
   or (later) a subgroup. Catch-up, offers, broadcasts and policy checks work per scope, so one store

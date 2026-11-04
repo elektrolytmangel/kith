@@ -76,7 +76,7 @@ public final class RelayConnection {
     /// the history. Results arrive as `.syncCompared` (both counts 0: in sync) and `.syncReceived` events.
     public func catchUp() {
         do {
-            send(try session.catchUp())
+            for frame in try session.catchUp() { send(frame) }
         } catch {
             onClose(error)
         }
@@ -108,6 +108,17 @@ public final class RelayConnection {
     /// Remove a device from the org's group.
     public func removeMember(_ deviceId: String) throws {
         for frame in try session.removeMember(device: deviceId) { send(frame) }
+    }
+
+    /// Create read-restricted subgroup `name` with `members` (admins only). Data
+    /// created with `client.createIn(scope: "\(org)/\(name)", ...)` only reaches its members.
+    public func createSubgroup(_ name: String, members: [String]) throws {
+        for frame in try session.createSubgroup(name: name, members: members) { send(frame) }
+    }
+
+    /// Replace the members of subgroup `name` (admins only).
+    public func setSubgroupMembers(_ name: String, members: [String]) throws {
+        for frame in try session.setSubgroupMembers(name: name, members: members) { send(frame) }
     }
 
     /// Set a member's role: "viewer", "editor" or "admin" (admin only from the
