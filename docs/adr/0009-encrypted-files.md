@@ -29,7 +29,9 @@ reference object and fetching from any peer.
   answers with `Chunks`, split under the frame limit, and `ChunkMissing` for what it
   lacks. A peer only serves chunks whose scope matches the scope the request was
   encrypted for. Arriving chunks are stored only if wanted and only if their hash
-  matches. `FileChunks { ready }` reports finished files.
+  matches. `FileChunks { ready }` reports finished files. The relay's pick may be a
+  lazy peer without the chunks: on `ChunkMissing` the client asks the file's author
+  directly, once per file.
 - **Lazy by default**, eager on request (`set_fetch_files`). The always-on client
   fetches eagerly, so it holds every file.
 
@@ -37,8 +39,8 @@ reference object and fetching from any peer.
 
 - Files of any size, readable only by members of their scope; peers cannot tamper
   with chunks.
-- Fetch requests are answered by one peer. If it lacks chunks, the app retries
-  later (`ChunksMissing`). There is no fan-out to several peers and no resumable
+- Fetch requests are answered by one peer, then by the author. If both lack chunks,
+  the app retries later (`ChunksMissing`). There is no fan-out to several peers and no resumable
   transfer state beyond the missing list (REQ-SYNC-005, phase 8).
 - Chunks travel through the relay (no peer-to-peer path yet). On the web all chunks
   are kept in memory (the `Store` API is synchronous).

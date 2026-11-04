@@ -320,8 +320,47 @@ impl<S: Store, K: Signer> Client<S, K> {
             .collect();
         for o in &done {
             self.wanted_chunks.remove(o);
+            self.asked_author.remove(o);
         }
         Ok((stored, done))
+    }
+
+    /// A peer lacked chunks we want: ask each affected file's author directly (once
+    /// per file). The author made the file, so it has every chunk, unless it lost them.
+    pub(crate) fn ask_authors(
+        &mut self,
+        org: &str,
+        scope: &str,
+        peer: &str,
+        ids: &[ChunkId],
+    ) -> Result<Vec<Frame>, ClientError> {
+        let me = self.device_id().to_hex();
+        let affected: Vec<ObjectId> = self
+            .wanted_chunks
+            .iter()
+            .filter(|(o, w)| !self.asked_author.contains(*o) && ids.iter().any(|i| w.contains(i)))
+            .map(|(o, _)| *o)
+            .collect();
+        let mut frames = vec![];
+        for object in affected {
+            let author = match self.history(&object)?.first() {
+                Some(c) if c.body.scope.as_str() == scope => c.author.to_hex(),
+                _ => continue,
+            };
+            self.asked_author.insert(object);
+            if author == me || author == peer {
+                continue;
+            }
+            let want: Vec<ChunkId> = self.wanted_chunks[&object]
+                .iter()
+                .filter(|i| ids.contains(i))
+                .copied()
+                .collect();
+            for inner in sync::chunk_want_bodies(&want) {
+                frames.push(direct(org, &author, self.app_body(scope, &inner)?));
+            }
+        }
+        Ok(frames)
     }
 
     /// Another online-or-not member of subgroup `group` to ask (its owner first).

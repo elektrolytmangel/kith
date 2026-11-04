@@ -327,8 +327,8 @@ pub enum Event {
         /// Files now complete.
         ready: Vec<ObjectId>,
     },
-    /// The asked peer lacks some chunks we want; try again later (another peer, or
-    /// once the file's author or the always-on client is online).
+    /// The asked peer lacks some chunks we want. The client then asks the file's
+    /// author directly (once); if that fails too, try again later.
     ChunksMissing {
         /// The peer (hex).
         from: String,
@@ -395,6 +395,8 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     fetch_files: bool,
     /// Chunks we asked for, per file (RAM).
     wanted_chunks: std::collections::HashMap<ObjectId, std::collections::HashSet<[u8; 32]>>,
+    /// Files whose author we already asked directly after a peer lacked chunks.
+    asked_author: std::collections::HashSet<ObjectId>,
     /// Certificates, root keys, issued invites.
     orgs: org::Orgs,
     /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
@@ -428,6 +430,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             always_on: false,
             fetch_files: false,
             wanted_chunks: Default::default(),
+            asked_author: Default::default(),
             orgs,
             claims: Default::default(),
             policies: Default::default(),
@@ -1885,10 +1888,17 @@ impl<S: Store, K: Signer> Client<S, K> {
                     ready,
                 }))
             }
-            Message::ChunkMissing(ids) => Ok(Handled::event(Event::ChunksMissing {
-                from,
-                count: ids.len(),
-            })),
+            Message::ChunkMissing(ids) => {
+                // The peer the relay picked may not have the file: ask its author.
+                let replies = self.ask_authors(&org, &scope, &from, &ids)?;
+                Ok(Handled {
+                    replies,
+                    event: Event::ChunksMissing {
+                        from,
+                        count: ids.len(),
+                    },
+                })
+            }
             Message::Query(query) => {
                 match kith_sync::respond(&self.store.scope_ids(&org_scope(&scope)?)?, &query) {
                     Ok(answer) => Ok(Handled {

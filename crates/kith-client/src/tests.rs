@@ -1523,3 +1523,52 @@ fn tampered_chunks_are_not_stored() {
     assert!(matches!(h.event, Event::FileChunks { stored: 0, .. }));
     assert_eq!(net.devs[1].missing_chunks(&oid).unwrap().len(), 1);
 }
+
+/// req: REQ-FILE-002
+#[test]
+fn a_peer_without_the_chunks_makes_the_client_ask_the_author() {
+    let mut net = Net::org(3);
+    let data = big(3_000);
+    let file = net.devs[0].add_file("f", "f", &data).unwrap();
+    let oid = file.body.object_id;
+    spread(&mut net, 0, &file);
+    // Device 1 wants the file; suppose the relay hands its request to device 2,
+    // which is lazy and has none of it.
+    let _ = net.devs[1].fetch_file_frames(&ORG, &oid).unwrap();
+    let ids = net.devs[1].missing_chunks(&oid).unwrap();
+    let body = net.devs[1]
+        .app_body(&ORG, &sync::chunk_want_bodies(&ids)[0])
+        .unwrap();
+    let from = hex(&net.devs[1]);
+    let h = net.devs[2]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body,
+        })
+        .unwrap();
+    assert!(matches!(
+        h.event,
+        Event::ChunksServed {
+            sent: 0,
+            missing: 1,
+            ..
+        }
+    ));
+    // Device 2's "missing" reaches device 1, which asks the author (device 0) directly.
+    let events = net.send(2, h.replies);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 1 && matches!(e, Event::ChunksMissing { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 0 && matches!(e, Event::ChunksServed { sent: 1, .. }))
+    );
+    assert!(events.iter().any(
+        |(i, e)| *i == 1 && matches!(e, Event::FileChunks { ready, .. } if ready == &vec![oid])
+    ));
+    assert_eq!(net.devs[1].read_file(&oid).unwrap(), data);
+}
