@@ -47,6 +47,7 @@ Generic code stays in the library. App-specific behaviour plugs in here:
 | Need | Extension point | Where |
 | --- | --- | --- |
 | Your own data types | `ObjectType` tag + opaque payload bytes (Automerge doc, JSON, protobuf...) | `kith-core` |
+| Merge strategy for concurrent edits (Automerge, last-writer-wins, ...) | `Merger` trait | `kith-merge` |
 | Storage backend (SQLite, IndexedDB, Core Data...) | `Store` trait | `kith-store` |
 | Key storage (Keychain, Android Keystore, secure enclave) | `Signer` trait | `kith-core` |
 | Transport (relay WebSocket, QUIC, WebRTC, Bluetooth) | `Transport` trait | `kith-client` |

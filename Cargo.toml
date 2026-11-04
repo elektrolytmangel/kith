@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0-alpha.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/elektrolytmangel/kith"
 authors = ["kith contributors"]
@@ -21,6 +21,8 @@ authors = ["kith contributors"]
 kith-core = { path = "crates/kith-core", version = "0.1.0-alpha.1" }
 kith-protocol = { path = "crates/kith-protocol", version = "0.1.0-alpha.1" }
 kith-crypto = { path = "crates/kith-crypto", version = "0.1.0-alpha.1" }
+# default-features = false: only crates that need Automerge opt in (it is large on wasm).
+kith-merge = { path = "crates/kith-merge", version = "0.1.0-alpha.1", default-features = false }
 kith-store = { path = "crates/kith-store", version = "0.1.0-alpha.1" }
 kith-sync = { path = "crates/kith-sync", version = "0.1.0-alpha.1" }
 kith-client = { path = "crates/kith-client", version = "0.1.0-alpha.1" }
@@ -30,6 +32,8 @@ kith-relay = { path = "crates/kith-relay", version = "0.1.0-alpha.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# CRDT for concurrent edits (kith-merge). Needs Rust 1.90, which is why the MSRV is 1.90.
+automerge = "0.12"
 # Native only (bundles C SQLite); kith-store gates it behind its `sqlite` feature.
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.11"

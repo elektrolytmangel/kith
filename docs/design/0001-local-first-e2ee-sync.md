@@ -281,7 +281,7 @@ A shared Rust core used by all clients keeps protocol logic identical everywhere
 
 ## Open questions
 
-- [ ] Are all data types Automerge documents, or do some use detect-and-resolve?
+- [x] Are all data types Automerge documents, or do some use detect-and-resolve? Automerge by default, pluggable per type: [ADR 0003](../adr/0003-merge-automerge-default-pluggable.md)
 - [ ] Is a 30-second RAM buffer on the relay acceptable under "no persistence"?
 - [ ] Are push tokens allowed to persist on the relay, or re-registered on every connect?
 - [ ] Which exact rule applies to changes concurrent with a revocation?

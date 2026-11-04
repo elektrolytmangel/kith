@@ -31,6 +31,10 @@ Edits must never wait for a lock. Concurrent edits must be detected (shared
 parent) and merged deterministically on every client (Automerge by default,
 per-type rules otherwise).
 
+`kith_merge::Merger` with the Automerge implementation does this in Rust (see
+[ADR 0003](../adr/0003-merge-automerge-default-pluggable.md)). Still open: exposing
+merged state in the Swift/Kotlin/JS bindings.
+
 ### REQ-DATA-005: Compaction
 
 - **Priority:** should | **Phase:** 8 | **Status:** proposed | **Verify:** test | **Source:** design §Risks

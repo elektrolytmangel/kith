@@ -11,10 +11,15 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Re-export the Automerge merger (kith_client::automerge_merger). Off by default: it is large on wasm.
+automerge = ["kith-merge/automerge"]
+
 [dependencies]
 kith-core.workspace = true
 kith-crypto.workspace = true
 kith-store.workspace = true
+kith-merge.workspace = true
 kith-sync.workspace = true
 kith-protocol.workspace = true
 thiserror.workspace = true

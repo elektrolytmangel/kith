@@ -26,6 +26,7 @@ python3 scripts/reqs.py --write     # after touching requirements or `req:` tags
 | New field in the change envelope | `kith-core` (+ ADR, it breaks signatures) |
 | New wire message | `kith-protocol` (+ bump `PROTOCOL_VERSION` if incompatible) |
 | Storage | `kith-store` |
+| Merging concurrent edits | `kith-merge` (`Merger` impls; Automerge is the default) |
 | Sync algorithm | `kith-sync` (keep it sans-IO: no sockets, no clocks) |
 | App-facing API | `kith-client`, then expose it in `bindings/ffi` and `bindings/wasm` |
 | Relay behaviour | `kith-relay` (logic), `apps/relay-server` (I/O only) |
@@ -62,9 +63,9 @@ docker run --rm -v "$PWD":/src:ro -w /src -e CARGO_TARGET_DIR=/tmp/t rust:1-book
   cargo fmt --all --check &&
   cargo clippy --workspace --all-targets --locked -- -D warnings &&
   cargo test --workspace --locked &&
-  for c in kith-core kith-protocol kith-sync kith-crypto kith-store kith-client; do
+  for c in kith-core kith-protocol kith-sync kith-crypto kith-store kith-merge kith-client; do
     cargo check --locked --target wasm32-unknown-unknown -p $c || exit 1; done &&
-  rustup toolchain install 1.88 --profile minimal && RUSTUP_TOOLCHAIN=1.88 cargo check --workspace --locked'
+  rustup toolchain install 1.90 --profile minimal && RUSTUP_TOOLCHAIN=1.90 cargo check --workspace --locked'
 python3 scripts/reqs.py
 scripts/build-wasm.sh web && node bindings/wasm/tests/smoke.mjs   # needs wasm-pack + Node
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7   # after editing workflows

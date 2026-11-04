@@ -20,7 +20,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # Must match rust-version in Cargo.toml.
-  MSRV: "1.88"
+  MSRV: "1.90"
 
 jobs:
   lint:
@@ -69,7 +69,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Core crates compile for wasm32 on their own
         run: |
-          for c in kith-core kith-protocol kith-sync kith-crypto kith-store kith-client; do
+          for c in kith-core kith-protocol kith-sync kith-crypto kith-store kith-merge kith-client; do
             cargo check --locked --target wasm32-unknown-unknown -p "$c"
           done
       - uses: taiki-e/install-action@v2

@@ -6,7 +6,7 @@ that supersedes the old one.
 
 Open questions from the design doc that are waiting for an ADR:
 
-- [ ] Automerge for all types vs. detect-and-resolve (REQ-DATA-004)
+- [x] Automerge for all types vs. detect-and-resolve (REQ-DATA-004): [ADR 0003](0003-merge-automerge-default-pluggable.md)
 - [ ] 30 s relay buffer vs. "no persistence" (REQ-RELAY-005)
 - [ ] Push token persistence (REQ-RELAY-007)
 - [ ] Rule for changes concurrent with a revocation (REQ-PERM-004)

@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `kith-merge`: `Merger` trait and Automerge implementation; `Client::materialize` merges an
+  object's forked history deterministically (REQ-DATA-004, ADR 0003). Automerge is opt-in
+  (`kith-client/automerge`).
+
+### Changed
+- MSRV is now Rust 1.90 (required by `automerge` 0.12).
+
+### Added
 - Web: `generateSecretKey()` and `await KithClient.open(dbName, secretKey)` persist changes in
   IndexedDB (write-through cache, REQ-STORE-001). `kith_store::codec` encodes changes as bytes.
 

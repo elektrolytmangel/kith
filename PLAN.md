@@ -16,14 +16,14 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | --- | --- |
 | Repository structure | Rust workspace (`crates/`), relay server (`apps/relay-server`), bindings (UniFFI → Swift/Kotlin, wasm-bindgen → npm), docs, requirements, ADRs. See [README](README.md). |
 | Requirements as code | 41 requirements in `docs/requirements/`, traced to tests by `scripts/reqs.py` ([TRACEABILITY.md](docs/requirements/TRACEABILITY.md)). |
-| CI (`ci.yml`) | fmt, clippy, tests on Linux/macOS/Windows, MSRV 1.88, wasm32 per crate, npm build + Node smoke test, UniFFI generation, Swift package + `swift test`, Android AAR, relay image + `/healthz`, requirements check. |
+| CI (`ci.yml`) | fmt, clippy, tests on Linux/macOS/Windows, MSRV 1.90, wasm32 per crate, npm build + Node smoke test, UniFFI generation, Swift package + `swift test`, Android AAR, relay image + `/healthz`, requirements check. |
 | Release (`release.yml`) | Tag `vX.Y.Z` → GitHub Release with relay binaries, npm tarball, Swift package + XCFramework, Android AAR, `SHA256SUMS`. GitHub Releases is the only publish target. Dry run verified 2026-11-03 ([run](https://github.com/elektrolytmangel/kith/actions/runs/41680667767)): every package built. |
 | Dependencies | Current as of 2026-11-03: ed25519-dalek 3, sha2 0.11, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions bumped (#3, #7, #9, #10). |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
 ### What the library can do today (phase 1 skeleton)
 
-Requirements: 7 implemented, 13 partial, 21 accepted/proposed.
+Requirements: 9 implemented, 11 partial, 21 accepted/proposed.
 
 Works: signed, hash-linked changes; per-object history and fork detection;
 in-memory store; device keys; naive reconciliation; relay routing table; relay
@@ -70,7 +70,9 @@ Work top to bottom; check items off here as they land.
          (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`). PR `feat/key-restore`.
    - [x] Store selection, Swift/Kotlin: `KithClient.open(dbPath, secretKey)` + `generateSecretKey()` (PR `feat/ffi-sqlite`).
          Web: remains the `TODO(phase 1)` in `bindings/wasm/src/lib.rs` until the IndexedDB store exists.
-   - [ ] REQ-DATA-004: Automerge objects so concurrent edits merge.
+   - [x] REQ-DATA-004, Rust: `kith-merge` (`Merger` trait + Automerge), `Client::materialize` (PR `feat/merge-automerge`, [ADR 0003](docs/adr/0003-merge-automerge-default-pluggable.md)).
+   - [ ] REQ-DATA-004, bindings: expose merged state + authoring a change in `bindings/ffi` and `bindings/wasm`
+         (needs a JSON-ish document API; wasm size with Automerge must be measured first).
 4. **Phase 2, Relay and live sync**: WebSocket `Transport` (tokio native, browser WebSocket on web),
    REQ-RELAY-004 device auth (challenge/response in `apps/relay-server/src/main.rs` TODOs), REQ-SYNC-004 live updates.
 5. **Phase 3, Catch-up sync**: finish REQ-SYNC-001..003.
@@ -103,6 +105,7 @@ None right now.
 | Agent merges its own PRs when all CI checks pass; tags/releases stay the user's | User: "when the CI passes, you merge by yourself" (2026-11-04) | `CLAUDE.md`, Working agreements |
 | Web persistence = write-through cache over IndexedDB (not an async `Store`) | `Store` is sync; keeps one trait for all platforms. Cost: whole history in memory | `bindings/wasm/src/idb.rs` |
 | After each successful merge, continue with the next plan item without asking | User: "Continue automatically after each merge completed successful" (2026-11-04) | `CLAUDE.md` |
+| Merging: Automerge by default, pluggable `Merger` per type; MSRV raised to 1.90 for automerge 0.12 | User chose "Automerge default + pluggable per-type merger" (2026-11-04); MSRV bump is mine (0.7.x needed a fragile `hexane` lockfile pin) | [ADR 0003](docs/adr/0003-merge-automerge-default-pluggable.md) |
 | Rust core, thin bindings | Same validation/merge logic everywhere | [ADR 0001](docs/adr/0001-monorepo-rust-core-thin-bindings.md) |
 | Requirements as code | Versioned with code, traced to tests | [ADR 0002](docs/adr/0002-requirements-as-code.md) |
 | Randomness only via `kith_core::random_bytes()` (getrandom); no `rand_core` | ed25519-dalek majors change rand_core; seed → `SigningKey::from_bytes` | `crates/kith-core/src/lib.rs`; RFC 8032 test vector guards signatures |
@@ -140,3 +143,4 @@ None right now.
 - **2026-11-04**: Swift/Kotlin can persist (`KithClient.open`, PR `feat/ffi-sqlite`). Cross-compiling bundled SQLite for iOS/Android is only verified by CI. Next: IndexedDB store for web, then REQ-DATA-004 (Automerge).
 - **2026-11-04**: Rule change (user): agent merges its own PRs once CI is green. CLAUDE.md and Working agreements updated.
 - **2026-11-04**: Web IndexedDB persistence (PR `feat/web-indexeddb`); smoke test runs it against `fake-indexeddb` (verified locally in `node:22`). User rule: continue with the next plan item after every successful merge. Next: REQ-DATA-004 (Automerge).
+- **2026-11-04**: `kith-merge` + `Client::materialize` (PR `feat/merge-automerge`); MSRV 1.90. Next: Phase 2 (WebSocket transport, relay device auth) or merge bindings.

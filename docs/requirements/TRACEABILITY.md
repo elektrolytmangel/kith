@@ -7,9 +7,9 @@
 | ID | Title | Pri | Phase | Status | Verify | Tests | Code refs |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | [REQ-DATA-001](data.md#req-data-001-signed-hash-linked-changes) | Signed, hash-linked changes | must | 1 | implemented | test | `crates/kith-core/src/change.rs` | — |
-| [REQ-DATA-002](data.md#req-data-002-opaque-typed-payloads) | Opaque, typed payloads | must | 1 | implemented | test | `crates/kith-core/src/change.rs` | — |
+| [REQ-DATA-002](data.md#req-data-002-opaque-typed-payloads) | Opaque, typed payloads | must | 1 | implemented | test | `crates/kith-core/src/change.rs` | `crates/kith-merge/src/lib.rs` |
 | [REQ-DATA-003](data.md#req-data-003-per-object-history) | Per-object history | must | 1 | implemented | test | `crates/kith-client/src/lib.rs`<br>`crates/kith-core/src/change.rs` | — |
-| [REQ-DATA-004](data.md#req-data-004-lock-free-concurrent-edits) | Lock-free concurrent edits | must | 1 | partial | test | `crates/kith-client/src/lib.rs` | `crates/kith-client/src/lib.rs` |
+| [REQ-DATA-004](data.md#req-data-004-lock-free-concurrent-edits) | Lock-free concurrent edits | must | 1 | partial | test | `crates/kith-client/src/lib.rs`<br>`crates/kith-merge/tests/converge.rs` | `crates/kith-client/src/lib.rs`<br>`crates/kith-merge/src/lib.rs` |
 | [REQ-DATA-005](data.md#req-data-005-compaction) | Compaction | should | 8 | proposed | test | — | — |
 | [REQ-STORE-001](data.md#req-store-001-sqlite-local-store) | SQLite local store | must | 1 | implemented | test | `crates/kith-store/src/sqlite.rs`<br>`bindings/ffi/src/lib.rs`<br>`bindings/swift/Tests/KithTests/KithTests.swift` | `crates/kith-store/src/lib.rs`<br>`crates/kith-store/src/sqlite.rs` |
 | [REQ-STORE-002](data.md#req-store-002-pluggable-storage) | Pluggable storage | should | 1 | implemented | review | `crates/kith-store/src/codec.rs` | — |
