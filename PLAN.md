@@ -80,8 +80,8 @@ Work top to bottom; check items off here as they land.
 ### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
 
 0. [x] **CI skips docs-only changes** (`paths-ignore` in `ci.yml`: Markdown, `docs/**`, LICENSE, templates; PR `ci/skip-docs-only`).
-   A docs-only PR therefore has no checks: merge it directly. Requirements-only changes are not CI-checked, so
-   run `python3 scripts/reqs.py` before pushing them.
+   A docs-only PR therefore has no checks (merge it directly), except requirement edits. Requirements-only changes run only
+   `requirements.yml` (`scripts/reqs.py`).
 
 Blockers, in suggested order:
 
@@ -187,7 +187,7 @@ None.
 
 | Decision | Why | Where |
 | --- | --- | --- |
-| CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. Run `scripts/reqs.py` locally for requirement edits | User request (2026-11-04) | `ci.yml` |
+| CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. requirement edits run only `requirements.yml` | User request (2026-11-04) | `ci.yml` |
 | Distribution: nothing outside GitHub (no npm/Maven/crates.io). Relay and always-on client ship as containers on GitHub Packages (ghcr.io), built from the release binaries | User decision (2026-11-04), replaces the package-registry idea | Road to a release, step 5 |
 | Users with several devices (REQ-ID-002): any member may admit its own extra device (same user, same role, never admin this way); admitting others stays admin-only. The member itself signs the device's relay certificate (option A) | User choice (2026-11-04) | ADR 0011 |
 | Phase 8 scope: relay abuse limits first, then encrypted backups; compaction and push wake-ups later | User choice (2026-11-04) | Phase 8 |

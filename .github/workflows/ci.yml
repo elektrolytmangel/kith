@@ -3,9 +3,8 @@
 name: CI
 
 # Docs-only changes (Markdown, requirements, ADRs, PLAN.md, issue/PR templates)
-# do not start a run. Nothing in the build reads those files. Consequence: a
-# requirements-only change is not checked here; run `python3 scripts/reqs.py`
-# before pushing one.
+# do not start a run. Nothing in the build reads those files. Requirements-only
+# changes are checked by requirements.yml instead.
 on:
   pull_request:
     paths-ignore:

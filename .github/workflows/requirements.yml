@@ -1,0 +1,38 @@
+# Checks the requirements and their traceability when only requirement files
+# change. ci.yml ignores docs-only changes, so without this a requirements-only
+# PR would have no check. Code changes are covered by the `requirements` job
+# in ci.yml. Same command as locally: python3 scripts/reqs.py
+name: Requirements
+
+on:
+  pull_request:
+    paths:
+      - "docs/requirements/**"
+      - "scripts/reqs.py"
+  push:
+    branches: [main]
+    paths:
+      - "docs/requirements/**"
+      - "scripts/reqs.py"
+  workflow_dispatch:
+
+concurrency:
+  group: requirements-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  requirements:
+    name: requirements (docs only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python3 scripts/reqs.py
+      - name: Traceability matrix in run summary
+        if: always()
+        run: cat docs/requirements/TRACEABILITY.md >> "$GITHUB_STEP_SUMMARY"
