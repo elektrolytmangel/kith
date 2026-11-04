@@ -102,6 +102,17 @@ jobs:
         run: |
           npm ci --prefix bindings/wasm/tests
           node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg
+      - name: Browser tests (Chromium, strict CSP)
+        env:
+          KITH_RELAY_BIN: ${{ github.workspace }}/target/debug/kith-relay
+        run: |
+          npm ci --prefix bindings/wasm/tests/browser
+          npx --prefix bindings/wasm/tests/browser playwright install --with-deps chromium
+          node bindings/wasm/tests/browser/run.mjs bindings/wasm/pkg
+      - name: Example web app builds
+        run: |
+          npm ci --prefix examples/web-vite
+          npm run build --prefix examples/web-vite
 
   ffi:
     name: UniFFI bindings

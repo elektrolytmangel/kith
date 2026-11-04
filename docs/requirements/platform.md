@@ -34,3 +34,35 @@ filesystem.
 
 A tag `vX.Y.Z` must build and publish all artifacts (crates, npm, Swift,
 Android, relay image and binaries) with the same version.
+
+### REQ-PLAT-006: One owner per web database
+
+- **Priority:** must | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** this repo
+
+`KithClient.open` must give a browser database to one client at a time (an exclusive
+Web Lock), because each client keeps the MLS group state in memory and a second one
+on the same database would overwrite it and could reuse encryption keys. A second
+tab gets a clear error, or can wait until the first is gone.
+
+### REQ-PLAT-007: Web connection recovers by itself
+
+- **Priority:** must | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** this repo
+
+A web relay connection that drops must reconnect with backoff (and at once when the
+browser comes back online) until the app disconnects, and tell the app with
+`reconnecting` and `connected` events. Changes made while offline stay stored and
+are exchanged by catch-up.
+
+### REQ-PLAT-008: Web key and storage helpers
+
+- **Priority:** should | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** this repo
+
+The npm package must offer a way to keep the device key encrypted at rest with a
+non-extractable key, to request persistent storage and to read the storage quota.
+
+### REQ-PLAT-009: Web package runs under a strict CSP
+
+- **Priority:** should | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** this repo
+
+The npm package must work with a Content-Security-Policy that allows only
+`'self'` and `'wasm-unsafe-eval'` for scripts (no `'unsafe-eval'`, no inline scripts).

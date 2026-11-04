@@ -1,0 +1,8 @@
+{
+  "name": "kith-wasm-browser-tests",
+  "private": true,
+  "description": "Dev-only: real-browser tests of the npm package (never published).",
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

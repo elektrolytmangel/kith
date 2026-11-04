@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (freeze point decided; web readiness list added)
+- **Last updated:** 2026-11-04 (web readiness implemented, PR `feat/web-readiness`)
 - **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices), container
   images and format guards under *Unreleased* in the changelog, for the next alpha.
 - **State of `main` (b1acadd, #50 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -100,21 +100,26 @@ Blockers, in suggested order:
 6. [ ] **Docs for adopters:** per-platform getting started, a small example app, relay deployment guide (TLS,
    limits, always-on client), threat model and the known limits above.
 
-### Web readiness (what a web app still needs; proposal 2026-11-04, my analysis, not yet verified in code)
+### Web readiness (PR `feat/web-readiness`; user asked for all of it on 2026-11-04)
 
-1. [ ] **Several tabs of one app:** each tab opens its own in-memory client on the same IndexedDB, with its own
-   MLS state. Two tabs can diverge and reuse ratchet state. Needs a single owner per database (Web Locks leader
-   lock, or a shared worker) and a documented pattern. Correctness/security, highest priority.
-2. [ ] **Tests in a real browser:** only a Node smoke test with `fake-indexeddb` exists. Add Playwright (Chromium) tests:
-   two contexts sync through the relay, reload keeps data, invite flow, offline then catch-up.
-3. [ ] **Connection handling:** check what `connect` does on drops, offline/online events and background tabs
-   (reconnect with backoff like `kith-net`?), and which Origins the relay accepts.
-4. [ ] **Key and storage safety:** the device key is handed to the app. Provide and document a pattern (non-extractable
-   WebCrypto wrapping, `navigator.storage.persist()`, Safari's storage eviction), and push backups.
-5. [ ] **Size and memory:** wasm is 3.2 MB and all history lives in memory (compaction, REQ-DATA-005). Measure
-   (gzip, load time, memory at 100k changes) and set limits in the docs.
-6. [ ] **Adopter material:** a small Vite example app built in CI, CSP note (`wasm-unsafe-eval`), TypeScript usage,
-   the `bundler` target as default in docs, relay behind `wss`.
+1. [x] **Several tabs of one app:** `KithClient.open` takes an exclusive Web Lock per database (REQ-PLAT-006); a second
+   tab gets an error, or `open(db, key, true)` waits. Without `navigator.locks` (Node < 24, very old browsers) there is
+   no guard (documented).
+2. [x] **Tests in a real browser:** `bindings/wasm/tests/browser/run.mjs` (Playwright 1.62.1, Chromium) in the CI `wasm`
+   job: strict CSP, reload persistence, tab lock, key storage, two browsers through the relay incl. a relay restart.
+   Only Chromium; Firefox and WebKit are not tested.
+3. [x] **Connection handling:** automatic reconnect with backoff, `online` event, `connected` / `reconnecting` events
+   (REQ-PLAT-007). The relay does not check `Origin` (documented; auth is by device key). Offline writes are stored and
+   exchanged by `catchUp` after a reconnect (not automatic).
+4. [x] **Key and storage safety:** `kith-web.js` (`loadOrCreateDeviceKey`, `requestPersistentStorage`,
+   `storageEstimate`; REQ-PLAT-008). Not testable here: Safari's 7-day eviction.
+5. [x] **Size and memory measured** (`KITH_MEASURE=10000,50000`): wasm 3.4 MiB (1.3 gzip); 50k changes: open 5.9 s,
+   38 MiB. Compaction (REQ-DATA-005) is still open; the docs state the limit.
+6. [x] **Adopter material:** `examples/web-vite` (built in CI), `docs/guides/web-production.md`, CSP note (REQ-PLAT-009).
+7. [x] **Found on the way:** no binding could list objects. Added `objects(type?)` in Rust, web and FFI (REQ-DATA-007).
+
+Not done / open for the web: Firefox and WebKit tests; `SharedWorker` pattern for several usable tabs (documented only);
+automatic `catchUp` after reconnect; the Swift/Kotlin `objects()` call is compiled in CI but not run on devices.
 
 ### Completed phases (reference)
 
@@ -335,3 +340,5 @@ None.
   After the first release with images, the user makes the packages public once. Next: step 1 (compatibility policy), then 3.
 - **2026-11-04**: #48 merged (container images; dry run verified). Format guards: golden tests for the change envelope and the store codec, ADR 0012 (proposed). Next: user picks the freeze point; then step 3 (devices) and 4 (gaps).
 - **2026-11-04**: User decided: freeze point = first beta; push wake-ups unplanned. Web readiness list added (multi-tab safety first).
+- **2026-11-04**: Web readiness (PR `feat/web-readiness`): tab lock, reconnect, `kith-web.js`, `objects()`, browser tests in CI, Vite example, web production guide.
+  Next: step 3 (Swift/Kotlin on devices; needs a macOS/Android runner or device), step 4 (gaps), step 6 docs for other platforms.

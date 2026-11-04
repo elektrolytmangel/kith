@@ -23,7 +23,9 @@ REQ_DIR = ROOT / "docs" / "requirements"
 MATRIX = REQ_DIR / "TRACEABILITY.md"
 SKIP_FILES = {"README.md", "TRACEABILITY.md"}
 SCAN_DIRS = ["crates", "apps", "bindings", "examples", "tests"]
-SCAN_EXT = {".rs", ".swift", ".kt", ".ts", ".js", ".py"}
+SCAN_EXT = {".rs", ".swift", ".kt", ".ts", ".js", ".mjs", ".py"}
+# Generated or vendored output that must not count as code or tests.
+SKIP_DIRS = {"target", "node_modules", "pkg", ".build"}
 
 ID_RE = re.compile(r"REQ-[A-Z]+-\d{3}")
 HEAD_RE = re.compile(r"^###\s+(REQ-[A-Z]+-\d{3}):\s*(.+?)\s*$")
@@ -96,7 +98,7 @@ def scan_code(reqs: dict[str, Req], errors: list[str]) -> None:
         if not base.exists():
             continue
         for path in sorted(base.rglob("*")):
-            if path.suffix not in SCAN_EXT or "target" in path.parts or "node_modules" in path.parts:
+            if path.suffix not in SCAN_EXT or SKIP_DIRS & set(path.parts):
                 continue
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             rel = path.relative_to(ROOT).as_posix()

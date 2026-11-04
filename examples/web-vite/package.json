@@ -1,0 +1,17 @@
+{
+  "name": "kith-web-vite-example",
+  "private": true,
+  "type": "module",
+  "description": "A small notes app using kith in the browser (Vite). Built in CI.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@elektrolytmangel/kith-wasm": "file:../../bindings/wasm/pkg"
+  },
+  "devDependencies": {
+    "vite": "8.3.4"
+  }
+}

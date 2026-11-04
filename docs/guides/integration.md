@@ -156,7 +156,11 @@ const client = await KithClient.open("my-app", key); // Promise
 ```
 
 Changes are kept in memory and written through to IndexedDB (database `my-app`).
-`new KithClient()` stays ephemeral.
+`new KithClient()` stays ephemeral. Only one client may own a database at a time
+(`open` rejects in a second tab, or waits with `open(db, key, true)`), and the package
+ships helpers to keep the key encrypted at rest and to ask for persistent storage:
+see [Web apps in production](web-production.md). List what the device knows with
+`client.objects("acme.note")`.
 
 Live sync with other devices through a relay (see [Relay](#relay) below):
 
@@ -183,6 +187,10 @@ new device) by asking one online peer. The two compare their change sets in a fe
 ```ts
 client.catchUp(); // after connecting, once a "presence" event shows another device
 ```
+
+The connection reconnects by itself and reports `connected`, `closed` and
+`reconnecting` events; call `catchUp()` again after a reconnect once a `presence` event shows
+another device.
 
 Live updates only reach devices that are online at the same time. Node 22+ has a global
 `WebSocket`; older Node needs a polyfill.

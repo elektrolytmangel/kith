@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Web: one owner per IndexedDB database (exclusive Web Lock; `KithClient.open(db, key, waitForLock?)`,
+  REQ-PLAT-006), automatic relay reconnect with `connected` / `reconnecting` events (REQ-PLAT-007),
+  `kith-web.js` helpers for an encrypted device key, persistent storage and the storage quota
+  (REQ-PLAT-008), real-browser tests under a strict CSP (REQ-PLAT-009), example app `examples/web-vite`,
+  guide [Web apps in production](docs/guides/web-production.md).
+- `objects(type?)` in every binding: list the objects a device knows (REQ-DATA-007).
 - Golden tests that pin the change envelope and the stored encoding, and [ADR 0012](docs/adr/0012-format-stability.md) (format versions and compatibility rules; frozen from the first beta).
 - Container images for the relay and the always-on client on GitHub Packages (ghcr.io), built from the
   release binaries by `release.yml` (amd64, arm64); `deploy/docker-compose.yml` (relay with TLS) and

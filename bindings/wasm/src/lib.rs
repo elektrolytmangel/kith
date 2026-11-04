@@ -10,6 +10,7 @@ use wasm_bindgen::prelude::*;
 
 mod idb;
 mod live;
+mod lock;
 
 fn device_key(secret_key: &[u8]) -> Result<DeviceKey, JsError> {
     let seed: [u8; 32] = secret_key.try_into().map_err(|_| {
@@ -37,6 +38,8 @@ pub fn version() -> String {
 pub struct KithClient {
     inner: live::SharedClient,
     live: Option<live::Live>,
+    /// Keeps other tabs off the same IndexedDB database (see `lock.rs`).
+    _lock: Option<lock::TabLock>,
 }
 
 fn js_err(e: impl std::fmt::Display) -> JsError {
@@ -48,10 +51,15 @@ fn parse_role(s: &str) -> Result<kith_client::Role, JsError> {
         .ok_or_else(|| JsError::new(&format!("unknown role {s:?}: use viewer, editor or admin")))
 }
 
-fn wrap(key: DeviceKey, store: Box<dyn Store>) -> Result<KithClient, JsError> {
+fn wrap(
+    key: DeviceKey,
+    store: Box<dyn Store>,
+    lock: Option<lock::TabLock>,
+) -> Result<KithClient, JsError> {
     Ok(KithClient {
         inner: Rc::new(RefCell::new(Client::new(key, store).map_err(js_err)?)),
         live: None,
+        _lock: lock,
     })
 }
 
@@ -64,7 +72,7 @@ impl KithClient {
     /// For persistence use `KithClient.open`.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        wrap(DeviceKey::generate(), Box::new(MemoryStore::new()))
+        wrap(DeviceKey::generate(), Box::new(MemoryStore::new()), None)
             .expect("an empty memory store has no MLS state to load")
     }
 
@@ -72,7 +80,7 @@ impl KithClient {
     /// `secretKey()`), with an in-memory store.
     #[wasm_bindgen(js_name = withSecretKey)]
     pub fn with_secret_key(secret_key: &[u8]) -> Result<KithClient, JsError> {
-        wrap(device_key(secret_key)?, Box::new(MemoryStore::new()))
+        wrap(device_key(secret_key)?, Box::new(MemoryStore::new()), None)
     }
 
     /// Persistent client: changes and the MLS group state are stored in the
@@ -80,13 +88,23 @@ impl KithClient {
     /// `secretKey`. Returns a Promise. Opening the same `dbName` with the same key
     /// later restores all data, the identity and group membership. The database
     /// holds group secrets.
+    ///
+    /// Only one client may own a database at a time: it takes an exclusive Web Lock
+    /// (`navigator.locks`) held until the client is freed or the page closes. If
+    /// another tab holds it, this rejects, or with `waitForLock = true` waits until that
+    /// tab is gone (leader election: the waiting tab takes over).
     #[wasm_bindgen(js_name = open)]
-    pub async fn open(db_name: String, secret_key: Vec<u8>) -> Result<KithClient, JsError> {
+    pub async fn open(
+        db_name: String,
+        secret_key: Vec<u8>,
+        wait_for_lock: Option<bool>,
+    ) -> Result<KithClient, JsError> {
         let key = device_key(&secret_key)?;
+        let lock = lock::acquire(&db_name, wait_for_lock.unwrap_or(false)).await?;
         let store = idb::IdbStore::open(&db_name)
             .await
             .map_err(|e| JsError::new(&idb::js_message(&e)))?;
-        wrap(key, Box::new(store))
+        wrap(key, Box::new(store), lock)
     }
 
     /// Restore a device from a backup (`exportBackup`) into the IndexedDB database
@@ -98,7 +116,9 @@ impl KithClient {
         db_name: String,
         backup: Vec<u8>,
         passphrase: String,
+        wait_for_lock: Option<bool>,
     ) -> Result<KithClient, JsError> {
+        let lock = lock::acquire(&db_name, wait_for_lock.unwrap_or(false)).await?;
         let store = idb::IdbStore::open(&db_name)
             .await
             .map_err(|e| JsError::new(&idb::js_message(&e)))?;
@@ -107,6 +127,7 @@ impl KithClient {
         Ok(KithClient {
             inner: Rc::new(RefCell::new(c)),
             live: None,
+            _lock: lock,
         })
     }
 
@@ -131,7 +152,13 @@ impl KithClient {
     /// `{type: "syncReceived", ...}`, group events
     /// (`inviteClaimed` with `from` and `code`, `joined`, `certificateUpdated`,
     /// `groupChanged`, `epochBehind`, `commitsServed`, `commitsApplied`,
-    /// `reAddRequested`, `memberReAdded`, `fork`), `{type: "closed"}` and `{type: "error"}`.
+    /// `reAddRequested`, `memberReAdded`, `fork`) and the connection's own events:
+    /// `{type: "connected"}` (handshake started), `{type: "closed"}`,
+    /// `{type: "reconnecting", attempt, delayMs}` and `{type: "error"}`.
+    ///
+    /// The connection reconnects by itself (1 s, doubling to 30 s, at once when the
+    /// browser comes back online) until `disconnect`. Changes made while offline are
+    /// stored; after `connected` and a `presence` event call `catchUp` to exchange them.
     ///
     /// Every body is encrypted for `org`'s MLS group: the device must be a member
     /// (`createOrg` on the first device; others join with an invite: `createInvite`,
@@ -577,6 +604,32 @@ impl KithClient {
     #[wasm_bindgen(js_name = setFetchFiles)]
     pub fn set_fetch_files(&self, eager: bool) {
         self.inner.borrow_mut().set_fetch_files(eager);
+    }
+
+    /// The objects this device knows, oldest first, optionally only of one type:
+    /// an array of `{objectId, objectType, scope, author, createdMs}`. Includes
+    /// documents and file objects. Walks the whole store: call it to build a list,
+    /// then update the list from `received` / `syncReceived` events.
+    pub fn objects(&self, object_type: Option<String>) -> Result<js_sys::Array, JsError> {
+        let list = self
+            .inner
+            .borrow()
+            .objects(object_type.as_deref())
+            .map_err(js_err)?;
+        let out = js_sys::Array::new();
+        for c in list {
+            let o = js_sys::Object::new();
+            let put = |k: &str, v: JsValue| {
+                let _ = js_sys::Reflect::set(&o, &k.into(), &v);
+            };
+            put("objectId", c.body.object_id.to_hex().into());
+            put("objectType", c.body.object_type.as_str().into());
+            put("scope", c.body.scope.as_str().into());
+            put("author", c.author.to_hex().into());
+            put("createdMs", (c.body.timestamp_ms as f64).into());
+            out.push(&o);
+        }
+        Ok(out)
     }
 
     /// Number of changes in an object's history.

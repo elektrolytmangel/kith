@@ -2215,6 +2215,29 @@ impl<S: Store, K: Signer> Client<S, K> {
         Ok(h)
     }
 
+    /// The objects this device knows, as their creation changes (object ID, type, scope,
+    /// author, creation time), oldest first; optionally only one `object_type`. Includes
+    /// documents and file objects, not the internal policy object. Walks the whole store,
+    /// so call it when building a list, not per frame.
+    pub fn objects(&self, object_type: Option<&str>) -> Result<Vec<Change>, ClientError> {
+        let mut out = Vec::new();
+        for id in self.store.all_ids()? {
+            let Some(c) = self.store.get(&id)? else {
+                continue;
+            };
+            let ty = c.body.object_type.as_str();
+            if c.is_creation()
+                && ty != POLICY_TYPE
+                && object_type.is_none_or(|t| t == ty)
+                && !self.invalid.contains(&c.change_id)
+            {
+                out.push(c);
+            }
+        }
+        out.sort_by_key(|c| (c.body.timestamp_ms, *c.change_id.as_bytes()));
+        Ok(out)
+    }
+
     /// The signer this client was created with (for `DeviceKey`: read the
     /// secret seed to persist it, see `DeviceKey::secret_bytes`).
     pub fn signer(&self) -> &K {

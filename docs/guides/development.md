@@ -69,6 +69,10 @@ docker run --rm -v "$PWD":/src:ro -w /src -e CARGO_TARGET_DIR=/tmp/t rust:1-book
   rustup toolchain install 1.91 --profile minimal && RUSTUP_TOOLCHAIN=1.91 cargo check --workspace --locked'
 python3 scripts/reqs.py
 scripts/build-wasm.sh web && node bindings/wasm/tests/smoke.mjs   # needs wasm-pack + Node
+# real-browser tests (Chromium via Playwright; official image has the browsers):
+#   cargo build -p kith-relay-server && npm ci --prefix bindings/wasm/tests/browser
+#   KITH_RELAY_BIN=target/debug/kith-relay node bindings/wasm/tests/browser/run.mjs
+#   (in Docker: mcr.microsoft.com/playwright:v1.62.1-noble)
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7   # after editing workflows
 ```
 
