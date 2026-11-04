@@ -2,8 +2,10 @@
 
 All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`,
 `history`, and `secretKey` / `withSecretKey` to keep the device identity across
-restarts (store the key in the platform's secure storage; the data itself is
-still in memory only until the store selection lands). Sync, encryption and invitations will be added in later phases.
+restarts (store the key in the platform's secure storage).
+On Swift and Kotlin, `generateSecretKey()` and `KithClient.open(dbPath, secretKey)`
+also persist the data in a SQLite file; the web package is still in memory only
+(IndexedDB store pending). `KithClient()` stays ephemeral. Sync, encryption and invitations will be added in later phases.
 
 Every package is a GitHub Release asset:
 `https://github.com/elektrolytmangel/kith/releases/download/vX.Y.Z/<asset>`. The repository

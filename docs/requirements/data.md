@@ -45,8 +45,8 @@ policy agreed by the organization.
 Native clients must store changes append-only in SQLite with a materialized
 objects table that is rebuildable from changes.
 
-`kith_store::SqliteStore` (feature `sqlite`) implements this. Still open: wiring it
-into the bindings, and the IndexedDB store for web.
+`kith_store::SqliteStore` (feature `sqlite`) implements this. Swift and Kotlin use it
+through `KithClient.open`. Still open: the IndexedDB store for web.
 
 ### REQ-STORE-002: Pluggable storage
 

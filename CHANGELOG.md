@@ -5,6 +5,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Swift/Kotlin: `generateSecretKey()` and `KithClient.open(dbPath, secretKey)` persist changes in
+  SQLite (REQ-STORE-001). `Store` is implemented for `Box<dyn Store>`.
+
+### Added
 - Bindings: `secretKey()` and `KithClient.withSecretKey(...)` (Swift, Kotlin, JS) restore the
   device identity across restarts; `Client::signer()` in `kith-client`.
 

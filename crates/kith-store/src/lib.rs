@@ -47,6 +47,27 @@ pub trait Store {
     }
 }
 
+impl<S: Store + ?Sized> Store for Box<S> {
+    fn put(&mut self, change: Change) -> Result<bool, StoreError> {
+        (**self).put(change)
+    }
+    fn get(&self, id: &ChangeId) -> Result<Option<Change>, StoreError> {
+        (**self).get(id)
+    }
+    fn contains(&self, id: &ChangeId) -> Result<bool, StoreError> {
+        (**self).contains(id)
+    }
+    fn history(&self, object: &ObjectId) -> Result<Vec<Change>, StoreError> {
+        (**self).history(object)
+    }
+    fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError> {
+        (**self).all_ids()
+    }
+    fn heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, StoreError> {
+        (**self).heads(object)
+    }
+}
+
 /// In-memory store, for tests and ephemeral clients.
 #[derive(Default, Debug)]
 pub struct MemoryStore {
