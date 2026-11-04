@@ -79,7 +79,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
+      - name: Build the relay (the smoke test runs live sync against it)
+        run: cargo build --locked -p kith-relay-server
       - name: Smoke test the npm package
+        env:
+          KITH_RELAY_BIN: ${{ github.workspace }}/target/debug/kith-relay
         run: |
           npm ci --prefix bindings/wasm/tests
           node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg

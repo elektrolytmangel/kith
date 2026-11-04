@@ -52,7 +52,7 @@ wasm-bindgen = "0.2"
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
-    "console", "DomException", "Event", "IdbDatabase", "IdbFactory", "IdbObjectStore",
+    "BinaryType", "CloseEvent", "console", "DomException", "Event", "MessageEvent", "WebSocket", "IdbDatabase", "IdbFactory", "IdbObjectStore",
     "IdbObjectStoreParameters", "IdbOpenDbRequest", "IdbRequest", "IdbTransaction",
     "IdbTransactionMode",
 ] }

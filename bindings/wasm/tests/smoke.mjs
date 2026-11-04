@@ -3,6 +3,7 @@
 //   scripts/build-wasm.sh web && node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 // Node has no IndexedDB; this provides a spec-compliant one on globalThis.
 await import("fake-indexeddb/auto");
@@ -41,5 +42,67 @@ assert.equal(second.historyLength(oid), 3);
 await assert.rejects(() => kith.KithClient.open("smoke-db", new Uint8Array(5)));
 const other = await kith.KithClient.open("other-db", key);
 assert.equal(other.historyLength(oid), 0); // separate database, no data
+
+
+// Live sync through a real relay. Needs the relay binary:
+//   cargo build -p kith-relay-server && KITH_RELAY_BIN=target/debug/kith-relay node ...
+if (process.env.KITH_RELAY_BIN) {
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const relay = spawn(process.env.KITH_RELAY_BIN, [], {
+    env: { ...process.env, KITH_RELAY_ADDR: `127.0.0.1:${port}`, RUST_LOG: "warn" },
+    stdio: "inherit",
+  });
+  try {
+    for (let i = 0; ; i++) {
+      try {
+        if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break;
+      } catch {}
+      assert.ok(i < 100, "relay did not start");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const url = `ws://127.0.0.1:${port}/v1/ws`;
+    const waitFor = (events, pred, what) =>
+      new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), 5000);
+        const check = () => {
+          const hit = events.find(pred);
+          if (hit) { clearTimeout(t); resolve(hit); }
+          else events.waiters.push(check);
+        };
+        check();
+      });
+    const listen = () => {
+      const events = [];
+      events.waiters = [];
+      events.push = (e) => { Array.prototype.push.call(events, e); events.waiters.splice(0).forEach((f) => f()); };
+      return events;
+    };
+
+    const evA = listen(), evB = listen();
+    const a = new kith.KithClient(), b = new kith.KithClient();
+    a.connect(url, "org", (e) => evA.push(e));
+    b.connect(url, "org", (e) => evB.push(e));
+    await waitFor(evA, (e) => e.type === "presence" && e.online.length === 2, "both devices online");
+
+    const objectId = a.create("acme.note", new TextEncoder().encode("from a"));
+    const got = await waitFor(evB, (e) => e.type === "received", "b to receive a's change");
+    assert.equal(got.objectId, objectId);
+    assert.equal(got.from, a.deviceId());
+    assert.equal(got.isNew, true);
+    assert.equal(b.historyLength(objectId), 1);
+
+    b.edit(objectId, new TextEncoder().encode("from b"));
+    await waitFor(evA, (e) => e.type === "received" && e.from === b.deviceId(), "a to receive b's edit");
+    assert.equal(a.historyLength(objectId), 2);
+
+    a.disconnect();
+    b.disconnect();
+    console.log("ok: live sync through the relay");
+  } finally {
+    relay.kill();
+  }
+} else {
+  console.log("skipped: live sync (set KITH_RELAY_BIN to the kith-relay binary)");
+}
 
 console.log(`ok: kith-wasm ${kith.version()}`);

@@ -34,7 +34,7 @@ WebSocket server; the `create` / `edit` / `history` API on every platform.
 | Gap | Effect | Requirement |
 | --- | --- | --- |
 | `Transport` is only a trait; no WebSocket client | Clients can't talk to the relay | REQ-SYNC-004 |
-| Live sync exists only in Rust (`kith-net`); bindings cannot connect to a relay yet | Apps on Swift/Kotlin/web can't sync | REQ-SYNC-004 |
+| Live sync exists in Rust (`kith-net`) and web (`connect`); Swift/Kotlin bindings cannot connect to a relay yet | Swift/Kotlin apps can't sync | REQ-SYNC-004 |
 | Relay checks device keys but not org membership proofs (any device can join any org id) | Don't expose it publicly | REQ-RELAY-004 |
 | No encryption (MLS) | Payloads are not end-to-end encrypted | REQ-ENC-001..004 |
 | Concurrent edits stay forked (no CRDT merge) | No conflict-free merging | REQ-DATA-004 |
@@ -79,8 +79,9 @@ Work top to bottom; check items off here as they land.
          Membership proofs (org root key) wait for phase 5; the relay still lets any authenticated device join any org.
    - [x] Native WebSocket client + REQ-SYNC-004 live updates: `kith-net` (`RelayConnection`, `LiveClient`) and sans-IO
          `Client::handle_frame` (PR `feat/live-sync`). Bodies are **plaintext** until phase 4.
-   - [ ] Browser WebSocket client for the web package (same frames; `kith-client` is sans-IO so only the socket is new).
-   - [ ] Bindings (Swift/Kotlin/JS): connect to a relay and receive changes from peers, then expose merged state (REQ-DATA-004 in bindings;
+   - [x] Browser WebSocket client for the web package: `KithClient.connect(url, org, onEvent)` (PR `feat/web-live-sync`);
+         the Node smoke test runs it against the real relay binary.
+   - [ ] Bindings (Swift/Kotlin): connect to a relay and receive changes from peers (UniFFI async/callbacks), then expose merged state (REQ-DATA-004 in bindings;
          moved here from phase 1 because without sync an app cannot create a fork).
 5. **Phase 3, Catch-up sync**: finish REQ-SYNC-001..003.
 6. **Phase 4, Encryption (MLS / OpenMLS)**: REQ-ENC-001..004. **Required before any real user data.**
@@ -153,3 +154,4 @@ None right now.
 - **2026-11-04**: `kith-merge` + `Client::materialize` (PR `feat/merge-automerge`); MSRV 1.90. Next: Phase 2 (WebSocket transport, relay device auth) or merge bindings.
 - **2026-11-04**: Relay device authentication + reconnect fix (PR `feat/relay-device-auth`). Next: WebSocket `Transport` client, live updates.
 - **2026-11-04**: `kith-net` + `Client::handle_frame` live sync (PR `feat/live-sync`); relay now a lib + bin and sends a close frame. Next: browser WebSocket client, then bindings.
+- **2026-11-04**: Web live sync (`KithClient.connect`, PR `feat/web-live-sync`), smoke-tested against the real relay. Next: Swift/Kotlin connect, then phase 3 catch-up.

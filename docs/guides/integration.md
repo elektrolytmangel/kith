@@ -38,6 +38,20 @@ const client = await KithClient.open("my-app", key); // Promise
 Changes are kept in memory and written through to IndexedDB (database `my-app`).
 `new KithClient()` stays ephemeral.
 
+Live sync with other devices through a relay (see [Relay](#relay) below):
+
+```ts
+client.connect("wss://relay.example.com/v1/ws", "my-org", (e) => {
+  // e.type: "received" | "rejected" | "presence" | "receipt" | "relayError" | "closed" | "error"
+  if (e.type === "received") render(e.objectId); // the change is already validated and stored
+});
+client.create("acme.note", bytes); // now also broadcast to the other online devices
+```
+
+Only devices that are online at the same time are reached, and message bodies are
+not encrypted yet (phase 4); don't use it for real user data. Node 22+ has a global
+`WebSocket`; older Node needs a polyfill.
+
 Bundlers: build with `scripts/build-wasm.sh bundler` for webpack and Vite
 without an `init()` call. Electron renderer processes work like the web;
 for the main process, prefer the Rust crate through a native module.

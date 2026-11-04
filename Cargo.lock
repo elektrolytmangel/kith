@@ -944,6 +944,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "js-sys",
  "kith-client",
+ "kith-protocol",
  "kith-store",
  "wasm-bindgen",
  "wasm-bindgen-futures",
