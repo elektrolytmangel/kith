@@ -3,10 +3,13 @@
 
 #![allow(missing_docs)] // wasm-bindgen generates items
 
+use std::{cell::RefCell, rc::Rc};
+
 use kith_client::{Client, DeviceKey, MemoryStore, ObjectId, ObjectType, Store};
 use wasm_bindgen::prelude::*;
 
 mod idb;
+mod live;
 
 fn device_key(secret_key: &[u8]) -> Result<DeviceKey, JsError> {
     let seed: [u8; 32] = secret_key.try_into().map_err(|_| {
@@ -32,7 +35,15 @@ pub fn version() -> String {
 /// Client handle for JavaScript.
 #[wasm_bindgen]
 pub struct KithClient {
-    inner: Client<Box<dyn Store>>,
+    inner: live::SharedClient,
+    live: Option<live::Live>,
+}
+
+fn wrap(key: DeviceKey, store: Box<dyn Store>) -> KithClient {
+    KithClient {
+        inner: Rc::new(RefCell::new(Client::new(key, store))),
+        live: None,
+    }
 }
 
 #[wasm_bindgen]
@@ -44,18 +55,14 @@ impl KithClient {
     /// For persistence use `KithClient.open`.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        Self {
-            inner: Client::new(DeviceKey::generate(), Box::new(MemoryStore::new())),
-        }
+        wrap(DeviceKey::generate(), Box::new(MemoryStore::new()))
     }
 
     /// Restore a device identity from its 32-byte secret key (as returned by
     /// `secretKey()`), with an in-memory store.
     #[wasm_bindgen(js_name = withSecretKey)]
     pub fn with_secret_key(secret_key: &[u8]) -> Result<KithClient, JsError> {
-        Ok(Self {
-            inner: Client::new(device_key(secret_key)?, Box::new(MemoryStore::new())),
-        })
+        Ok(wrap(device_key(secret_key)?, Box::new(MemoryStore::new())))
     }
 
     /// Persistent client: changes are stored in the IndexedDB database
@@ -68,9 +75,39 @@ impl KithClient {
         let store = idb::IdbStore::open(&db_name)
             .await
             .map_err(|e| JsError::new(&idb::js_message(&e)))?;
-        Ok(Self {
-            inner: Client::new(key, Box::new(store)),
-        })
+        Ok(wrap(key, Box::new(store)))
+    }
+
+    /// Connect to a relay (`ws://host:port/v1/ws`, `wss://` in production),
+    /// authenticate as this device and join `org`. From then on every
+    /// `create`/`edit` is broadcast to the other online devices, and their
+    /// changes are validated and stored. `onEvent` receives plain objects:
+    /// `{type: "received", org, from, objectId, changeId, isNew}`,
+    /// `{type: "rejected", org, from, reason}`, `{type: "presence", org, online}`,
+    /// `{type: "receipt", delivered}`, `{type: "relayError", code, message}`,
+    /// `{type: "closed"}` and `{type: "error"}`.
+    ///
+    /// Only devices online at the same time are reached; changes made while
+    /// offline are not sent later (catch-up sync is not implemented yet), and
+    /// message bodies are not encrypted yet.
+    pub fn connect(
+        &mut self,
+        url: &str,
+        org: &str,
+        on_event: js_sys::Function,
+    ) -> Result<(), JsError> {
+        self.disconnect();
+        let live = live::Live::connect(self.inner.clone(), url, org, on_event)
+            .map_err(|e| JsError::new(&idb::js_message(&e)))?;
+        self.live = Some(live);
+        Ok(())
+    }
+
+    /// Close the relay connection, if any.
+    pub fn disconnect(&mut self) {
+        if let Some(live) = self.live.take() {
+            live.close();
+        }
     }
 
     /// The 32-byte secret key of this device. Anyone who has it can sign as
@@ -78,20 +115,22 @@ impl KithClient {
     /// non-extractable `CryptoKey`-wrapped blob or app-level encryption.
     #[wasm_bindgen(js_name = secretKey)]
     pub fn secret_key(&self) -> Vec<u8> {
-        self.inner.signer().secret_bytes().to_vec()
+        self.inner.borrow().signer().secret_bytes().to_vec()
     }
 
     #[wasm_bindgen(js_name = deviceId)]
     pub fn device_id(&self) -> String {
-        self.inner.device_id().to_hex()
+        self.inner.borrow().device_id().to_hex()
     }
 
     /// Create an object; returns its object ID (hex).
     pub fn create(&mut self, object_type: &str, payload: &[u8]) -> Result<String, JsError> {
         let c = self
             .inner
+            .borrow_mut()
             .create(ObjectType::new(object_type), payload.to_vec())
             .map_err(|e| JsError::new(&e.to_string()))?;
+        self.broadcast(&c);
         Ok(c.body.object_id.to_hex())
     }
 
@@ -100,8 +139,10 @@ impl KithClient {
         let oid = ObjectId::from_hex(object_id).map_err(|e| JsError::new(&e.to_string()))?;
         let c = self
             .inner
+            .borrow_mut()
             .edit(oid, payload.to_vec())
             .map_err(|e| JsError::new(&e.to_string()))?;
+        self.broadcast(&c);
         Ok(c.change_id.to_hex())
     }
 
@@ -111,9 +152,18 @@ impl KithClient {
         let oid = ObjectId::from_hex(object_id).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(self
             .inner
+            .borrow()
             .history(&oid)
             .map_err(|e| JsError::new(&e.to_string()))?
             .len())
+    }
+}
+
+impl KithClient {
+    fn broadcast(&self, change: &kith_client::Change) {
+        if let Some(live) = &self.live {
+            live.broadcast(change);
+        }
     }
 }
 

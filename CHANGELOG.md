@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Web: `client.connect(url, org, onEvent)` / `disconnect()` for live sync over `WebSocket`; `create`/`edit`
+  broadcast, peers' changes are validated and stored and reported to `onEvent` (REQ-SYNC-004).
+  The smoke test runs it against the real relay.
+
+### Added
 - `kith-net` (native): `RelayConnection` (authenticated WebSocket) and `LiveClient`, which
   broadcasts each new change and validates received ones (REQ-SYNC-004). `kith-client`:
   `Client::handle_frame`, `Event`, `announce_frame`, `broadcast_frame`. Optional `tls` feature for `wss://`.
