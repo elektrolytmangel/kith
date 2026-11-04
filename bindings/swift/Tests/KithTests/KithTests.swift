@@ -27,6 +27,16 @@ final class KithTests: XCTestCase {
         XCTAssertEqual(try second.history(objectId: objectId).count, 1)
     }
 
+    /// req: REQ-SYNC-004
+    func testRelaySessionProducesFrames() throws {
+        let client = KithClient()
+        let session = client.relaySession(org: "org")
+        XCTAssertFalse(try session.hello().isEmpty)
+        let change = try client.create(type: "note", text: "hello")
+        XCTAssertFalse(try session.broadcast(changeId: change.changeId).isEmpty)
+        XCTAssertThrowsError(try session.receive(frame: Data("not a frame".utf8)))
+    }
+
     /// req: REQ-PLAT-002
     func testRestoredKeyKeepsDeviceIdentity() throws {
         let first = KithClient()

@@ -31,8 +31,9 @@ validate before storing.
 Done for native Rust: `kith_net::LiveClient` broadcasts via the relay and
 `Client::handle_frame` validates and stores (bad changes are reported as
 `Event::Rejected`). The web package does the same over the browser `WebSocket`
-(`KithClient.connect`, tested against the real relay in Node). Open: Swift/Kotlin bindings,
-and encrypting the bodies (phase 4: they are plaintext on the relay today).
+(`KithClient.connect`, tested against the real relay in Node). Swift/Kotlin get
+`KithClient.relaySession(org)` (sans-IO: the app owns the socket; Swift also has
+`RelayConnection`). Open: encrypting the bodies (phase 4: they are plaintext on the relay today).
 
 ### REQ-SYNC-005: Resumable large syncs
 

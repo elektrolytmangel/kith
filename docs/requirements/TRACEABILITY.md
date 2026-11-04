@@ -45,5 +45,5 @@
 | [REQ-SYNC-001](sync.md#req-sync-001-catch-up-from-one-online-peer) | Catch-up from one online peer | must | 3 | partial | test | `crates/kith-relay/src/lib.rs` | `crates/kith-net/src/lib.rs` |
 | [REQ-SYNC-002](sync.md#req-sync-002-exchange-only-missing-changes) | Exchange only missing changes | must | 3 | partial | test | `crates/kith-sync/src/lib.rs` | `crates/kith-sync/src/lib.rs` |
 | [REQ-SYNC-003](sync.md#req-sync-003-join-from-empty) | Join from empty | must | 3 | partial | test | `crates/kith-sync/src/lib.rs` | — |
-| [REQ-SYNC-004](sync.md#req-sync-004-live-updates) | Live updates | must | 2 | partial | test | `crates/kith-client/src/lib.rs`<br>`crates/kith-net/src/lib.rs` | `crates/kith-client/src/lib.rs`<br>`crates/kith-net/src/lib.rs` |
+| [REQ-SYNC-004](sync.md#req-sync-004-live-updates) | Live updates | must | 2 | partial | test | `crates/kith-client/src/lib.rs`<br>`crates/kith-net/src/lib.rs`<br>`bindings/ffi/src/lib.rs`<br>`bindings/swift/Tests/KithTests/KithTests.swift` | `crates/kith-client/src/lib.rs`<br>`crates/kith-net/src/lib.rs` |
 | [REQ-SYNC-005](sync.md#req-sync-005-resumable-large-syncs) | Resumable large syncs | should | 7 | proposed | test | — | — |

@@ -71,6 +71,22 @@ let change = try client.create(type: "acme.note", text: "hello")
 let history = try client.history(objectId: change.objectId)
 ```
 
+Live sync with other devices (`RelayConnection` wraps `URLSessionWebSocketTask`; the
+protocol logic is in Rust):
+
+```swift
+let conn = RelayConnection(client: client, url: URL(string: "wss://relay.example.com/v1/ws")!,
+                           org: "my-org", onEvent: { event in
+    if case .received(_, _, let objectId, _, _) = event { /* validated and stored */ }
+})
+conn.start()
+let change = try client.create(type: "acme.note", text: "hi")
+conn.broadcast(change)   // to the other online devices
+```
+
+Only devices that are online at the same time are reached, and message bodies are not
+encrypted yet (phase 4); don't use it for real user data.
+
 Keep the device key in the Keychain: after the first launch save
 `client.secretKey()` (32 bytes), and on later launches restore the same device
 identity with `try KithClient.withSecretKey(secretKey: data)`.
@@ -93,6 +109,26 @@ val client = KithClient()
 val change = client.create("acme.note", "hello")
 val history = client.history(change.objectId)
 ```
+
+Live sync with other devices: you own the WebSocket (here OkHttp), `RelaySession`
+(Rust) does the protocol:
+
+```kotlin
+val session = client.relaySession("my-org")
+val ws = okHttp.newWebSocket(Request.Builder().url("wss://relay.example.com/v1/ws").build(),
+    object : WebSocketListener() {
+        override fun onOpen(ws: WebSocket, r: Response) { ws.send(session.hello().toByteString()) }
+        override fun onMessage(ws: WebSocket, bytes: ByteString) {
+            val out = session.receive(bytes.toByteArray())
+            out.replies.forEach { ws.send(it.toByteString()) }
+            out.event?.let { /* RelayEvent.Received, .Rejected, .Presence, ... */ }
+        }
+    })
+// after create/edit:
+ws.send(session.broadcast(change.changeId).toByteString())
+```
+
+Same limits as above (online devices only, not encrypted yet).
 
 Keep the device key in the Android Keystore: save `client.secretKey()` (encrypted with a
 Keystore key) and restore with `KithClient.withSecretKey(bytes)`.
