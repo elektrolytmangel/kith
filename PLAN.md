@@ -4,8 +4,8 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-03
-- **Version:** 0.1.0 in `Cargo.toml`, **not released** (no tags, no GitHub Release yet)
+- **Last updated:** 2026-11-04
+- **Version:** 0.1.0-alpha.1 in the release PR (`main` still 0.1.0 until merged), **not released** (no tags yet)
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
 
 ## Where things stand
@@ -52,8 +52,8 @@ Work top to bottom; check items off here as they land.
 ### Next steps (in order)
 
 1. **First pre-release `v0.1.0-alpha.1`**, so projects can install it.
-   - [ ] PR: version `0.1.0-alpha.1` in `Cargo.toml` (`[workspace.package]` and the internal
-         `[workspace.dependencies]` entries), CHANGELOG *Unreleased* → `0.1.0-alpha.1`.
+   - [x] PR (branch `release/0.1.0-alpha.1`): version `0.1.0-alpha.1` in `Cargo.toml`, `Cargo.lock`,
+         CHANGELOG, and the artifact names/URLs in `docs/guides/integration.md`. Waiting for CI + merge.
    - [ ] After merge, the user tags `v0.1.0-alpha.1`. The workflow marks versions with `-` as pre-release.
 2. **Repository settings** (need the owner or explicit approval):
    - [ ] Create label `requirement` (the Requirement issue form applies it; it doesn't exist).
@@ -125,3 +125,4 @@ None right now.
   #10 (Gradle 9 + AGP 9 + Android CI, fixed stripped-metadata bug). Release dry run: all packages build.
   This plan written; user accepted the recommendations (alpha pre-release, phase 1 starts with store + key restore).
   macOS cancellations diagnosed; CI no longer cancels runs on `main`.
+- **2026-11-04**: Opened the `0.1.0-alpha.1` version-bump PR (Next steps 1). Next: user merges and tags.

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -18,13 +18,13 @@ authors = ["kith contributors"]
 
 [workspace.dependencies]
 # Internal crates (versioned together, see docs/guides/releasing.md)
-kith-core = { path = "crates/kith-core", version = "0.1.0" }
-kith-protocol = { path = "crates/kith-protocol", version = "0.1.0" }
-kith-crypto = { path = "crates/kith-crypto", version = "0.1.0" }
-kith-store = { path = "crates/kith-store", version = "0.1.0" }
-kith-sync = { path = "crates/kith-sync", version = "0.1.0" }
-kith-client = { path = "crates/kith-client", version = "0.1.0" }
-kith-relay = { path = "crates/kith-relay", version = "0.1.0" }
+kith-core = { path = "crates/kith-core", version = "0.1.0-alpha.1" }
+kith-protocol = { path = "crates/kith-protocol", version = "0.1.0-alpha.1" }
+kith-crypto = { path = "crates/kith-crypto", version = "0.1.0-alpha.1" }
+kith-store = { path = "crates/kith-store", version = "0.1.0-alpha.1" }
+kith-sync = { path = "crates/kith-sync", version = "0.1.0-alpha.1" }
+kith-client = { path = "crates/kith-client", version = "0.1.0-alpha.1" }
+kith-relay = { path = "crates/kith-relay", version = "0.1.0-alpha.1" }
 
 # External
 serde = { version = "1", features = ["derive"] }

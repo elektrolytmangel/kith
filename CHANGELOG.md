@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] - 2026-11-04
+
+First pre-release: a phase 1 skeleton (in-memory store, no encryption). Not for real user data.
+
 ### Added
 - Repository structure: Rust workspace, relay server, UniFFI and WASM bindings, Swift and Android packaging.
 - Signed, hash-linked change envelope (REQ-DATA-001..003), in-memory store, naive reconciliation, relay routing table.
