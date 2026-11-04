@@ -1,0 +1,8 @@
+{
+  "name": "kith-wasm-tests",
+  "private": true,
+  "description": "Dev-only dependencies of smoke.mjs (never published).",
+  "devDependencies": {
+    "fake-indexeddb": "6.2.7"
+  }
+}

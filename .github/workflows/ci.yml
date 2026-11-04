@@ -80,7 +80,9 @@ jobs:
         with:
           node-version: "22"
       - name: Smoke test the npm package
-        run: node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg
+        run: |
+          npm ci --prefix bindings/wasm/tests
+          node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg
 
   ffi:
     name: UniFFI bindings

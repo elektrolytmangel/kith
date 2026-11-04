@@ -33,7 +33,6 @@ WebSocket server; the `create` / `edit` / `history` API on every platform.
 
 | Gap | Effect | Requirement |
 | --- | --- | --- |
-| Web package still uses the in-memory store (needs IndexedDB; Swift/Kotlin persist via `KithClient.open`) | Web data lost on reload | REQ-STORE-001 |
 | `Transport` is only a trait; no WebSocket client | Clients can't talk to the relay | REQ-SYNC-004 |
 | Relay has no device authentication | Don't expose it publicly | REQ-RELAY-004 |
 | No encryption (MLS) | Payloads are not end-to-end encrypted | REQ-ENC-001..004 |
@@ -64,7 +63,9 @@ Work top to bottom; check items off here as they land.
    keep its data and its device identity across restarts, which is the minimum for real integration.
    - [x] REQ-STORE-001, native: `SqliteStore` in `kith-store` (feature `sqlite`, off by default because the bundled
          C SQLite does not build for wasm32; CI tests it explicitly). PR `feat/sqlite-store`.
-   - [ ] REQ-STORE-001, web: IndexedDB store for the web package.
+   - [x] REQ-STORE-001, web: `await KithClient.open(dbName, secretKey)` + `generateSecretKey()` (PR `feat/web-indexeddb`).
+         Design: `Store` is synchronous, so the IndexedDB store is a write-through cache (all changes in memory, each
+         `put` queues the IndexedDB write synchronously). `kith_store::codec` holds the byte encoding.
    - [x] Key restore in bindings: `secretKey()` / `withSecretKey(...)` in `bindings/ffi` and `bindings/wasm`
          (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`). PR `feat/key-restore`.
    - [x] Store selection, Swift/Kotlin: `KithClient.open(dbPath, secretKey)` + `generateSecretKey()` (PR `feat/ffi-sqlite`).
@@ -100,6 +101,8 @@ None right now.
 | First release is the pre-release `v0.1.0-alpha.1` | The library is a phase 1 skeleton; the version should say so | Next steps 1 |
 | Phase 1 starts with SQLite store + key restore in the bindings | Minimum for an app to keep data and device identity across restarts | Next steps 3 |
 | Agent merges its own PRs when all CI checks pass; tags/releases stay the user's | User: "when the CI passes, you merge by yourself" (2026-11-04) | `CLAUDE.md`, Working agreements |
+| Web persistence = write-through cache over IndexedDB (not an async `Store`) | `Store` is sync; keeps one trait for all platforms. Cost: whole history in memory | `bindings/wasm/src/idb.rs` |
+| After each successful merge, continue with the next plan item without asking | User: "Continue automatically after each merge completed successful" (2026-11-04) | `CLAUDE.md` |
 | Rust core, thin bindings | Same validation/merge logic everywhere | [ADR 0001](docs/adr/0001-monorepo-rust-core-thin-bindings.md) |
 | Requirements as code | Versioned with code, traced to tests | [ADR 0002](docs/adr/0002-requirements-as-code.md) |
 | Randomness only via `kith_core::random_bytes()` (getrandom); no `rand_core` | ed25519-dalek majors change rand_core; seed → `SigningKey::from_bytes` | `crates/kith-core/src/lib.rs`; RFC 8032 test vector guards signatures |
@@ -136,3 +139,4 @@ None right now.
 - **2026-11-04**: `v0.1.0-alpha.1` released; label, vulnerability reporting set up; #15 merged. Added key restore to bindings (PR `feat/key-restore`). Next: store selection (SQLite path) in binding constructors.
 - **2026-11-04**: Swift/Kotlin can persist (`KithClient.open`, PR `feat/ffi-sqlite`). Cross-compiling bundled SQLite for iOS/Android is only verified by CI. Next: IndexedDB store for web, then REQ-DATA-004 (Automerge).
 - **2026-11-04**: Rule change (user): agent merges its own PRs once CI is green. CLAUDE.md and Working agreements updated.
+- **2026-11-04**: Web IndexedDB persistence (PR `feat/web-indexeddb`); smoke test runs it against `fake-indexeddb` (verified locally in `node:22`). User rule: continue with the next plan item after every successful merge. Next: REQ-DATA-004 (Automerge).

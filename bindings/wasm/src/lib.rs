@@ -3,8 +3,26 @@
 
 #![allow(missing_docs)] // wasm-bindgen generates items
 
-use kith_client::{Client, DeviceKey, MemoryStore, ObjectId, ObjectType};
+use kith_client::{Client, DeviceKey, MemoryStore, ObjectId, ObjectType, Store};
 use wasm_bindgen::prelude::*;
+
+mod idb;
+
+fn device_key(secret_key: &[u8]) -> Result<DeviceKey, JsError> {
+    let seed: [u8; 32] = secret_key.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "secret key must be 32 bytes, got {}",
+            secret_key.len()
+        ))
+    })?;
+    Ok(DeviceKey::from_secret_bytes(&seed))
+}
+
+/// A new random 32-byte device secret key. Save it before first use, then pass it to `KithClient.open`.
+#[wasm_bindgen(js_name = generateSecretKey)]
+pub fn generate_secret_key() -> Vec<u8> {
+    DeviceKey::generate().secret_bytes().to_vec()
+}
 
 #[wasm_bindgen(js_name = version)]
 pub fn version() -> String {
@@ -14,7 +32,7 @@ pub fn version() -> String {
 /// Client handle for JavaScript.
 #[wasm_bindgen]
 pub struct KithClient {
-    inner: Client<MemoryStore>,
+    inner: Client<Box<dyn Store>>,
 }
 
 #[wasm_bindgen]
@@ -23,11 +41,11 @@ impl KithClient {
     ///
     /// The identity is lost on reload unless the app saves `secretKey()` and
     /// restores it with `KithClient.withSecretKey`.
-    /// TODO(phase 1): IndexedDB-backed store.
+    /// For persistence use `KithClient.open`.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: Client::new(DeviceKey::generate(), MemoryStore::new()),
+            inner: Client::new(DeviceKey::generate(), Box::new(MemoryStore::new())),
         }
     }
 
@@ -35,14 +53,23 @@ impl KithClient {
     /// `secretKey()`), with an in-memory store.
     #[wasm_bindgen(js_name = withSecretKey)]
     pub fn with_secret_key(secret_key: &[u8]) -> Result<KithClient, JsError> {
-        let seed: [u8; 32] = secret_key.try_into().map_err(|_| {
-            JsError::new(&format!(
-                "secret key must be 32 bytes, got {}",
-                secret_key.len()
-            ))
-        })?;
         Ok(Self {
-            inner: Client::new(DeviceKey::from_secret_bytes(&seed), MemoryStore::new()),
+            inner: Client::new(device_key(secret_key)?, Box::new(MemoryStore::new())),
+        })
+    }
+
+    /// Persistent client: changes are stored in the IndexedDB database
+    /// `dbName` (created if missing) and the identity comes from `secretKey`.
+    /// Returns a Promise. Opening the same `dbName` with the same key later
+    /// restores all data and the identity.
+    #[wasm_bindgen(js_name = open)]
+    pub async fn open(db_name: String, secret_key: Vec<u8>) -> Result<KithClient, JsError> {
+        let key = device_key(&secret_key)?;
+        let store = idb::IdbStore::open(&db_name)
+            .await
+            .map_err(|e| JsError::new(&idb::js_message(&e)))?;
+        Ok(Self {
+            inner: Client::new(key, Box::new(store)),
         })
     }
 

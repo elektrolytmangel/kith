@@ -120,7 +120,9 @@ jobs:
       - run: scripts/build-wasm.sh web
         env:
           NPM_SCOPE: ${{ needs.verify.outputs.npm_scope }}
-      - run: node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg
+      - run: |
+          npm ci --prefix bindings/wasm/tests
+          node bindings/wasm/tests/smoke.mjs bindings/wasm/pkg
       - name: Pack (installable with `npm install <release asset URL>`)
         run: |
           v=$(jq -r .version bindings/wasm/pkg/package.json)

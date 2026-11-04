@@ -23,3 +23,7 @@ updates:
   - package-ecosystem: docker
     directory: /apps/relay-server
     schedule: { interval: monthly }
+  - package-ecosystem: npm
+    directory: /bindings/wasm/tests
+    schedule:
+      interval: weekly

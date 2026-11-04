@@ -25,3 +25,4 @@ web, Swift, Kotlin) plus a generic relay. Start with [README.md](README.md).
 - Branch + PR for every change. Once all CI checks on your PR have passed, merge it yourself
   (`gh pr merge <n> --merge --delete-branch`, then update local `main`). Never merge with failing or
   pending checks, never force-push, and tags/releases stay the user's.
+- After a successful merge, continue with the next item in `PLAN.md` without asking.

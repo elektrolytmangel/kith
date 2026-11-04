@@ -40,17 +40,18 @@ policy agreed by the organization.
 
 ### REQ-STORE-001: SQLite local store
 
-- **Priority:** must | **Phase:** 1 | **Status:** partial | **Verify:** test | **Source:** design §Local storage
+- **Priority:** must | **Phase:** 1 | **Status:** implemented | **Verify:** test | **Source:** design §Local storage
 
 Native clients must store changes append-only in SQLite with a materialized
 objects table that is rebuildable from changes.
 
 `kith_store::SqliteStore` (feature `sqlite`) implements this. Swift and Kotlin use it
-through `KithClient.open`. Still open: the IndexedDB store for web.
+through `KithClient.open`. The web package uses IndexedDB
+(write-through to an in-memory store, since `Store` is synchronous).
 
 ### REQ-STORE-002: Pluggable storage
 
-- **Priority:** should | **Phase:** 1 | **Status:** partial | **Verify:** review | **Source:** ADR-0001
+- **Priority:** should | **Phase:** 1 | **Status:** implemented | **Verify:** review | **Source:** ADR-0001
 
 Storage must sit behind a trait so platforms (e.g. IndexedDB on web) and apps
 can provide their own backend.
