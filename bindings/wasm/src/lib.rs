@@ -91,7 +91,8 @@ impl KithClient {
     /// `{type: "received", org, from, objectId, changeId, isNew}`,
     /// `{type: "rejected", org, from, reason}`, `{type: "presence", org, online}`,
     /// `{type: "receipt", delivered}`, `{type: "relayError", code, message}`,
-    /// `{type: "syncServed", ...}`, `{type: "syncReceived", ...}`, group events
+    /// `{type: "syncServed", from}`, `{type: "syncCompared", from, sending, wanting}`,
+    /// `{type: "syncReceived", ...}`, group events
     /// (`joinRequested` with `keyPackage`, `joined`, `groupChanged`, `epochBehind`,
     /// `commitsServed`, `commitsApplied`, `reAddRequested`, `memberReAdded`, `fork`),
     /// `{type: "closed"}` and `{type: "error"}`.
@@ -114,9 +115,9 @@ impl KithClient {
 
     /// Ask one online peer for the changes this device lacks and offer it ours
     /// (catch-up). Use it after connecting, once a `presence` event shows another
-    /// device, and on a new device to download the full history. The peer's
-    /// answer arrives as `syncReceived` / `syncServed` events; a `receipt` with an
-    /// empty `delivered` list means nobody was online.
+    /// device, and on a new device to download the full history. The result arrives
+    /// as a `syncCompared` event (`sending` and `wanting` both 0: in sync), then
+    /// `syncReceived`; a `receipt` with an empty `delivered` list means nobody was online.
     #[wasm_bindgen(js_name = catchUp)]
     pub fn catch_up(&self) -> Result<(), JsError> {
         match &self.live {

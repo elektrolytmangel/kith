@@ -69,7 +69,7 @@ public final class RelayConnection {
 
     /// Ask one online peer for the changes this device lacks and offer it ours. Call it
     /// once a `.presence` event shows another device; use it on a new device to download
-    /// the history. Answers arrive as `.syncReceived` / `.syncServed` events.
+    /// the history. Results arrive as `.syncCompared` (both counts 0: in sync) and `.syncReceived` events.
     public func catchUp() {
         do {
             send(try session.catchUp())

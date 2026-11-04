@@ -466,16 +466,18 @@ fn both_sides_receive_only_what_they_lack() {
     let events: Vec<Event> = net.send(1, vec![f]).into_iter().map(|(_, e)| e).collect();
     assert_eq!(net.ids(0), net.ids(1));
     assert_eq!(net.ids(0).len(), 3);
+    // 0 answers the reconciliation; 1 learns it must send 1 and fetch 1.
+    assert!(matches!(events[0], Event::SyncServed { .. }));
     assert!(matches!(
-        events[0],
-        Event::SyncServed {
+        events[1],
+        Event::SyncCompared {
             sending: 1,
             wanting: 1,
             ..
         }
     ));
     assert!(matches!(
-        events[1],
+        events[2],
         Event::SyncReceived {
             stored: 1,
             known: 0,
@@ -485,14 +487,14 @@ fn both_sides_receive_only_what_they_lack() {
         }
     ));
     assert!(matches!(
-        events[2],
+        events[3],
         Event::SyncReceived {
             stored: 1,
             requested: 0,
             ..
         }
     ));
-    assert_eq!(events.len(), 3, "no further messages once both sides agree");
+    assert_eq!(events.len(), 4, "no further messages once both sides agree");
 }
 
 /// req: REQ-SYNC-002
@@ -502,24 +504,16 @@ fn nothing_is_transferred_when_already_in_sync() {
     net.create(0, b"v");
     let f = net.devs[1].sync_request_frame(ORG).unwrap();
     let events: Vec<Event> = net.send(1, vec![f]).into_iter().map(|(_, e)| e).collect();
+    assert!(matches!(events[0], Event::SyncServed { .. }));
     assert!(matches!(
-        events[0],
-        Event::SyncServed {
+        events[1],
+        Event::SyncCompared {
             sending: 0,
             wanting: 0,
             ..
         }
     ));
-    assert!(matches!(
-        events[1],
-        Event::SyncReceived {
-            stored: 0,
-            known: 0,
-            requested: 0,
-            ..
-        }
-    ));
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 2, "nothing to send, so no offers");
 }
 
 /// req: REQ-SYNC-002

@@ -17,11 +17,18 @@ fn main() {
     laptop.edit(oid, b"groceries: milk, eggs".to_vec()).unwrap();
     phone.edit(oid, b"groceries: milk, bread".to_vec()).unwrap();
 
-    // Catch-up: exchange only what the other side is missing.
-    let d = kith_sync::diff(
-        &laptop.store().all_ids().unwrap(),
-        &phone.store().all_ids().unwrap(),
-    );
+    // Catch-up: reconcile the two sets of change IDs (range-based, a few rounds),
+    // then exchange only what the other side is missing.
+    let phone_ids = phone.store().all_ids().unwrap();
+    let (mut sync, mut query) =
+        kith_sync::Reconciliation::start(&laptop.store().all_ids().unwrap()).unwrap();
+    let d = loop {
+        let answer = kith_sync::respond(&phone_ids, &query).unwrap();
+        match sync.step(&answer).unwrap() {
+            kith_sync::Step::Continue(next) => query = next,
+            kith_sync::Step::Done(d) => break d,
+        }
+    };
     for id in d.to_send {
         phone
             .receive(laptop.store().get(&id).unwrap().unwrap())

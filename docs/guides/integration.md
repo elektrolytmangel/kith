@@ -98,7 +98,8 @@ client.create("acme.note", bytes); // now also broadcast (encrypted) to the othe
 ```
 
 Catch up on changes made while this device was offline (and download the history on a
-new device) by asking one online peer; the answer arrives as `syncReceived` events:
+new device) by asking one online peer. The two compare their change sets in a few small rounds
+(`syncCompared`: how many changes go each way), then the missing changes arrive as `syncReceived` events:
 
 ```ts
 client.catchUp(); // after connecting, once a "presence" event shows another device

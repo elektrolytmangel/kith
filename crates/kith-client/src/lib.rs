@@ -47,9 +47,9 @@ pub enum ClientError {
     /// Incoming change failed validation.
     #[error("rejected change: {0}")]
     Rejected(#[from] kith_core::ChangeError),
-    /// Too many changes for one catch-up request (naive ID exchange).
-    #[error("{0} changes are too many for one catch-up request")]
-    SyncTooLarge(usize),
+    /// Reconciliation failed locally.
+    #[error(transparent)]
+    Sync(#[from] kith_sync::SyncError),
     /// Merging an object's history failed.
     #[error(transparent)]
     Merge(#[from] MergeError),
@@ -175,19 +175,24 @@ pub enum Event {
         /// Human-readable message.
         message: String,
     },
-    /// We answered a peer's catch-up request: we sent it what it lacks and asked for
-    /// what we lack.
+    /// We answered a round of a peer's catch-up request (set reconciliation).
     SyncServed {
         /// The requesting device (hex).
         from: String,
-        /// Changes we offered.
+    },
+    /// Our catch-up request is reconciled: we sent `from` the `sending` changes it
+    /// lacks and asked for the `wanting` changes we lack (they arrive as
+    /// [`Event::SyncReceived`]). Both zero: we are in sync with that peer.
+    SyncCompared {
+        /// The peer (hex).
+        from: String,
+        /// Changes we sent.
         sending: usize,
-        /// Changes we asked the peer to send us back.
+        /// Changes we asked for.
         wanting: usize,
     },
-    /// A peer sent changes for catch-up. Receiving an offer with `requested == 0` and
-    /// `rejected == 0` after a [`Client::sync_request_frame`] means we are caught up
-    /// with that peer.
+    /// A peer sent changes for catch-up (after [`Event::SyncCompared`], or as the
+    /// partner of a peer's catch-up).
     SyncReceived {
         /// The sending device (hex).
         from: String,
@@ -307,6 +312,8 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     /// Per org: the epoch at which we last asked to be re-added after losing a
     /// fork, so one fork sends one request, not one per message.
     readd_asked: std::collections::HashMap<String, u64>,
+    /// Per org: our running catch-up reconciliation (one at a time).
+    reconciling: std::collections::HashMap<String, kith_sync::Reconciliation>,
 }
 
 impl<S: Store, K: Signer> Client<S, K> {
@@ -322,6 +329,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             store,
             groups,
             readd_asked: Default::default(),
+            reconciling: Default::default(),
         })
     }
 
@@ -457,11 +465,13 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 
     /// The request that starts catch-up (REQ-SYNC-001..003): send it to the relay,
-    /// which hands it to one online peer. That peer answers with what we lack and
-    /// asks for what it lacks. Works from an empty store (join). The relay's
+    /// which hands it to one online peer. The two reconcile their sets of changes
+    /// in a few rounds (traffic grows with the difference, not the history), then
+    /// each sends what the other lacks: [`Event::SyncCompared`], then
+    /// [`Event::SyncReceived`]. Works from an empty store (join). The relay's
     /// `Receipt` shows whether a peer was online (`delivered` empty: try later).
     pub fn sync_request_frame(&mut self, org: &str) -> Result<Frame, ClientError> {
-        let body = self.have_body(org)?;
+        let body = self.start_reconcile(org)?;
         self.save_groups()?;
         Ok(Frame::SyncRequest {
             org: org.into(),
@@ -469,12 +479,12 @@ impl<S: Store, K: Signer> Client<S, K> {
         })
     }
 
-    fn have_body(&mut self, org: &str) -> Result<Vec<u8>, ClientError> {
-        let ids = self.store.all_ids()?;
-        if ids.len() > sync::MAX_HAVE_IDS {
-            return Err(ClientError::SyncTooLarge(ids.len()));
-        }
-        self.app_body(org, &sync::have_body(&ids))
+    /// Start (or restart) our reconciliation for `org`; returns the encrypted first query.
+    fn start_reconcile(&mut self, org: &str) -> Result<Vec<u8>, ClientError> {
+        let (r, first) = kith_sync::Reconciliation::start(&self.store.all_ids()?)?;
+        let body = self.app_body(org, &sync::query_body(&first))?;
+        self.reconciling.insert(org.into(), r);
+        Ok(body)
     }
 
     /// Encrypt an inner message as an outer `App` body. The caller saves the
@@ -557,7 +567,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 };
                 self.readd_asked.remove(&joined);
                 // Start from whatever we have (usually nothing): ask a peer for history.
-                let body = self.have_body(&joined)?;
+                let body = self.start_reconcile(&joined)?;
                 Ok(Handled {
                     event: Event::Joined {
                         org: joined.clone(),
@@ -606,7 +616,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 let epoch = self.groups.epoch(&org)?;
                 // Data sent while we were behind could not be read: resync with this peer.
                 let replies = if applied > 0 && self.groups.is_member(&org) {
-                    vec![direct(&org, &from, self.have_body(&org)?)]
+                    vec![direct(&org, &from, self.start_reconcile(&org)?)]
                 } else {
                     vec![]
                 };
@@ -787,18 +797,53 @@ impl<S: Store, K: Signer> Client<S, K> {
                 Err(ClientError::Rejected(e)) => Ok(rejected(e.to_string())),
                 Err(e) => Err(e),
             },
-            Message::Have(theirs) => {
-                let diff = kith_sync::diff(&self.store.all_ids()?, &theirs);
-                let to_send = self.changes_for(&diff.to_send)?;
-                let replies = self.offer_frames(&org, &from, &diff.to_request, &to_send)?;
-                Ok(Handled {
-                    event: Event::SyncServed {
-                        from,
-                        sending: to_send.len(),
-                        wanting: diff.to_request.len(),
-                    },
-                    replies,
-                })
+            Message::Query(query) => match kith_sync::respond(&self.store.all_ids()?, &query) {
+                Ok(answer) => Ok(Handled {
+                    replies: vec![direct(
+                        &org,
+                        &from,
+                        self.app_body(&org, &sync::reply_body(&answer))?,
+                    )],
+                    event: Event::SyncServed { from },
+                }),
+                Err(e) => Ok(rejected(e.to_string())),
+            },
+            Message::Reply(answer) => {
+                let Some(r) = self.reconciling.get_mut(&org) else {
+                    // Not reconciling (any more): a late or duplicate answer.
+                    return Ok(Handled::event(Event::Ignored));
+                };
+                match r.step(&answer) {
+                    Ok(kith_sync::Step::Continue(query)) => Ok(Handled {
+                        replies: vec![direct(
+                            &org,
+                            &from,
+                            self.app_body(&org, &sync::query_body(&query))?,
+                        )],
+                        event: Event::Ignored,
+                    }),
+                    Ok(kith_sync::Step::Done(diff)) => {
+                        self.reconciling.remove(&org);
+                        let to_send = self.changes_for(&diff.to_send)?;
+                        let replies = if to_send.is_empty() && diff.to_request.is_empty() {
+                            vec![]
+                        } else {
+                            self.offer_frames(&org, &from, &diff.to_request, &to_send)?
+                        };
+                        Ok(Handled {
+                            event: Event::SyncCompared {
+                                from,
+                                sending: to_send.len(),
+                                wanting: diff.to_request.len(),
+                            },
+                            replies,
+                        })
+                    }
+                    Err(e) => {
+                        self.reconciling.remove(&org);
+                        Ok(rejected(e.to_string()))
+                    }
+                }
             }
             Message::Offer { want, changes } => {
                 let (mut stored, mut known, mut rejected_n) = (0, 0, 0);

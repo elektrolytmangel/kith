@@ -71,12 +71,16 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "from", from);
             set(&o, "reason", reason);
         }
-        Event::SyncServed {
+        Event::SyncServed { from } => {
+            set(&o, "type", "syncServed");
+            set(&o, "from", from);
+        }
+        Event::SyncCompared {
             from,
             sending,
             wanting,
         } => {
-            set(&o, "type", "syncServed");
+            set(&o, "type", "syncCompared");
             set(&o, "from", from);
             set(&o, "sending", sending as f64);
             set(&o, "wanting", wanting as f64);
