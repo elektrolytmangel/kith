@@ -4,8 +4,9 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04
-- **Version:** 0.1.0-alpha.1, released as a pre-release (tag `v0.1.0-alpha.1`)
+- **Last updated:** 2026-11-04 (end of session; work stopped on request)
+- **Version:** `v0.1.0-alpha.1` released as a pre-release. `main` has moved on (see Log) and is **not released**; the next tag is the user's call.
+- **State of `main` (51e0b8b):** CI green on all 11 jobs; also re-checked locally after the rusqlite 0.41 bump (fmt, clippy, tests, wasm32 per crate, MSRV 1.90).
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
 
 ## Where things stand
@@ -18,30 +19,33 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | Requirements as code | 41 requirements in `docs/requirements/`, traced to tests by `scripts/reqs.py` ([TRACEABILITY.md](docs/requirements/TRACEABILITY.md)). |
 | CI (`ci.yml`) | fmt, clippy, tests on Linux/macOS/Windows, MSRV 1.90, wasm32 per crate, npm build + Node smoke test, UniFFI generation, Swift package + `swift test`, Android AAR, relay image + `/healthz`, requirements check. |
 | Release (`release.yml`) | Tag `vX.Y.Z` → GitHub Release with relay binaries, npm tarball, Swift package + XCFramework, Android AAR, `SHA256SUMS`. GitHub Releases is the only publish target. Dry run verified 2026-11-03 ([run](https://github.com/elektrolytmangel/kith/actions/runs/41680667767)): every package built. |
-| Dependencies | Current as of 2026-11-03: ed25519-dalek 3, sha2 0.11, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions bumped (#3, #7, #9, #10). |
+| Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41 (#20), automerge 0.12, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
-### What the library can do today (phase 1 skeleton)
+### What the library can do today (alpha, phases 1-3 done)
 
 Requirements: 12 implemented, 10 partial, 19 accepted/proposed.
 
-Works: signed, hash-linked changes; per-object history and fork detection;
-in-memory store; device keys; naive reconciliation; relay routing table; relay
-WebSocket server; the `create` / `edit` / `history` API on every platform.
+Works, on Rust, web (npm), Swift and Kotlin unless noted:
+- signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
+- persistence: SQLite (Rust, Swift, Kotlin: `KithClient.open`), IndexedDB (web: `KithClient.open`);
+- relay with device authentication (challenge/response); live sync of new changes between online devices
+  (`kith-net` in Rust, `KithClient.connect` on web, `RelaySession` on Swift/Kotlin);
+- catch-up: a new or returning device downloads what it lacks from one online peer (`catchUp`);
+- merging concurrent edits (Automerge, pluggable `Merger`): **Rust only** (`Client::materialize`).
 
 **Not usable for real apps yet:**
 
 | Gap | Effect | Requirement |
 | --- | --- | --- |
-| `Transport` is only a trait; no WebSocket client | Clients can't talk to the relay | REQ-SYNC-004 |
-| Sync needs another device online; ID exchange caps at ~32,000 changes; bodies are plaintext | Offline-only devices can't catch up; no confidentiality | REQ-RELAY-005, REQ-ENC-001 |
+| No encryption (MLS): relay frame bodies are plaintext | Anyone running the relay can read all data | REQ-ENC-001..004 |
 | Relay checks device keys but not org membership proofs (any device can join any org id) | Don't expose it publicly | REQ-RELAY-004 |
-| No encryption (MLS) | Payloads are not end-to-end encrypted | REQ-ENC-001..004 |
-| Concurrent edits stay forked (no CRDT merge) | No conflict-free merging | REQ-DATA-004 |
 | No permission checks on incoming changes | Any device can write anything | REQ-PERM-002 |
+| Sync needs another device online; ID exchange caps at ~32,000 changes per device (`SyncTooLarge`) | Offline-only devices can't catch up | REQ-RELAY-005, REQ-SYNC-002 |
+| Merged state is not exposed in the bindings | Swift/Kotlin/JS apps see forks, not merged documents | REQ-DATA-004 |
+| Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
 
-Fine for: wiring the API into an app and checking the platform integration.
-Not fine for: any real user data.
+Fine for: building and testing an integration. Not fine for: any real user data.
 
 ## Plan
 
@@ -50,51 +54,28 @@ Work top to bottom; check items off here as they land.
 
 ### Next steps (in order)
 
-1. **First pre-release `v0.1.0-alpha.1`**, so projects can install it.
-   - [x] PR (branch `release/0.1.0-alpha.1`): version `0.1.0-alpha.1` in `Cargo.toml`, `Cargo.lock`,
-         CHANGELOG, and the artifact names/URLs in `docs/guides/integration.md`. Waiting for CI + merge.
-   - [x] Tag `v0.1.0-alpha.1` pushed by the user; release published as pre-release 2026-11-04.
-2. **Repository settings** (need the owner or explicit approval):
-   - [x] Label `requirement` created (user, 2026-11-04).
-   - [x] Branch protection on `main`: require the CI checks (done by the user 2026-11-04).
-   - [x] Private vulnerability reporting enabled (user, 2026-11-04).
-   - [ ] Optional: mark the repository as a template.
-3. **Phase 1, Local core** (makes it usable in a real app). Start here, in this order
-   (decided 2026-11-03): SQLite store and key restore first, because together they let an app
-   keep its data and its device identity across restarts, which is the minimum for real integration.
-   - [x] REQ-STORE-001, native: `SqliteStore` in `kith-store` (feature `sqlite`, off by default because the bundled
-         C SQLite does not build for wasm32; CI tests it explicitly). PR `feat/sqlite-store`.
-   - [x] REQ-STORE-001, web: `await KithClient.open(dbName, secretKey)` + `generateSecretKey()` (PR `feat/web-indexeddb`).
-         Design: `Store` is synchronous, so the IndexedDB store is a write-through cache (all changes in memory, each
-         `put` queues the IndexedDB write synchronously). `kith_store::codec` holds the byte encoding.
-   - [x] Key restore in bindings: `secretKey()` / `withSecretKey(...)` in `bindings/ffi` and `bindings/wasm`
-         (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`). PR `feat/key-restore`.
-   - [x] Store selection, Swift/Kotlin: `KithClient.open(dbPath, secretKey)` + `generateSecretKey()` (PR `feat/ffi-sqlite`).
-         Web: remains the `TODO(phase 1)` in `bindings/wasm/src/lib.rs` until the IndexedDB store exists.
-   - [x] REQ-DATA-004, Rust: `kith-merge` (`Merger` trait + Automerge), `Client::materialize` (PR `feat/merge-automerge`, [ADR 0003](docs/adr/0003-merge-automerge-default-pluggable.md)).
-   - [ ] REQ-DATA-004 in bindings: moved to phase 2 (needs sync in the bindings first; needs a JSON-ish
-         document API and a wasm size measurement).
-4. **Phase 2, Relay and live sync**:
-   - [x] REQ-RELAY-004, device key half: challenge/response, auth timeout, reconnect fix (PR `feat/relay-device-auth`).
-         Membership proofs (org root key) wait for phase 5; the relay still lets any authenticated device join any org.
-   - [x] Native WebSocket client + REQ-SYNC-004 live updates: `kith-net` (`RelayConnection`, `LiveClient`) and sans-IO
-         `Client::handle_frame` (PR `feat/live-sync`). Bodies are **plaintext** until phase 4.
-   - [x] Browser WebSocket client for the web package: `KithClient.connect(url, org, onEvent)` (PR `feat/web-live-sync`);
-         the Node smoke test runs it against the real relay binary.
-   - [x] Swift/Kotlin live sync: sans-IO `RelaySession` (app owns the socket; no tokio/TLS in the mobile builds),
-         Swift `RelayConnection` helper (PR `feat/ffi-live-sync`). The Swift/Kotlin glue is only compiled in CI, not run against a relay.
-   - [ ] Expose merged state (REQ-DATA-004 in bindings;
-         moved here from phase 1 because without sync an app cannot create a fork).
-5. **Phase 3, Catch-up sync**:
-   - [x] REQ-SYNC-001..003 via `SyncRequest` → one online peer → `Offer` replies (PR `feat/catch-up-sync`; `crates/kith-client/src/sync.rs`). Rust, web, Swift/Kotlin.
-   - [ ] Replace the naive full-ID exchange with range-based reconciliation (Negentropy); today `SyncTooLarge` above ~32,000 changes.
-   - [ ] Offline peers: catch-up needs another device online (REQ-RELAY-005 buffer / always-on client are later phases).
-6. **Phase 4, Encryption (MLS / OpenMLS)**: REQ-ENC-001..004. **Required before any real user data.**
-7. Phases 5–8: invitations, permissions, files + always-on client, hardening (see requirements).
+Work stopped here on 2026-11-04 at the user's request. Phases 1-3 and the repository setup are done;
+the checked items are in the Log and `git log`. What is left:
+
+1. **Phase 4, Encryption (MLS / OpenMLS)**: REQ-ENC-001..004. **Required before any real user data.**
+   Needs an ADR and the user's input first, see *Open questions*. Touches `kith-crypto`, the sync bodies
+   (`crates/kith-client/src/sync.rs`, `broadcast_frame`), the relay (key packages) and all bindings.
+2. **Expose merged state in the bindings** (REQ-DATA-004): a JSON-like document API for Swift/Kotlin/JS on top of
+   `kith-merge`. Measure the wasm size with Automerge first (it is opt-in via `kith-client/automerge` for that reason).
+3. **Phase 3 follow-ups**: replace the naive full-ID exchange with range-based reconciliation (Negentropy, same
+   interface in `kith-sync`); offline peers (REQ-RELAY-005 buffer or an always-on client, phase 7).
+4. **Phases 5-8**: invitations + org root key (then relay membership proofs, REQ-RELAY-004), permissions
+   (REQ-PERM-002), files + always-on client, hardening (see requirements).
+5. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
+   against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
+   many changes (persistence, merge, relay auth, live and catch-up sync) and the relay body format changed.
 
 ### Open questions for the user
 
-None right now.
+- **Phase 4 design** (before any code): OpenMLS vs. alternatives, ciphersuite, how key packages are distributed
+  (through the relay?), what the relay may still see (metadata), how the first org/group is created, and how old
+  plaintext data is handled (alpha, so probably "not at all").
+- Release a `v0.1.0-alpha.2` now, or wait for encryption?
 
 ### Open issues
 
@@ -135,6 +116,13 @@ None right now.
 - **Signatures must stay byte-identical** across crypto upgrades: keep `rfc8032_test_vector_1` passing.
 - **Local machine has no Rust toolchain.** Run everything in Docker (`rust:1-bookworm`), see [Run CI locally](docs/guides/development.md#run-ci-locally). Android: `cimg/android:2026.10.1`.
 
+- **`git pull` over SSH can fail** ("Permission denied (publickey)"). The repo is public: `git fetch https://github.com/elektrolytmangel/kith.git main && git merge --ff-only FETCH_HEAD`. Then check `git log`, otherwise you test a stale `main`.
+- **Cargo.lock matters:** CI uses `--locked`. After changing dependencies run `cargo metadata` (or `cargo update -p ...`) in Docker and commit the lockfile.
+- **automerge** 0.7.x does not compile against current `hexane`; 0.12 needs Rust 1.90 (that is why MSRV is 1.90). Don't downgrade.
+- **Web tests locally:** build the wasm package and relay in `rust:1-bookworm` (`cargo install wasm-pack --locked` into a cached volume), then run `bindings/wasm/tests/smoke.mjs` in the official `node:22` image with `KITH_RELAY_BIN` set (Node 18 from apt can't load the ES module). The apt `binaryen` is too old for `wasm-opt`; CI uses wasm-pack's own.
+- **Don't pipe downloaded installers into `sh`**: the permission classifier blocks it. Use apt, `cargo install --locked` or official images.
+- **Relay bodies:** the first byte of a body is the kind (1 change, 2 have, 3 offer); a client from `v0.1.0-alpha.1` can't talk to current `main`.
+
 ## Working agreements
 
 - Branch from `main`, open a PR, wait for CI. **Once every check is green the agent merges its own PR**
@@ -163,3 +151,9 @@ None right now.
 - **2026-11-04**: Web live sync (`KithClient.connect`, PR `feat/web-live-sync`), smoke-tested against the real relay. Next: Swift/Kotlin connect, then phase 3 catch-up.
 - **2026-11-04**: Swift/Kotlin live sync via sans-IO `RelaySession` + Swift `RelayConnection` (PR `feat/ffi-live-sync`). Next: phase 3 catch-up sync (REQ-SYNC-001..003).
 - **2026-11-04**: Catch-up sync (PR `feat/catch-up-sync`): `sync_request_frame` + offers, `Handled` replies, all bindings; e2e test through the relay. Next: phase 4 (MLS) needs a design discussion (OpenMLS, key packages, ADR).
+- **2026-11-04 (summary of the day)**: `v0.1.0-alpha.1` released (#13) and repository settings done by the user.
+  Phase 1: SQLite store (#15), key restore (#16), `KithClient.open` on Swift/Kotlin (#17), IndexedDB store (#19),
+  `kith-merge` + ADR 0003 (#21, MSRV 1.90). Phase 2: relay device auth (#22), `kith-net` live sync (#23), web live sync (#24),
+  Swift/Kotlin `RelaySession` (#25). Phase 3: catch-up sync (#26). Rule changes by the user: the agent merges its own
+  PRs when CI is green (#18), continues after each merge. Dependabot #20 (rusqlite 0.41) tested against `main`, merged by the user.
+  **Stopped on the user's request** after re-checking `main`; next is Phase 4 (needs a design decision).
