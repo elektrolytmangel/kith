@@ -3,6 +3,7 @@
 //! Configuration (environment):
 //! - `KITH_RELAY_ADDR`: listen address, default `0.0.0.0:8080`
 //! - `KITH_RELAY_AUTH_TIMEOUT_SECS`: seconds a connection has to authenticate, default `10`
+//! - abuse limits (REQ-RELAY-006), see [`Limits::from_env`]
 //! - `RUST_LOG`: log filter, default `info`
 //!
 //! Connection: `hello` -> relay `challenge` -> `auth` (signature over
@@ -17,9 +18,9 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -28,7 +29,8 @@ use axum::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::IntoResponse,
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use kith_core::membership::CertChain;
@@ -55,12 +57,106 @@ struct Conn {
     tx: Tx,
 }
 
+/// Abuse limits (REQ-RELAY-006). Excess frames are dropped with a `rate-limited`
+/// error; a connection that keeps going far beyond its limit is closed.
+#[derive(Clone, Debug)]
+pub struct Limits {
+    /// Frames per second per connection (sustained).
+    pub device_frames_per_sec: f64,
+    /// Frames a connection may send in a burst.
+    pub device_burst: f64,
+    /// Message bytes per second per connection (sustained; bursts up to 4 s worth).
+    pub device_bytes_per_sec: f64,
+    /// Routed frames per second per organization (all its devices together).
+    pub org_frames_per_sec: f64,
+    /// Open WebSocket connections at most; more are refused with HTTP 503.
+    pub max_connections: usize,
+    /// Largest WebSocket message in bytes (a 1 MiB body is about 3.5 MiB as JSON).
+    pub max_message_bytes: usize,
+    /// Close a connection after this many refused frames in a row.
+    pub max_refused: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            device_frames_per_sec: 100.0,
+            device_burst: 200.0,
+            device_bytes_per_sec: 4.0 * 1024.0 * 1024.0,
+            org_frames_per_sec: 1000.0,
+            max_connections: 10_000,
+            max_message_bytes: 4 * 1024 * 1024,
+            max_refused: 200,
+        }
+    }
+}
+
+impl Limits {
+    /// Defaults, overridden by `KITH_RELAY_DEVICE_FRAMES_PER_SEC`,
+    /// `KITH_RELAY_DEVICE_BURST`, `KITH_RELAY_DEVICE_BYTES_PER_SEC`,
+    /// `KITH_RELAY_ORG_FRAMES_PER_SEC`, `KITH_RELAY_MAX_CONNECTIONS`,
+    /// `KITH_RELAY_MAX_MESSAGE_BYTES`, `KITH_RELAY_MAX_REFUSED`.
+    pub fn from_env() -> Self {
+        fn var<T: std::str::FromStr>(name: &str, default: T) -> T {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        }
+        let d = Self::default();
+        Self {
+            device_frames_per_sec: var("KITH_RELAY_DEVICE_FRAMES_PER_SEC", d.device_frames_per_sec),
+            device_burst: var("KITH_RELAY_DEVICE_BURST", d.device_burst),
+            device_bytes_per_sec: var("KITH_RELAY_DEVICE_BYTES_PER_SEC", d.device_bytes_per_sec),
+            org_frames_per_sec: var("KITH_RELAY_ORG_FRAMES_PER_SEC", d.org_frames_per_sec),
+            max_connections: var("KITH_RELAY_MAX_CONNECTIONS", d.max_connections),
+            max_message_bytes: var("KITH_RELAY_MAX_MESSAGE_BYTES", d.max_message_bytes),
+            max_refused: var("KITH_RELAY_MAX_REFUSED", d.max_refused),
+        }
+    }
+}
+
+/// Token bucket.
+struct Bucket {
+    tokens: f64,
+    rate: f64,
+    burst: f64,
+    last: Instant,
+}
+
+impl Bucket {
+    fn new(rate: f64, burst: f64) -> Self {
+        Self {
+            tokens: burst,
+            rate,
+            burst,
+            last: Instant::now(),
+        }
+    }
+
+    fn take(&mut self, n: f64) -> bool {
+        let now = Instant::now();
+        self.tokens =
+            (self.tokens + now.duration_since(self.last).as_secs_f64() * self.rate).min(self.burst);
+        self.last = now;
+        if self.tokens >= n {
+            self.tokens -= n;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Relay state. Opaque outside this crate; create it with [`new_state`].
 pub struct Relay {
     table: RoutingTable,
     conns: HashMap<String, Conn>,
     next_conn: AtomicU64,
     auth_timeout: Duration,
+    limits: Limits,
+    open: Arc<AtomicUsize>,
+    org_buckets: HashMap<String, Bucket>,
 }
 
 /// Shared relay state (routing table and live connections).
@@ -76,14 +172,32 @@ enum Session {
     Authed(String),
 }
 
-/// Fresh relay state. `auth_timeout` is how long a new connection has to authenticate.
+/// Fresh relay state with default [`Limits`]. `auth_timeout` is how long a new
+/// connection has to authenticate.
 pub fn new_state(auth_timeout: Duration) -> Shared {
+    new_state_with(auth_timeout, Limits::default())
+}
+
+/// Fresh relay state with the given abuse limits.
+pub fn new_state_with(auth_timeout: Duration, limits: Limits) -> Shared {
     Arc::new(Mutex::new(Relay {
         table: RoutingTable::default(),
         conns: HashMap::new(),
         next_conn: AtomicU64::new(0),
         auth_timeout,
+        limits,
+        open: Arc::new(AtomicUsize::new(0)),
+        org_buckets: HashMap::new(),
     }))
+}
+
+/// Counts an open connection for as long as it lives.
+struct OpenGuard(Arc<AtomicUsize>);
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// The relay's HTTP/WebSocket routes (`/healthz`, `/v1/ws`).
@@ -94,11 +208,31 @@ pub fn app(state: Shared) -> Router {
         .with_state(state)
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| connection(socket, state))
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> Response {
+    let (open, limits) = {
+        let r = state.lock().unwrap();
+        (r.open.clone(), r.limits.clone())
+    };
+    if open.fetch_add(1, Ordering::Relaxed) >= limits.max_connections {
+        open.fetch_sub(1, Ordering::Relaxed);
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many connections").into_response();
+    }
+    let guard = OpenGuard(open);
+    ws.max_message_size(limits.max_message_bytes)
+        .max_frame_size(limits.max_message_bytes)
+        .on_upgrade(move |socket| async move {
+            let _guard = guard;
+            connection(socket, state, limits).await
+        })
 }
 
-async fn connection(mut socket: WebSocket, state: Shared) {
+async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
+    let mut frames = Bucket::new(limits.device_frames_per_sec, limits.device_burst);
+    let mut bytes = Bucket::new(
+        limits.device_bytes_per_sec,
+        limits.device_bytes_per_sec * 4.0,
+    );
+    let mut refused = 0u32;
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     let (conn_id, auth_timeout) = {
         let r = state.lock().unwrap();
@@ -125,13 +259,26 @@ async fn connection(mut socket: WebSocket, state: Shared) {
             }
             msg = socket.recv() => {
                 let Some(Ok(msg)) = msg else { break };
-                let bytes = match msg {
+                let raw = match msg {
                     Message::Binary(b) => b.to_vec(),
                     Message::Text(t) => t.as_bytes().to_vec(),
                     Message::Close(_) => break,
                     _ => continue,
                 };
-                match decode(&bytes) {
+                // Abuse limits (REQ-RELAY-006): drop excess frames, close persistent abusers.
+                if !(frames.take(1.0) && bytes.take(raw.len() as f64)) {
+                    refused += 1;
+                    if refused >= limits.max_refused {
+                        send_now(&mut socket, error("rate-limited", "too many frames; closing".into())).await;
+                        break;
+                    }
+                    if refused.is_power_of_two() {
+                        send(&tx, error("rate-limited", "slow down: frame dropped".into()));
+                    }
+                    continue;
+                }
+                refused = 0;
+                match decode(&raw) {
                     Ok(frame) => {
                         if handle(frame, &mut session, conn_id, &tx, &state) == Flow::Close {
                             // Flush the queued error frame, then hang up.
@@ -283,9 +430,38 @@ fn check_membership(org: &str, device: &str, proof: &str) -> Result<Role, &'stat
     })
 }
 
+/// Take one routed frame from `org`'s bucket.
+fn org_allows(r: &mut Relay, org: &str) -> bool {
+    let rate = r.limits.org_frames_per_sec;
+    r.org_buckets
+        .entry(org.to_string())
+        .or_insert_with(|| Bucket::new(rate, rate * 2.0))
+        .take(1.0)
+}
+
 fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
     let member =
         |r: &Relay, org: &str| matches!(r.table.role(org, d), Some(Role::Member | Role::Admin));
+    let routed_org = match &frame {
+        Frame::Broadcast { org, .. }
+        | Frame::Direct { org, .. }
+        | Frame::SyncRequest { org, .. }
+        | Frame::InviteClaim { org, .. } => Some(org.clone()),
+        _ => None,
+    };
+    if let Some(org) = routed_org
+        && r.table.role(&org, d).is_some()
+        && !org_allows(r, &org)
+    {
+        send(
+            tx,
+            error(
+                "rate-limited",
+                format!("org {org} is over its limit; frame dropped"),
+            ),
+        );
+        return;
+    }
     match frame {
         Frame::Announce { orgs } => {
             for m in orgs {
@@ -779,5 +955,196 @@ mod tests {
         assert!(
             matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.is_empty())
         );
+    }
+
+    // ---- abuse limits (REQ-RELAY-006) ----
+
+    async fn start_with(limits: Limits) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app(new_state_with(Duration::from_secs(10), limits)),
+            )
+            .await
+            .unwrap();
+        });
+        url
+    }
+
+    /// Frames that arrive within `wait`; `None` at the end if the relay closed.
+    async fn drain(ws: &mut Ws, wait: Duration) -> (Vec<Frame>, bool) {
+        let mut out = vec![];
+        loop {
+            match tokio::time::timeout(wait, ws.next()).await {
+                Err(_) => return (out, false),
+                Ok(Some(Ok(tungstenite::Message::Binary(b)))) => out.push(decode(&b).unwrap()),
+                Ok(Some(Ok(tungstenite::Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+                    return (out, true);
+                }
+                Ok(Some(Ok(_))) => {}
+            }
+        }
+    }
+
+    fn count(frames: &[Frame], pick: impl Fn(&Frame) -> bool) -> usize {
+        frames.iter().filter(|f| pick(f)).count()
+    }
+
+    fn rate_limited(f: &Frame) -> bool {
+        matches!(f, Frame::Error { code, .. } if code == "rate-limited")
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn frames_beyond_a_devices_burst_are_dropped() {
+        let url = start_with(Limits {
+            device_frames_per_sec: 1.0,
+            device_burst: 10.0,
+            ..Limits::default()
+        })
+        .await;
+        let (root, ka, kb) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let mut a = login(&url, &ka).await;
+        join(&mut a, &root, &ka).await;
+        let mut b = login(&url, &kb).await;
+        join(&mut b, &root, &kb).await;
+        for _ in 0..20 {
+            send_frame(
+                &mut a,
+                &Frame::Broadcast {
+                    org: org_id(&root),
+                    body: vec![1],
+                },
+            )
+            .await;
+        }
+        let (frames, closed) = drain(&mut a, Duration::from_millis(500)).await;
+        assert!(!closed);
+        let receipts = count(&frames, |f| matches!(f, Frame::Receipt { .. }));
+        // 3 of the burst went to hello, auth and announce.
+        // (A slow machine may refill a token or two while the frames are processed.)
+        assert!((7..=9).contains(&receipts), "{receipts}: {frames:?}");
+        assert!(count(&frames, rate_limited) >= 1);
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn persistent_abusers_are_disconnected() {
+        let url = start_with(Limits {
+            device_frames_per_sec: 1.0,
+            device_burst: 5.0,
+            max_refused: 10,
+            ..Limits::default()
+        })
+        .await;
+        let (root, ka) = (DeviceKey::generate(), DeviceKey::generate());
+        let mut a = login(&url, &ka).await;
+        join(&mut a, &root, &ka).await;
+        for _ in 0..40 {
+            if a.send(tungstenite::Message::Binary(
+                encode(&Frame::Broadcast {
+                    org: org_id(&root),
+                    body: vec![1],
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .is_err()
+            {
+                break;
+            }
+        }
+        let (_, closed) = drain(&mut a, Duration::from_secs(2)).await;
+        assert!(closed, "the relay closes the connection");
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn an_org_limit_covers_all_its_devices() {
+        let url = start_with(Limits {
+            org_frames_per_sec: 0.5,
+            ..Limits::default()
+        })
+        .await;
+        let (root, ka, kb) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let mut a = login(&url, &ka).await;
+        join(&mut a, &root, &ka).await;
+        let mut b = login(&url, &kb).await;
+        join(&mut b, &root, &kb).await;
+        for _ in 0..5 {
+            send_frame(
+                &mut a,
+                &Frame::Broadcast {
+                    org: org_id(&root),
+                    body: vec![1],
+                },
+            )
+            .await;
+            send_frame(
+                &mut b,
+                &Frame::Broadcast {
+                    org: org_id(&root),
+                    body: vec![2],
+                },
+            )
+            .await;
+        }
+        let (fa, _) = drain(&mut a, Duration::from_millis(500)).await;
+        let (fb, _) = drain(&mut b, Duration::from_millis(500)).await;
+        let receipts = count(&fa, |f| matches!(f, Frame::Receipt { .. }))
+            + count(&fb, |f| matches!(f, Frame::Receipt { .. }));
+        assert!(
+            (1..=2).contains(&receipts),
+            "a burst of 2 x 0.5 frames per second, shared: {receipts}"
+        );
+        assert!(count(&fa, rate_limited) + count(&fb, rate_limited) >= 8);
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn connections_beyond_the_maximum_are_refused() {
+        let url = start_with(Limits {
+            max_connections: 1,
+            ..Limits::default()
+        })
+        .await;
+        let first = connect(&url).await;
+        assert!(connect_async(&url).await.is_err(), "HTTP 503");
+        drop(first);
+        // The slot frees up once the first connection is gone.
+        for _ in 0..50 {
+            if connect_async(&url).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the slot was never freed");
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn oversized_messages_close_the_connection() {
+        let url = start_with(Limits {
+            max_message_bytes: 1000,
+            ..Limits::default()
+        })
+        .await;
+        let mut ws = connect(&url).await;
+        let _ = ws
+            .send(tungstenite::Message::Binary(vec![b'x'; 5000].into()))
+            .await;
+        let (_, closed) = drain(&mut ws, Duration::from_secs(2)).await;
+        assert!(closed);
     }
 }

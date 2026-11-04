@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Relay abuse limits (REQ-RELAY-006): `Limits` (env `KITH_RELAY_DEVICE_FRAMES_PER_SEC`, `_DEVICE_BURST`,
+  `_DEVICE_BYTES_PER_SEC`, `_ORG_FRAMES_PER_SEC`, `_MAX_CONNECTIONS`, `_MAX_MESSAGE_BYTES`,
+  `_MAX_REFUSED`), `new_state_with`. Excess frames get `rate-limited` and are dropped; persistent
+  abusers are disconnected; too many connections get HTTP 503.
+- Clients keep at most `MAX_QUARANTINE` rejected changes per author.
+
+### Added
 - Encrypted files (REQ-FILE-001/002, ADR 0009): `kith_crypto::files` (XChaCha20-Poly1305 chunks of
   256 KiB, chunk ID = SHA-256 of the ciphertext), `Store::put_chunk` / `get_chunk` (SQLite table,
   IndexedDB version 3), `kith.file` objects. `Client::add_file(_in)`, `file_info`, `missing_chunks`,
