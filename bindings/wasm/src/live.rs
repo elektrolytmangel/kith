@@ -177,6 +177,28 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "org", org);
             set(&o, "from", from);
         }
+        Event::ChunksServed { to, sent, missing } => {
+            set(&o, "type", "chunksServed");
+            set(&o, "to", to);
+            set(&o, "sent", sent as f64);
+            set(&o, "missing", missing as f64);
+        }
+        Event::FileChunks {
+            from,
+            stored,
+            ready,
+        } => {
+            set(&o, "type", "fileChunks");
+            set(&o, "from", from);
+            set(&o, "stored", stored as f64);
+            let ids: Vec<String> = ready.iter().map(|o| o.to_hex()).collect();
+            set(&o, "ready", strings(&ids));
+        }
+        Event::ChunksMissing { from, count } => {
+            set(&o, "type", "chunksMissing");
+            set(&o, "from", from);
+            set(&o, "count", count as f64);
+        }
         Event::MemberAdded { org, device } => {
             set(&o, "type", "memberAdded");
             set(&o, "org", org);

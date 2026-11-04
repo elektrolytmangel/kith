@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS objects (
     change_count   INTEGER NOT NULL,
     last_change_ms INTEGER NOT NULL
 );
+-- Encrypted file chunks (REQ-FILE-001), by SHA-256 of the ciphertext.
+CREATE TABLE IF NOT EXISTS chunks (
+    id    BLOB PRIMARY KEY,
+    scope TEXT NOT NULL,
+    data  BLOB NOT NULL
+);
 -- Small named blobs, e.g. the MLS group state (contains secrets).
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -353,6 +359,28 @@ impl Store for SqliteStore {
             .map_err(backend)
     }
 
+    fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO chunks (id, scope, data) VALUES (?1, ?2, ?3)",
+                params![id.as_slice(), scope.as_str(), data],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn get_chunk(&self, id: &[u8; 32]) -> Result<Option<(Scope, Vec<u8>)>, StoreError> {
+        let row: Option<(String, Vec<u8>)> = self
+            .conn
+            .prepare_cached("SELECT scope, data FROM chunks WHERE id = ?1")
+            .map_err(backend)?
+            .query_row([id.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .map_err(backend)?;
+        row.map(|(s, d)| Ok((Scope::parse(&s).map_err(|_| corrupt("chunk scope"))?, d)))
+            .transpose()
+    }
+
     fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError> {
         // `synchronous = NORMAL` in WAL mode can lose the last commit on power loss.
         // For the MLS state that could mean reusing an encryption key, so this write
@@ -437,9 +465,18 @@ mod tests {
             s.put_meta("mls", b"one").unwrap();
             s.put_meta("mls", b"two").unwrap();
         }
+        {
+            let mut s = SqliteStore::open(&path).unwrap();
+            s.put_chunk(&[7; 32], &Scope::local(), b"chunk").unwrap();
+        }
         let s = SqliteStore::open(&path).unwrap();
         assert_eq!(s.history(&oid).unwrap(), vec![c]);
         assert_eq!(s.get_meta("mls").unwrap(), Some(b"two".to_vec()));
+        assert_eq!(
+            s.get_chunk(&[7; 32]).unwrap(),
+            Some((Scope::local(), b"chunk".to_vec()))
+        );
+        assert_eq!(s.get_chunk(&[8; 32]).unwrap(), None);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
         }

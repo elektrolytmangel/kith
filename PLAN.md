@@ -22,9 +22,9 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41 (#20), automerge 0.12, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
-### What the library can do today (alpha, phases 1-6 done)
+### What the library can do today (alpha, phases 1-7 done)
 
-Requirements: 27 implemented, 9 partial, 6 accepted/proposed, 1 rejected.
+Requirements: 29 implemented, 9 partial, 4 accepted/proposed, 1 rejected.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -35,6 +35,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - invitations: `createOrg`, one-time invite links with short codes, admins, relay-checked certificates;
 - write permissions: roles (viewer/editor/admin), per-type write rules, revocation; enforced on every device;
 - scopes (one store, several orgs) and read-restricted subgroups with their own encryption;
+- encrypted files in verifiable chunks, fetched from any peer; the always-on client `kith-always-on`;
 - end-to-end encryption (MLS, one group per org): create group, join request + admit, remove, key rotation,
   automatic commit catch-up, re-add and fork resolution; the relay sees only routing metadata;
 - merging concurrent edits: JSON documents on Automerge on every platform (`createDocument`, `updateDocument`,
@@ -108,7 +109,12 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
    - [x] 7a Always-on client (PR `feat/always-on`): `Membership.always_on` (certified members only; the relay
      prefers them as sync partners), `apps/always-on` binary `kith-always-on` (join by invite link, data dir with
      key + SQLite, reconnect with backoff, periodic catch-up, weekly key rotation = REQ-ENC-003), release asset.
-   - [ ] 7b Encrypted large files (REQ-FILE-001/002).
+   - [x] 7b Encrypted large files (REQ-FILE-001/002, PR `feat/files`, ADR 0009): random key per file, XChaCha20-
+     Poly1305 chunks of 256 KiB, chunk ID = SHA-256 of the ciphertext; `kith.file` object (name, MIME, size, key,
+     chunk IDs) in the normal change flow; chunks in the store tagged with their scope (`Store::put_chunk`); fetch via
+     an encrypted `ChunkWant` (org: sync-request routing, so the always-on client is preferred; subgroup: direct),
+     answered with verified `Chunks`; peers serve only chunks of their scope. Lazy by default (`fetch_file`),
+     eager on request (`set_fetch_files`); the always-on client fetches eagerly.
 7. **Phase 8, hardening**: rate limits, compaction, encrypted backups, security review.
 8. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
    against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
@@ -227,3 +233,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: User decided 6b questions (scope in envelope, admins manage subgroups, then phase 7). 6b-1 scopes (PR `feat/scope`, ADR 0007). Next: 6b-2 subgroups.
 - **2026-11-04**: #36 merged. Subgroups (PR `feat/subgroups`, ADR 0008); smoke test covers them. Next: phase 7 (always-on client, then files).
 - **2026-11-04**: #37 merged. Always-on client `kith-always-on` + `Membership.always_on` (PR `feat/always-on`), e2e test through the relay. Next: 7b files.
+- **2026-11-04**: #38 merged. Encrypted files (PR `feat/files`, ADR 0009); smoke test fetches a file through the relay. Next: phase 8 hardening (needs priorities from the user).

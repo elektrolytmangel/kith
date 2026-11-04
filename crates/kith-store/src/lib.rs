@@ -46,6 +46,11 @@ pub trait Store {
         }
         Ok(out)
     }
+    /// Store an encrypted file chunk (REQ-FILE-001) under its ID (SHA-256 of `data`),
+    /// tagged with the scope of the file it belongs to.
+    fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError>;
+    /// A stored chunk and its scope.
+    fn get_chunk(&self, id: &[u8; 32]) -> Result<Option<(Scope, Vec<u8>)>, StoreError>;
     /// A small named blob kept next to the changes (e.g. `"mls"`, the MLS group
     /// state). `None` if never written.
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
@@ -91,6 +96,12 @@ impl<S: Store + ?Sized> Store for Box<S> {
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         (**self).get_meta(key)
     }
+    fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError> {
+        (**self).put_chunk(id, scope, data)
+    }
+    fn get_chunk(&self, id: &[u8; 32]) -> Result<Option<(Scope, Vec<u8>)>, StoreError> {
+        (**self).get_chunk(id)
+    }
     fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError> {
         (**self).put_meta(key, value)
     }
@@ -103,6 +114,7 @@ pub struct MemoryStore {
     by_object: BTreeMap<ObjectId, Vec<ChangeId>>,
     by_scope: HashMap<Scope, Vec<ChangeId>>,
     meta: HashMap<String, Vec<u8>>,
+    chunks: HashMap<[u8; 32], (Scope, Vec<u8>)>,
 }
 
 impl MemoryStore {
@@ -162,5 +174,14 @@ impl Store for MemoryStore {
     fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError> {
         self.meta.insert(key.into(), value.to_vec());
         Ok(())
+    }
+
+    fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError> {
+        self.chunks.insert(*id, (scope.clone(), data.to_vec()));
+        Ok(())
+    }
+
+    fn get_chunk(&self, id: &[u8; 32]) -> Result<Option<(Scope, Vec<u8>)>, StoreError> {
+        Ok(self.chunks.get(id).cloned())
     }
 }

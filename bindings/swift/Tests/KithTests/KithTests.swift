@@ -56,6 +56,17 @@ final class KithTests: XCTestCase {
         XCTAssertEqual(claim.code.count, 6)
     }
 
+    /// req: REQ-FILE-001
+    func testFiles() throws {
+        let client = KithClient()
+        let data = Data((0..<1000).map { UInt8($0 % 256) })
+        let file = try client.addFile(name: "a.bin", mime: "application/octet-stream", data: data)
+        let info = try client.fileInfo(objectId: file.objectId)
+        XCTAssertEqual(info.size, 1000)
+        XCTAssertEqual(info.missing, 0)
+        XCTAssertEqual(try client.readFile(objectId: file.objectId), data)
+    }
+
     /// req: REQ-DATA-004
     func testDocuments() throws {
         let client = KithClient()

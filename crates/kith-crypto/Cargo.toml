@@ -16,6 +16,7 @@ kith-core.workspace = true
 ed25519-dalek.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
+chacha20poly1305.workspace = true
 openmls.workspace = true
 openmls_rust_crypto.workspace = true
 openmls_traits.workspace = true

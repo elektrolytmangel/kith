@@ -24,6 +24,9 @@ const KIND_CHANGE: u8 = 1;
 const KIND_OFFER: u8 = 3;
 const KIND_QUERY: u8 = 4;
 const KIND_REPLY: u8 = 5;
+const KIND_CHUNK_WANT: u8 = 6;
+const KIND_CHUNKS: u8 = 7;
+const KIND_CHUNK_MISSING: u8 = 8;
 
 /// Stay well below the frame limit: the body is JSON-encoded by the relay protocol
 /// only after this check, and one oversized change must not block the others.
@@ -278,6 +281,12 @@ pub(crate) enum Message {
     Query(Vec<u8>),
     /// The partner's answer to a `Query`.
     Reply(Vec<u8>),
+    /// "Send me these file chunks" (REQ-FILE-002).
+    ChunkWant(Vec<[u8; 32]>),
+    /// File chunks: `(id, ciphertext)`.
+    Chunks(Vec<([u8; 32], Vec<u8>)>),
+    /// "I do not have these chunks."
+    ChunkMissing(Vec<[u8; 32]>),
     Offer {
         want: Vec<ChangeId>,
         /// Encoded changes, decoded one by one so a bad one cannot hide the rest.
@@ -295,6 +304,55 @@ pub(crate) fn query_body(msg: &[u8]) -> Vec<u8> {
     let mut out = vec![KIND_QUERY];
     out.extend_from_slice(msg);
     out
+}
+
+fn ids_body(kind: u8, ids: &[[u8; 32]]) -> Vec<u8> {
+    let mut out = vec![kind];
+    out.extend_from_slice(&(ids.len() as u32).to_be_bytes());
+    for id in ids {
+        out.extend_from_slice(id);
+    }
+    out
+}
+
+/// `ChunkWant` bodies for `ids`, split to stay under the size limit.
+pub(crate) fn chunk_want_bodies(ids: &[[u8; 32]]) -> Vec<Vec<u8>> {
+    ids.chunks(MAX_WANT_IDS)
+        .map(|c| ids_body(KIND_CHUNK_WANT, c))
+        .collect()
+}
+
+pub(crate) fn chunk_missing_body(ids: &[[u8; 32]]) -> Vec<u8> {
+    ids_body(KIND_CHUNK_MISSING, ids)
+}
+
+/// `Chunks` bodies, split to stay under the size limit (a chunk is at most 256 KiB).
+pub(crate) fn chunks_bodies(chunks: &[([u8; 32], Vec<u8>)]) -> Vec<Vec<u8>> {
+    let mut bodies = vec![];
+    let mut batch: Vec<&([u8; 32], Vec<u8>)> = vec![];
+    let mut size = 0;
+    let flush = |batch: &mut Vec<&([u8; 32], Vec<u8>)>, bodies: &mut Vec<Vec<u8>>| {
+        let mut out = vec![KIND_CHUNKS];
+        out.extend_from_slice(&(batch.len() as u32).to_be_bytes());
+        for (id, data) in batch.drain(..) {
+            out.extend_from_slice(id);
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(data);
+        }
+        bodies.push(out);
+    };
+    for c in chunks {
+        if size + c.1.len() > MAX_OFFER_BYTES && !batch.is_empty() {
+            flush(&mut batch, &mut bodies);
+            size = 0;
+        }
+        size += c.1.len();
+        batch.push(c);
+    }
+    if !batch.is_empty() {
+        flush(&mut batch, &mut bodies);
+    }
+    bodies
 }
 
 pub(crate) fn reply_body(msg: &[u8]) -> Vec<u8> {
@@ -360,6 +418,39 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
             Message::Change(kith_store::codec::decode_change(rest).map_err(|e| e.to_string())?)
         }
         KIND_QUERY => Message::Query(rest.to_vec()),
+        KIND_CHUNK_WANT | KIND_CHUNK_MISSING => {
+            let n = r.u32()? as usize;
+            if n > r.0.len() / 32 {
+                return Err("chunk count exceeds data".into());
+            }
+            let ids = (0..n)
+                .map(|_| Ok(r.take(32)?.try_into().expect("32 bytes")))
+                .collect::<Result<Vec<[u8; 32]>, String>>()?;
+            if !r.0.is_empty() {
+                return Err("trailing bytes".into());
+            }
+            if kind == KIND_CHUNK_WANT {
+                Message::ChunkWant(ids)
+            } else {
+                Message::ChunkMissing(ids)
+            }
+        }
+        KIND_CHUNKS => {
+            let n = r.u32()? as usize;
+            if n > r.0.len() / 36 {
+                return Err("chunk count exceeds data".into());
+            }
+            let mut out = Vec::with_capacity(n);
+            for _ in 0..n {
+                let id: [u8; 32] = r.take(32)?.try_into().expect("32 bytes");
+                let len = r.u32()? as usize;
+                out.push((id, r.take(len)?.to_vec()));
+            }
+            if !r.0.is_empty() {
+                return Err("trailing bytes".into());
+            }
+            Message::Chunks(out)
+        }
         KIND_REPLY => Message::Reply(rest.to_vec()),
         KIND_OFFER => {
             let want = r.ids()?;
@@ -448,6 +539,32 @@ mod tests {
         assert!(parse(&[KIND_OFFER, 0x3b, 0x9a, 0xca, 0x00]).is_err());
         assert!(matches!(parse(&query_body(b"q")).unwrap(), Message::Query(q) if q == b"q"));
         assert!(matches!(parse(&reply_body(b"r")).unwrap(), Message::Reply(r) if r == b"r"));
+    }
+
+    #[test]
+    fn chunk_messages_roundtrip() {
+        let ids = vec![[1u8; 32], [2u8; 32]];
+        assert!(
+            matches!(parse(&chunk_want_bodies(&ids)[0]).unwrap(), Message::ChunkWant(v) if v == ids)
+        );
+        assert!(
+            matches!(parse(&chunk_missing_body(&ids)).unwrap(), Message::ChunkMissing(v) if v == ids)
+        );
+        let chunks = vec![
+            ([3u8; 32], vec![9; 300 * 1024]),
+            ([4u8; 32], vec![8; 300 * 1024]),
+        ];
+        let bodies = chunks_bodies(&chunks);
+        assert_eq!(bodies.len(), 2, "split under the size limit");
+        let back: Vec<_> = bodies
+            .iter()
+            .flat_map(|b| match parse(b).unwrap() {
+                Message::Chunks(c) => c,
+                _ => panic!(),
+            })
+            .collect();
+        assert_eq!(back, chunks);
+        assert!(parse(&[KIND_CHUNKS, 0, 0, 0, 9]).is_err());
     }
 
     #[test]

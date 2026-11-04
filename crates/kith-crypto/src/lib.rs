@@ -8,6 +8,7 @@
 use ed25519_dalek::{Signer as _, SigningKey};
 use kith_core::{DeviceId, Signer};
 
+pub mod files;
 pub mod group;
 
 pub use group::{Added, CommitOutcome, Decrypted, Epoch, GroupError, Groups};

@@ -193,6 +193,64 @@ impl KithClient {
         Ok(c.into())
     }
 
+    /// Store a file (encrypted, in chunks) in the default scope; returns the
+    /// `kith.file` change to broadcast. Peers fetch the chunks with `fetchFile`.
+    pub fn add_file(
+        &self,
+        name: String,
+        mime: String,
+        data: Vec<u8>,
+    ) -> Result<ChangeInfo, KithError> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .add_file(&name, &mime, &data)?
+            .into())
+    }
+
+    /// `addFile` in `scope` (an org ID, `org/subgroup`, or `local`).
+    pub fn add_file_in(
+        &self,
+        scope: String,
+        name: String,
+        mime: String,
+        data: Vec<u8>,
+    ) -> Result<ChangeInfo, KithError> {
+        let scope = kith_client::Scope::parse(&scope)
+            .map_err(|e| KithError::Failed { msg: e.to_string() })?;
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .add_file_in(scope, &name, &mime, &data)?
+            .into())
+    }
+
+    /// Name, MIME type, size and missing chunk count of a file object.
+    pub fn file_info(&self, object_id: String) -> Result<FileInfoRecord, KithError> {
+        let oid = ObjectId::from_hex(&object_id)?;
+        let i = self.inner.lock().unwrap().file_info(&oid)?;
+        Ok(FileInfoRecord {
+            name: i.name,
+            mime: i.mime,
+            size: i.size,
+            chunks: i.chunks as u64,
+            missing: i.missing as u64,
+        })
+    }
+
+    /// The contents of a file whose chunks are all here (fetch it first).
+    pub fn read_file(&self, object_id: String) -> Result<Vec<u8>, KithError> {
+        let oid = ObjectId::from_hex(&object_id)?;
+        Ok(self.inner.lock().unwrap().read_file(&oid)?)
+    }
+
+    /// Fetch every new file's chunks as soon as it arrives (default: only on `fetchFile`).
+    pub fn set_fetch_files(&self, eager: bool) {
+        self.inner.lock().unwrap().set_fetch_files(eager);
+    }
+
     /// Create an object in `scope`: an org ID (or `org/subgroup`) this device is a
     /// member of, or `local`. `create` uses the only org, or `local` before joining.
     pub fn create_in(
@@ -344,6 +402,16 @@ pub enum RelayEvent {
     MemberReAdded { org: String, device: String },
     /// We (a subgroup's owner) added `device` to subgroup `org` (`<org>/<name>`).
     MemberAdded { org: String, device: String },
+    /// We sent a peer the file chunks it asked for.
+    ChunksServed { to: String, sent: u64, missing: u64 },
+    /// File chunks arrived; `ready` lists file object IDs that are now complete.
+    FileChunks {
+        from: String,
+        stored: u64,
+        ready: Vec<String>,
+    },
+    /// The asked peer lacks `count` chunks; try again later.
+    ChunksMissing { from: String, count: u64 },
     /// Two members changed the group at the same time. `we_win` false: this device
     /// asked `peer` to re-add it (data catches up afterwards); nothing to do for the app.
     Fork {
@@ -351,6 +419,17 @@ pub enum RelayEvent {
         peer: String,
         we_win: bool,
     },
+}
+
+/// What `KithClient.fileInfo` reports.
+#[derive(uniffi::Record)]
+pub struct FileInfoRecord {
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    pub chunks: u64,
+    /// Chunks not on this device yet (0: `readFile` works).
+    pub missing: u64,
 }
 
 /// Result of [`RelaySession::claim`].
@@ -506,6 +585,17 @@ impl RelaySession {
     /// Subgroups of this org this device can read.
     pub fn my_subgroups(&self) -> Vec<String> {
         self.client.inner.lock().unwrap().my_subgroups(&self.org)
+    }
+
+    /// Frames that fetch the missing chunks of a file from a peer. `FileChunks`
+    /// events report progress; `ready` lists files that are complete.
+    pub fn fetch_file(&self, object_id: String) -> Result<Vec<Vec<u8>>, KithError> {
+        let oid = ObjectId::from_hex(&object_id)?;
+        let mut c = self.client.inner.lock().unwrap();
+        c.fetch_file_frames(&self.org, &oid)?
+            .iter()
+            .map(encode_frame)
+            .collect()
     }
 
     /// Claim an invite link (on the new device; open this session for the link's
@@ -699,6 +789,24 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
         Event::ReAddRequested { org, from } => RelayEvent::ReAddRequested { org, from },
         Event::MemberReAdded { org, device } => RelayEvent::MemberReAdded { org, device },
         Event::MemberAdded { org, device } => RelayEvent::MemberAdded { org, device },
+        Event::ChunksServed { to, sent, missing } => RelayEvent::ChunksServed {
+            to,
+            sent: sent as u64,
+            missing: missing as u64,
+        },
+        Event::FileChunks {
+            from,
+            stored,
+            ready,
+        } => RelayEvent::FileChunks {
+            from,
+            stored: stored as u64,
+            ready: ready.iter().map(|o| o.to_hex()).collect(),
+        },
+        Event::ChunksMissing { from, count } => RelayEvent::ChunksMissing {
+            from,
+            count: count as u64,
+        },
         Event::Fork { org, peer, we_win } => RelayEvent::Fork { org, peer, we_win },
         Event::Ignored => return None,
     })
@@ -1001,6 +1109,31 @@ mod tests {
         assert!(matches!(out.event, Some(RelayEvent::Rejected { .. })));
         assert!(sb.receive(b"not a frame".to_vec()).is_err());
         assert!(b.history(created.object_id).unwrap().is_empty());
+    }
+
+    /// req: REQ-FILE-002
+    #[test]
+    fn files_through_sessions() {
+        let (a, sa, b, sb) = pair();
+        let catch_up = join(&a, &sa, &b, &sb);
+        bounce((&b, &sb), (&a, &sa), catch_up);
+        let data: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
+        let f = a
+            .add_file(
+                "x.bin".into(),
+                "application/octet-stream".into(),
+                data.clone(),
+            )
+            .unwrap();
+        let _ = relay_to(&a, &sb, &sa.broadcast(f.change_id).unwrap());
+        assert_eq!(b.file_info(f.object_id.clone()).unwrap().missing, 2);
+        assert!(b.read_file(f.object_id.clone()).is_err());
+        bounce(
+            (&b, &sb),
+            (&a, &sa),
+            sb.fetch_file(f.object_id.clone()).unwrap(),
+        );
+        assert_eq!(b.read_file(f.object_id).unwrap(), data);
     }
 
     /// req: REQ-PERM-003
