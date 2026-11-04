@@ -28,6 +28,7 @@ crates/                    Rust libraries (all logic lives here)
   kith-relay/              RAM-only routing table, embeddable
 apps/
   relay-server/            standalone WebSocket relay + Dockerfile
+  always-on/               headless always-on member (kith-always-on)
 bindings/                  thin wrappers, no logic
   ffi/                     UniFFI → Swift + Kotlin
   swift/                   Swift Package (iOS/macOS)

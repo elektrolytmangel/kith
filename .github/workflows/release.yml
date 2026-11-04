@@ -83,25 +83,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --release --locked -p kith-relay-server --target ${{ matrix.target }}
+      - run: cargo build --release --locked -p kith-relay-server -p kith-always-on --target ${{ matrix.target }}
       - name: Package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          name="kith-relay-$TARGET"
-          mkdir -p dist
-          if [[ "$TARGET" == *windows* ]]; then
-            cp "target/$TARGET/release/kith-relay.exe" dist/
-            (cd dist && 7z a "../$name.zip" kith-relay.exe >/dev/null)
-          else
-            cp "target/$TARGET/release/kith-relay" dist/
-            tar -czf "$name.tar.gz" -C dist kith-relay
-          fi
+          for bin in kith-relay kith-always-on; do
+            name="$bin-$TARGET"
+            rm -rf dist && mkdir -p dist
+            if [[ "$TARGET" == *windows* ]]; then
+              cp "target/$TARGET/release/$bin.exe" dist/
+              (cd dist && 7z a "../$name.zip" "$bin.exe" >/dev/null)
+            else
+              cp "target/$TARGET/release/$bin" dist/
+              tar -czf "$name.tar.gz" -C dist "$bin"
+            fi
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: relay-${{ matrix.target }}
-          path: kith-relay-${{ matrix.target }}.*
+          path: |
+            kith-relay-${{ matrix.target }}.*
+            kith-always-on-${{ matrix.target }}.*
 
   npm:
     needs: verify

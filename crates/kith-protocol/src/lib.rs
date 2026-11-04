@@ -112,8 +112,12 @@ pub enum Frame {
 pub struct Membership {
     /// Organization.
     pub org: OrgId,
-    /// Token signed by the organization root key (format TBD, see open questions).
+    /// Membership certificate chain (hex, ADR 0005); empty while joining.
     pub proof: String,
+    /// The device is an always-on client: the relay prefers it as catch-up partner
+    /// (REQ-SYNC-006). Only honoured for certified members.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub always_on: bool,
 }
 
 /// Encoding errors.

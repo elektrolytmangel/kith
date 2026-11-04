@@ -50,7 +50,7 @@ pub struct RelayConnection {
 impl RelayConnection {
     /// Connect to `url` (`ws://host:port/v1/ws`, or `wss://` with the `tls`
     /// feature) and prove ownership of `signer`'s device key.
-    pub async fn connect(url: &str, signer: &dyn Signer) -> Result<Self, NetError> {
+    pub async fn connect(url: &str, signer: &(dyn Signer + Sync)) -> Result<Self, NetError> {
         let (ws, _) = connect_async(url).await?;
         let mut conn = Self { ws };
         conn.send(&hello_frame(signer)).await?;
@@ -129,6 +129,12 @@ impl<S: Store> LiveClient<S> {
             conn,
             org: org.into(),
         })
+    }
+
+    /// Close the connection and hand back the client (e.g. to reconnect later).
+    pub async fn into_client(self) -> Client<S, DeviceKey> {
+        let _ = self.conn.close().await;
+        self.client
     }
 
     /// The wrapped client (history, merging, device ID).

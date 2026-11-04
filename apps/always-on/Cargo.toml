@@ -1,0 +1,35 @@
+[package]
+name = "kith-always-on"
+description = "Headless always-on kith member: holds all data, stays online, is the preferred catch-up peer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "kith_always_on"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kith-always-on"
+path = "src/main.rs"
+
+[dependencies]
+kith-client.workspace = true
+kith-net = { path = "../../crates/kith-net" }
+kith-store = { workspace = true, features = ["sqlite"] }
+kith-protocol.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+kith-relay-server = { path = "../relay-server" }
+axum.workspace = true

@@ -119,6 +119,7 @@ pub fn announce_frame(org: &str, proof: &str) -> Frame {
         orgs: vec![kith_protocol::Membership {
             org: org.into(),
             proof: proof.into(),
+            always_on: false,
         }],
     }
 }
@@ -355,6 +356,8 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     reconciling: std::collections::HashMap<String, kith_sync::Reconciliation>,
     /// Subgroups we sent our KeyPackage to the owner for (RAM; `sync_request_frames` retries).
     kp_asked: std::collections::HashSet<String>,
+    /// Announce as an always-on client (REQ-SYNC-006).
+    always_on: bool,
     /// Certificates, root keys, issued invites.
     orgs: org::Orgs,
     /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
@@ -385,6 +388,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             readd_asked: Default::default(),
             reconciling: Default::default(),
             kp_asked: Default::default(),
+            always_on: false,
             orgs,
             claims: Default::default(),
             policies: Default::default(),
@@ -885,7 +889,19 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Frame announcing `org` to the relay with this device's membership proof.
     /// Without a proof (joining) the relay treats the device as pending.
     pub fn announce_frame(&self, org: &str) -> Frame {
-        announce_frame(org, &self.membership_proof(org))
+        Frame::Announce {
+            orgs: vec![kith_protocol::Membership {
+                org: org.into(),
+                proof: self.membership_proof(org),
+                always_on: self.always_on,
+            }],
+        }
+    }
+
+    /// Announce this device as an always-on client (a headless member that stays
+    /// online): the relay then prefers it as catch-up partner (REQ-SYNC-006).
+    pub fn set_always_on(&mut self, on: bool) {
+        self.always_on = on;
     }
 
     /// The frames to send in answer to a relay's `challenge`: the signature that

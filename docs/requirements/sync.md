@@ -50,3 +50,14 @@ Done for native Rust: `kith_net::LiveClient` broadcasts via the relay and
 
 Large initial syncs should be chunked and resumable, preferring a direct
 peer-to-peer connection.
+
+### REQ-SYNC-006: Always-on client
+
+- **Priority:** should | **Phase:** 7 | **Status:** implemented | **Verify:** test | **Source:** design §Architecture
+
+An organization should be able to run a headless always-on member (desktop, home
+server, Raspberry Pi) that holds all data, stays connected, is preferred by the
+relay as the catch-up partner, and rotates its keys periodically.
+
+`apps/always-on` (`kith-always-on`); the relay prefers members that announce
+`always_on` (`Membership.always_on`) in `RoutingTable::sync_partner`.
