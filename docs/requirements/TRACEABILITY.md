@@ -31,7 +31,7 @@
 | [REQ-PERM-003](permissions.md#req-perm-003-read-restricted-subgroups) | Read-restricted subgroups | must | 6 | accepted | test | — | — |
 | [REQ-PERM-004](permissions.md#req-perm-004-deterministic-concurrent-permission-changes) | Deterministic concurrent permission changes | must | 6 | proposed | test | — | — |
 | [REQ-PLAT-001](platform.md#req-plat-001-one-shared-rust-core) | One shared Rust core | must | 1 | implemented | review | — | — |
-| [REQ-PLAT-002](platform.md#req-plat-002-swift-and-kotlin-bindings) | Swift and Kotlin bindings | must | 1 | partial | test | `bindings/swift/Tests/KithTests/KithTests.swift` | — |
+| [REQ-PLAT-002](platform.md#req-plat-002-swift-and-kotlin-bindings) | Swift and Kotlin bindings | must | 1 | partial | test | `bindings/ffi/src/lib.rs`<br>`bindings/swift/Tests/KithTests/KithTests.swift` | — |
 | [REQ-PLAT-003](platform.md#req-plat-003-web-bindings) | Web bindings | must | 1 | partial | test | — | — |
 | [REQ-PLAT-004](platform.md#req-plat-004-relay-as-container-image) | Relay as container image | must | 2 | partial | manual | — | — |
 | [REQ-PLAT-005](platform.md#req-plat-005-automated-versioned-releases) | Automated, versioned releases | must | 1 | partial | review | — | — |

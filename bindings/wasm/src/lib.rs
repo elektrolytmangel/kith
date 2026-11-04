@@ -19,13 +19,39 @@ pub struct KithClient {
 
 #[wasm_bindgen]
 impl KithClient {
-    /// New client with a fresh device key.
-    /// TODO(phase 1): IndexedDB-backed store and key persistence.
+    /// New client with a fresh device key and in-memory store.
+    ///
+    /// The identity is lost on reload unless the app saves `secretKey()` and
+    /// restores it with `KithClient.withSecretKey`.
+    /// TODO(phase 1): IndexedDB-backed store.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
             inner: Client::new(DeviceKey::generate(), MemoryStore::new()),
         }
+    }
+
+    /// Restore a device identity from its 32-byte secret key (as returned by
+    /// `secretKey()`), with an in-memory store.
+    #[wasm_bindgen(js_name = withSecretKey)]
+    pub fn with_secret_key(secret_key: &[u8]) -> Result<KithClient, JsError> {
+        let seed: [u8; 32] = secret_key.try_into().map_err(|_| {
+            JsError::new(&format!(
+                "secret key must be 32 bytes, got {}",
+                secret_key.len()
+            ))
+        })?;
+        Ok(Self {
+            inner: Client::new(DeviceKey::from_secret_bytes(&seed), MemoryStore::new()),
+        })
+    }
+
+    /// The 32-byte secret key of this device. Anyone who has it can sign as
+    /// this device: keep it out of logs and plain `localStorage`; prefer a
+    /// non-extractable `CryptoKey`-wrapped blob or app-level encryption.
+    #[wasm_bindgen(js_name = secretKey)]
+    pub fn secret_key(&self) -> Vec<u8> {
+        self.inner.signer().secret_bytes().to_vec()
     }
 
     #[wasm_bindgen(js_name = deviceId)]

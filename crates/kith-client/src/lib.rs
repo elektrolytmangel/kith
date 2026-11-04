@@ -91,6 +91,12 @@ impl<S: Store, K: Signer> Client<S, K> {
         Ok(self.store.history(object)?)
     }
 
+    /// The signer this client was created with (for `DeviceKey`: read the
+    /// secret seed to persist it, see `DeviceKey::secret_bytes`).
+    pub fn signer(&self) -> &K {
+        &self.key
+    }
+
     /// Access the underlying store.
     pub fn store(&self) -> &S {
         &self.store

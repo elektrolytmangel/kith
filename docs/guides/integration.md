@@ -1,7 +1,9 @@
 # Integrating kith into apps
 
-All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`
-and `history`. Sync, encryption and invitations will be added in later phases.
+All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`,
+`history`, and `secretKey` / `withSecretKey` to keep the device identity across
+restarts (store the key in the platform's secure storage; the data itself is
+still in memory only until the store selection lands). Sync, encryption and invitations will be added in later phases.
 
 Every package is a GitHub Release asset:
 `https://github.com/elektrolytmangel/kith/releases/download/vX.Y.Z/<asset>`. The repository
@@ -42,8 +44,9 @@ let change = try client.create(type: "acme.note", text: "hello")
 let history = try client.history(objectId: change.objectId)
 ```
 
-Keep the device key in the Keychain. This needs the key-seed constructor
-planned for phase 1.
+Keep the device key in the Keychain: after the first launch save
+`client.secretKey()` (32 bytes), and on later launches restore the same device
+identity with `try KithClient.withSecretKey(secretKey: data)`.
 
 ## Android
 
@@ -63,6 +66,9 @@ val client = KithClient()
 val change = client.create("acme.note", "hello")
 val history = client.history(change.objectId)
 ```
+
+Keep the device key in the Android Keystore: save `client.secretKey()` (encrypted with a
+Keystore key) and restore with `KithClient.withSecretKey(bytes)`.
 
 ## Rust desktop, Tauri, headless
 
