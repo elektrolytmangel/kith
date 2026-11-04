@@ -5,6 +5,23 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Invitations (phase 5, ADR 0005): `Client::create_org` (org ID = new org root public key),
+  `create_invite` (one-time, expiring link), `claim_invite` (proof + 6-digit code),
+  `Event::InviteClaimed` → `accept_claim` / `reject_claim`, `grant_admin`; the Welcome carries the
+  new member's certificate and the client re-announces with it (`Event::CertificateUpdated` for
+  admin grants). Same API in `kith-net` (`claim`, `accept_claim`), web (`createOrg`, `createInvite`,
+  `parseInvite`, `claimInvite`, `acceptClaim`, `rejectClaim`, `grantAdmin`), Swift/Kotlin. The web
+  and Swift wrappers queue frames until the relay handshake is done.
+- Relay: membership proofs are checked on `announce` (REQ-RELAY-004); devices without one are
+  pending (only `invite-claim`, which goes to the org's online admins, and incoming `direct`);
+  `not-a-member` and `bad-proof` errors. `kith_relay::Role`, `RoutingTable::join_as`, `admins`.
+
+### Changed
+- **Breaking:** `create_group`, `join_request_frame`, `add_member` and `Event::JoinRequested` are
+  gone (join by invite). `handshake_reply` / `announce_frame(org)` are `Client` methods (they carry
+  the certificate). Org IDs must be org root keys (64 hex).
+
+### Added
 - `kith_core::membership` (ADR 0005): membership certificates and chains (root → admin → member)
   that the relay can verify against the org ID (= org root public key), one-time invite links
   (`Invite::to_link` / `parse`), the claim proof (HMAC over the KeyPackage) and a 6-digit short

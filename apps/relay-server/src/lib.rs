@@ -7,8 +7,11 @@
 //!
 //! Connection: `hello` -> relay `challenge` -> `auth` (signature over
 //! [`kith_protocol::auth_message`]). Every other frame is refused until the device
-//! has proven it owns its key. Membership-proof checks (the org root key) are
-//! still TODO (REQ-RELAY-004); do not expose publicly yet.
+//! has proven it owns its key. Then `announce` lists orgs with membership proofs
+//! (certificate chains, ADR 0005), checked against the org ID, which is the org's
+//! root public key (REQ-RELAY-004). A device announcing an org without a proof is
+//! *pending*: it may only send `invite-claim` (routed to the org's online admins)
+//! and receive `direct` messages.
 
 use std::{
     collections::HashMap,
@@ -28,9 +31,10 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use kith_core::membership::CertChain;
 use kith_core::{DeviceId, verify_signature};
 use kith_protocol::{Frame, PROTOCOL_VERSION, auth_message, decode, encode};
-use kith_relay::{Route, RoutingTable};
+use kith_relay::{Role, Route, RoutingTable};
 use tokio::sync::mpsc;
 
 /// What a connection's writer task is asked to do.
@@ -260,31 +264,74 @@ fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Sh
     }
 }
 
+/// The role a membership proof gives `device` in `org` (REQ-RELAY-004). An empty
+/// proof means "joining": pending.
+fn check_membership(org: &str, device: &str, proof: &str) -> Result<Role, &'static str> {
+    let org_key = DeviceId::from_hex(org).map_err(|_| "org ID must be the hex org root key")?;
+    if proof.is_empty() {
+        return Ok(Role::Pending);
+    }
+    let device = DeviceId::from_hex(device).map_err(|_| "bad device")?;
+    let proven = CertChain::from_hex(proof)
+        .map_err(|_| "malformed membership proof")?
+        .verify(&org_key, &device)
+        .map_err(|_| "membership proof does not verify")?;
+    Ok(if proven.admin {
+        Role::Admin
+    } else {
+        Role::Member
+    })
+}
+
 fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
+    let member =
+        |r: &Relay, org: &str| matches!(r.table.role(org, d), Some(Role::Member | Role::Admin));
     match frame {
         Frame::Announce { orgs } => {
             for m in orgs {
-                // TODO(REQ-RELAY-004): verify m.proof against the org root key.
-                r.table.join(d, &m.org);
-                let online = r.table.online(&m.org);
-                fan_out(r, &online, || Frame::Presence {
-                    org: m.org.clone(),
-                    online: online.clone(),
-                });
+                let role = match check_membership(&m.org, d, &m.proof) {
+                    Ok(role) => role,
+                    Err(why) => {
+                        send(tx, error("bad-proof", format!("{}: {why}", m.org)));
+                        continue;
+                    }
+                };
+                r.table.join_as(d, &m.org, role);
+                if role != Role::Pending {
+                    let online = r.table.online(&m.org);
+                    fan_out(r, &online, || Frame::Presence {
+                        org: m.org.clone(),
+                        online: online.clone(),
+                    });
+                }
             }
         }
-        Frame::Broadcast { org, body } => {
+        Frame::Broadcast { org, body } if member(r, &org) => {
             let route = r.table.broadcast(&org, d);
             deliver(r, route, tx, org, d, body);
         }
-        Frame::Direct { org, to, body } => {
+        Frame::Direct { org, to, body } if member(r, &org) => {
             let route = r.table.direct(&org, &to);
             deliver(r, route, tx, org, d, body);
         }
-        Frame::SyncRequest { org, body } => {
+        Frame::SyncRequest { org, body } if member(r, &org) => {
             let route = r.table.sync_partner(&org, d);
             deliver(r, route, tx, org, d, body);
         }
+        Frame::InviteClaim { org, body, .. } if r.table.role(&org, d).is_some() => {
+            let route = r.table.admins(&org);
+            deliver(r, route, tx, org, d, body);
+        }
+        Frame::Broadcast { org, .. }
+        | Frame::Direct { org, .. }
+        | Frame::SyncRequest { org, .. }
+        | Frame::InviteClaim { org, .. } => send(
+            tx,
+            error(
+                "not-a-member",
+                format!("announce {org} with a valid proof first"),
+            ),
+        ),
         other => send(tx, error("unsupported", format!("{other:?}"))),
     }
 }
@@ -325,6 +372,7 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use kith_client::{auth_frame, hello_frame};
     use kith_core::Signer;
+    use kith_core::membership::MembershipCert;
     use kith_crypto::DeviceKey;
     use kith_protocol::Membership;
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite};
@@ -377,17 +425,38 @@ mod tests {
         ws
     }
 
-    async fn join(ws: &mut Ws, org: &str) {
+    fn org_id(root: &DeviceKey) -> String {
+        root.device_id().to_hex()
+    }
+
+    /// A membership proof for `key` in `root`'s org, issued by the root.
+    fn proof(root: &DeviceKey, key: &DeviceKey, admin: bool) -> String {
+        CertChain(vec![MembershipCert::issue(
+            root,
+            root.device_id(),
+            key.device_id(),
+            admin,
+            1,
+        )])
+        .to_hex()
+    }
+
+    async fn announce(ws: &mut Ws, org: &str, proof: String) {
         send_frame(
             ws,
             &Frame::Announce {
                 orgs: vec![Membership {
                     org: org.into(),
-                    proof: String::new(),
+                    proof,
                 }],
             },
         )
         .await;
+    }
+
+    /// Announce `key` as a member of `root`'s org.
+    async fn join(ws: &mut Ws, root: &DeviceKey, key: &DeviceKey) {
+        announce(ws, &org_id(root), proof(root, key, false)).await;
         // Our own join is announced to us as presence.
         assert!(matches!(next_frame(ws).await, Some(Frame::Presence { .. })));
     }
@@ -403,11 +472,15 @@ mod tests {
     #[tokio::test]
     async fn authenticated_devices_can_exchange_messages() {
         let url = start(Duration::from_secs(10)).await;
-        let (ka, kb) = (DeviceKey::generate(), DeviceKey::generate());
+        let (root, ka, kb) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
         let mut a = login(&url, &ka).await;
-        join(&mut a, "org").await;
+        join(&mut a, &root, &ka).await;
         let mut b = login(&url, &kb).await;
-        join(&mut b, "org").await;
+        join(&mut b, &root, &kb).await;
         // a sees b come online.
         assert!(matches!(
             next_frame(&mut a).await,
@@ -417,7 +490,7 @@ mod tests {
         send_frame(
             &mut a,
             &Frame::Broadcast {
-                org: "org".into(),
+                org: org_id(&root),
                 body: b"hi".to_vec(),
             },
         )
@@ -532,20 +605,24 @@ mod tests {
     #[tokio::test]
     async fn reconnecting_replaces_the_old_connection_without_dropping_the_new_one() {
         let url = start(Duration::from_secs(10)).await;
-        let (ka, kb) = (DeviceKey::generate(), DeviceKey::generate());
+        let (root, ka, kb) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
         let mut old = login(&url, &ka).await;
-        join(&mut old, "org").await;
+        join(&mut old, &root, &ka).await;
         let mut new = login(&url, &ka).await;
-        join(&mut new, "org").await;
+        join(&mut new, &root, &ka).await;
         // The old connection is closed by the relay...
         assert!(next_frame(&mut old).await.is_none());
         // ...and its teardown did not unregister the new one.
         let mut b = login(&url, &kb).await;
-        join(&mut b, "org").await;
+        join(&mut b, &root, &kb).await;
         send_frame(
             &mut b,
             &Frame::Broadcast {
-                org: "org".into(),
+                org: org_id(&root),
                 body: b"x".to_vec(),
             },
         )
@@ -560,5 +637,144 @@ mod tests {
                 other => panic!("expected deliver, got {other:?}"),
             }
         }
+    }
+
+    /// req: REQ-RELAY-004
+    #[tokio::test]
+    async fn bad_proofs_are_refused_and_non_members_cannot_send() {
+        let url = start(Duration::from_secs(10)).await;
+        let (root, key) = (DeviceKey::generate(), DeviceKey::generate());
+        let mut ws = login(&url, &key).await;
+        let org = org_id(&root);
+        // Garbage, a chain for another device, a self-made chain, a name as org ID.
+        announce(&mut ws, &org, "zz".into()).await;
+        expect_error(next_frame(&mut ws).await, "bad-proof");
+        announce(&mut ws, &org, proof(&root, &DeviceKey::generate(), false)).await;
+        expect_error(next_frame(&mut ws).await, "bad-proof");
+        announce(&mut ws, &org, proof(&key, &key, true)).await;
+        expect_error(next_frame(&mut ws).await, "bad-proof");
+        announce(&mut ws, "my-org", proof(&root, &key, false)).await;
+        expect_error(next_frame(&mut ws).await, "bad-proof");
+        for f in [
+            Frame::Broadcast {
+                org: org.clone(),
+                body: vec![1],
+            },
+            Frame::SyncRequest {
+                org: org.clone(),
+                body: vec![1],
+            },
+            Frame::Direct {
+                org: org.clone(),
+                to: root.device_id().to_hex(),
+                body: vec![1],
+            },
+        ] {
+            send_frame(&mut ws, &f).await;
+            expect_error(next_frame(&mut ws).await, "not-a-member");
+        }
+    }
+
+    /// req: REQ-RELAY-004
+    /// req: REQ-INV-002
+    #[tokio::test]
+    async fn a_pending_device_can_only_claim_and_receive_until_it_proves_membership() {
+        let url = start(Duration::from_secs(10)).await;
+        let (root, admin_key, new_key) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let org = org_id(&root);
+        let mut admin = login(&url, &admin_key).await;
+        announce(&mut admin, &org, proof(&root, &admin_key, true)).await;
+        assert!(
+            matches!(next_frame(&mut admin).await, Some(Frame::Presence { online, .. }) if online.len() == 1)
+        );
+
+        // The new device announces without a proof: pending, no presence.
+        let mut new = login(&url, &new_key).await;
+        announce(&mut new, &org, String::new()).await;
+        send_frame(
+            &mut new,
+            &Frame::Broadcast {
+                org: org.clone(),
+                body: vec![1],
+            },
+        )
+        .await;
+        expect_error(next_frame(&mut new).await, "not-a-member");
+        // Its claim reaches the admin.
+        send_frame(
+            &mut new,
+            &Frame::InviteClaim {
+                org: org.clone(),
+                token: "t".into(),
+                body: b"claim".to_vec(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.len() == 1)
+        );
+        match next_frame(&mut admin).await {
+            Some(Frame::Deliver { from, body, .. }) => {
+                assert_eq!(from, new_key.device_id().to_hex());
+                assert_eq!(body, b"claim");
+            }
+            other => panic!("expected the claim, got {other:?}"),
+        }
+        // The admin's direct (the Welcome) reaches the pending device.
+        send_frame(
+            &mut admin,
+            &Frame::Direct {
+                org: org.clone(),
+                to: new_key.device_id().to_hex(),
+                body: b"welcome".to_vec(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(next_frame(&mut admin).await, Some(Frame::Receipt { delivered }) if delivered.len() == 1)
+        );
+        assert!(
+            matches!(next_frame(&mut new).await, Some(Frame::Deliver { body, .. }) if body == b"welcome")
+        );
+        // With its certificate it becomes a member and shows up in presence.
+        announce(&mut new, &org, proof(&root, &new_key, false)).await;
+        assert!(
+            matches!(next_frame(&mut new).await, Some(Frame::Presence { online, .. }) if online.len() == 2)
+        );
+        assert!(
+            matches!(next_frame(&mut admin).await, Some(Frame::Presence { online, .. }) if online.len() == 2)
+        );
+    }
+
+    /// req: REQ-INV-002
+    #[tokio::test]
+    async fn claims_without_an_online_admin_are_dropped() {
+        let url = start(Duration::from_secs(10)).await;
+        let (root, member_key, new_key) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let org = org_id(&root);
+        let mut member = login(&url, &member_key).await;
+        join(&mut member, &root, &member_key).await;
+        let mut new = login(&url, &new_key).await;
+        announce(&mut new, &org, String::new()).await;
+        send_frame(
+            &mut new,
+            &Frame::InviteClaim {
+                org,
+                token: "t".into(),
+                body: vec![1],
+            },
+        )
+        .await;
+        assert!(
+            matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.is_empty())
+        );
     }
 }

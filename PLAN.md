@@ -22,9 +22,9 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41 (#20), automerge 0.12, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
-### What the library can do today (alpha, phases 1-4 done)
+### What the library can do today (alpha, phases 1-5 done)
 
-Requirements: 16 implemented, 11 partial, 15 accepted/proposed.
+Requirements: 21 implemented, 11 partial, 10 accepted/proposed.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -32,6 +32,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - relay with device authentication (challenge/response); live sync of new changes between online devices
   (`kith-net` in Rust, `KithClient.connect` on web, `RelaySession` on Swift/Kotlin);
 - catch-up: a new or returning device downloads what it lacks from one online peer (`catchUp`);
+- invitations: `createOrg`, one-time invite links with short codes, admins, relay-checked certificates;
 - end-to-end encryption (MLS, one group per org): create group, join request + admit, remove, key rotation,
   automatic commit catch-up, re-add and fork resolution; the relay sees only routing metadata;
 - merging concurrent edits: JSON documents on Automerge on every platform (`createDocument`, `updateDocument`,
@@ -42,7 +43,8 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | Gap | Effect | Requirement |
 | --- | --- | --- |
 | A device added by the losing side of an MLS fork must be admitted again | Rare (two admins at once); app sees `JoinRequested` | ADR 0004 |
-| Relay checks device keys but not org membership proofs (any device can join any org id) | Don't expose it publicly | REQ-RELAY-004 |
+| No revocation list: a removed device keeps a valid certificate (sees metadata, can connect; cannot decrypt) | Phase 6 policy object | REQ-INV-004 |
+| No rate limits on the relay | Floodable | Phase 8 |
 | No permission checks on incoming changes | Any device can write anything | REQ-PERM-002 |
 | Sync needs another device online | Offline-only devices can't catch up | REQ-RELAY-005 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
@@ -78,9 +80,9 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
    - [x] 5a `kith-core::membership`: org root key per org (org ID = its public key), membership certificates
      (root → admin, admin → member; chain of ≤ 2), invite links (org, relay, token, secret, expiry), claim proof
      (HMAC over the KeyPackage) and 6-digit short code. Pure library + tests (PR `feat/membership`).
-   - [ ] 5b Relay: verify certificate chains on `announce` (REQ-RELAY-004); devices without one are *pending*
+   - [x] 5b Relay: verify certificate chains on `announce` (REQ-RELAY-004); devices without one are *pending*
      (may only send `invite-claim` and receive `direct`); claims go to the org's online admins.
-   - [ ] 5c Client + bindings: `create_org`, `create_invite`, `claim_frame`, `InviteClaimed { code }` →
+   - [x] 5c Client + bindings (5b+5c in PR `feat/invitations`): `create_org`, `create_invite`, `claim_frame`, `InviteClaimed { code }` →
      `accept_claim`, Welcome carries the member certificate, re-announce with it; `grant_admin`; remove
      `create_group` / open `JoinRequested` admission; e2e through the relay; smoke test.
 5. **Phases 6-8**: permissions (REQ-PERM-002, policy object, revocation), files + always-on client, hardening.
@@ -189,3 +191,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: JSON documents in all bindings (PR `feat/documents`), wasm 3.18 MB. Next: phase 3 follow-ups (Negentropy).
 - **2026-11-04**: Negentropy reconciliation replaces the full-ID exchange (PR `feat/negentropy`); new `SyncCompared` event. Next: phase 5 invitations (design questions first).
 - **2026-11-04**: User decided phase 5 questions (see *Decisions*). 5a `kith_core::membership` + ADR 0005 (PR `feat/membership`). Next: 5b relay checks.
+- **2026-11-04**: Invitations end to end (PR `feat/invitations`): relay checks certificate chains, pending devices, claim/accept flow in all bindings; smoke test joins by invite. Next: phase 6 permissions (design questions).

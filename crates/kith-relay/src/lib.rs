@@ -18,10 +18,25 @@ pub enum Route {
     Dropped,
 }
 
+/// What a device may do in an org, as proven on `announce` (REQ-RELAY-004).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// No valid membership proof yet (a device claiming an invite): may only send
+    /// invite claims and receive direct messages. Not in presence.
+    Pending,
+    /// A member.
+    Member,
+    /// A member that may admit others; invite claims are routed to admins.
+    Admin,
+}
+
 /// Who is online in which organization. RAM only.
 #[derive(Default, Debug)]
 pub struct RoutingTable {
+    /// Members and admins.
     orgs: HashMap<OrgId, HashSet<DeviceIdHex>>,
+    admins: HashMap<OrgId, HashSet<DeviceIdHex>>,
+    pending: HashMap<OrgId, HashSet<DeviceIdHex>>,
     devices: HashMap<DeviceIdHex, HashSet<OrgId>>,
     /// Devices preferred as sync partners (always-on clients).
     always_on: HashSet<DeviceIdHex>,
@@ -33,17 +48,75 @@ impl RoutingTable {
         Self::default()
     }
 
-    /// Register an authenticated device as online in `org`.
+    /// Register an authenticated device as an online member of `org`.
     /// Membership proofs must be checked by the caller before this.
     pub fn join(&mut self, device: &str, org: &str) {
-        self.orgs
-            .entry(org.into())
-            .or_default()
-            .insert(device.into());
+        self.join_as(device, org, Role::Member);
+    }
+
+    /// Register an authenticated device in `org` with `role` (replacing an earlier
+    /// role, e.g. pending → member after joining).
+    pub fn join_as(&mut self, device: &str, org: &str, role: Role) {
+        self.leave(device, org);
+        let set = match role {
+            Role::Pending => &mut self.pending,
+            Role::Member | Role::Admin => &mut self.orgs,
+        };
+        set.entry(org.into()).or_default().insert(device.into());
+        if role == Role::Admin {
+            self.admins
+                .entry(org.into())
+                .or_default()
+                .insert(device.into());
+        }
         self.devices
             .entry(device.into())
             .or_default()
             .insert(org.into());
+    }
+
+    fn leave(&mut self, device: &str, org: &str) {
+        for map in [&mut self.orgs, &mut self.admins, &mut self.pending] {
+            if let Some(set) = map.get_mut(org) {
+                set.remove(device);
+                if set.is_empty() {
+                    map.remove(org);
+                }
+            }
+        }
+    }
+
+    /// The device's role in `org`, if it announced it.
+    pub fn role(&self, org: &str, device: &str) -> Option<Role> {
+        let has = |m: &HashMap<OrgId, HashSet<DeviceIdHex>>| {
+            m.get(org).is_some_and(|s| s.contains(device))
+        };
+        if has(&self.admins) {
+            Some(Role::Admin)
+        } else if has(&self.orgs) {
+            Some(Role::Member)
+        } else if has(&self.pending) {
+            Some(Role::Pending)
+        } else {
+            None
+        }
+    }
+
+    /// Online admins of `org`, sorted (where invite claims go).
+    pub fn admins(&self, org: &str) -> Route {
+        let mut v: Vec<_> = self
+            .admins
+            .get(org)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        v.sort();
+        if v.is_empty() {
+            Route::Dropped
+        } else {
+            Route::To(v)
+        }
     }
 
     /// Mark a device as an always-on client (preferred for catch-up).
@@ -59,12 +132,7 @@ impl RoutingTable {
     pub fn disconnect(&mut self, device: &str) {
         if let Some(orgs) = self.devices.remove(device) {
             for org in orgs {
-                if let Some(set) = self.orgs.get_mut(&org) {
-                    set.remove(device);
-                    if set.is_empty() {
-                        self.orgs.remove(&org);
-                    }
-                }
+                self.leave(device, &org);
             }
         }
         self.always_on.remove(device);
@@ -87,9 +155,10 @@ impl RoutingTable {
         }
     }
 
-    /// One device, if it is online in `org`.
+    /// One device, if it is online in `org` (members and pending devices, so a
+    /// Welcome reaches a device that is joining).
     pub fn direct(&self, org: &str, to: &str) -> Route {
-        if self.orgs.get(org).is_some_and(|s| s.contains(to)) {
+        if self.role(org, to).is_some() {
             Route::To(vec![to.into()])
         } else {
             Route::Dropped
@@ -143,6 +212,33 @@ mod tests {
         t.disconnect("a");
         assert!(t.online("org").is_empty());
         assert!(t.orgs.is_empty() && t.devices.is_empty() && t.always_on.is_empty());
+        t.join_as("p", "org", Role::Pending);
+        t.join_as("q", "org", Role::Admin);
+        t.disconnect("p");
+        t.disconnect("q");
+        assert!(t.pending.is_empty() && t.admins.is_empty() && t.orgs.is_empty());
+    }
+
+    /// req: REQ-RELAY-004
+    #[test]
+    fn pending_devices_get_directs_but_no_presence_and_claims_go_to_admins() {
+        let mut t = RoutingTable::new();
+        t.join_as("admin", "org", Role::Admin);
+        t.join("member", "org");
+        t.join_as("new", "org", Role::Pending);
+        assert_eq!(t.online("org"), vec!["admin".to_string(), "member".into()]);
+        assert_eq!(
+            t.broadcast("org", "member"),
+            Route::To(vec!["admin".into()])
+        );
+        assert_eq!(t.direct("org", "new"), Route::To(vec!["new".into()]));
+        assert_eq!(t.admins("org"), Route::To(vec!["admin".into()]));
+        assert_eq!(t.role("org", "new"), Some(Role::Pending));
+        // Joining moves the device from pending to member.
+        t.join("new", "org");
+        assert_eq!(t.role("org", "new"), Some(Role::Member));
+        assert_eq!(t.online("org").len(), 3);
+        assert_eq!(t.admins("other"), Route::Dropped);
     }
 
     /// req: REQ-SYNC-001

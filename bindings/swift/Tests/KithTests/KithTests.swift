@@ -29,22 +29,28 @@ final class KithTests: XCTestCase {
 
     /// req: REQ-SYNC-004
     /// req: REQ-ENC-001
+    /// req: REQ-INV-001
     func testRelaySessionProducesFrames() throws {
         let client = KithClient()
-        let session = client.relaySession(org: "org")
+        let org = try client.createOrg()
+        XCTAssertTrue(client.isMember(org: org))
+        XCTAssertTrue(client.isAdmin(org: org))
+        XCTAssertEqual(try client.groupMembers(org: org), [client.deviceId()])
+        let session = client.relaySession(org: org)
         XCTAssertFalse(try session.hello().isEmpty)
         let change = try client.create(type: "note", text: "hello")
-        // Not a member of the org's group yet: nothing can be sent.
-        XCTAssertThrowsError(try session.broadcast(changeId: change.changeId))
-        try client.createGroup(org: "org")
-        XCTAssertTrue(client.isMember(org: "org"))
-        XCTAssertEqual(try client.groupMembers(org: "org"), [client.deviceId()])
         XCTAssertFalse(try session.broadcast(changeId: change.changeId).isEmpty)
         XCTAssertFalse(try session.rotateKey().isEmpty)
         XCTAssertThrowsError(try session.receive(frame: Data("not a frame".utf8)))
-        // Another device's join request is a frame too.
-        let other = KithClient().relaySession(org: "org")
-        XCTAssertFalse(try other.joinRequest(to: client.deviceId()).isEmpty)
+        // An invite another device can claim.
+        let link = try client.createInvite(org: org, relay: "wss://relay.example/v1/ws", ttlSeconds: 600)
+        let info = try parseInvite(link: link)
+        XCTAssertEqual(info.org, org)
+        let newcomer = KithClient()
+        XCTAssertThrowsError(try newcomer.relaySession(org: org).broadcast(changeId: change.changeId))
+        let claim = try newcomer.relaySession(org: info.org).claim(link: link)
+        XCTAssertFalse(claim.frame.isEmpty)
+        XCTAssertEqual(claim.code.count, 6)
     }
 
     /// req: REQ-DATA-004

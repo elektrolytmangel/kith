@@ -93,12 +93,14 @@ impl KithClient {
     /// `{type: "receipt", delivered}`, `{type: "relayError", code, message}`,
     /// `{type: "syncServed", from}`, `{type: "syncCompared", from, sending, wanting}`,
     /// `{type: "syncReceived", ...}`, group events
-    /// (`joinRequested` with `keyPackage`, `joined`, `groupChanged`, `epochBehind`,
-    /// `commitsServed`, `commitsApplied`, `reAddRequested`, `memberReAdded`, `fork`),
-    /// `{type: "closed"}` and `{type: "error"}`.
+    /// (`inviteClaimed` with `from` and `code`, `joined`, `certificateUpdated`,
+    /// `groupChanged`, `epochBehind`, `commitsServed`, `commitsApplied`,
+    /// `reAddRequested`, `memberReAdded`, `fork`), `{type: "closed"}` and `{type: "error"}`.
     ///
     /// Every body is encrypted for `org`'s MLS group: the device must be a member
-    /// (`createGroup` on the first device; `requestJoin` + `addMember` for others).
+    /// (`createOrg` on the first device; others join with an invite: `createInvite`,
+    /// then `claimInvite` on the new device and `acceptClaim` on the admin). A device
+    /// that is not a member yet connects as *pending* and can only claim.
     /// Only devices online at the same time are reached; use `catchUp` for the rest.
     pub fn connect(
         &mut self,
@@ -126,11 +128,96 @@ impl KithClient {
         }
     }
 
-    /// Create `org`'s encrypted group with this device as its only member. Call it
-    /// once, on the device that creates the organization.
-    #[wasm_bindgen(js_name = createGroup)]
-    pub fn create_group(&self, org: &str) -> Result<(), JsError> {
-        self.inner.borrow_mut().create_group(org).map_err(js_err)
+    /// Create an organization; returns its ID (the org root public key, hex). This
+    /// device becomes its first admin and keeps the root key.
+    #[wasm_bindgen(js_name = createOrg)]
+    pub fn create_org(&self) -> Result<String, JsError> {
+        self.inner.borrow_mut().create_org().map_err(js_err)
+    }
+
+    /// True if this device may invite and admit devices to `org`.
+    #[wasm_bindgen(js_name = isAdmin)]
+    pub fn is_admin(&self, org: &str) -> bool {
+        self.inner.borrow().is_admin(org)
+    }
+
+    /// A one-time invite link to `org`, valid for `ttlSeconds`, pointing the new
+    /// device at `relay`. Admins only; stay online until the `inviteClaimed` event.
+    #[wasm_bindgen(js_name = createInvite)]
+    pub fn create_invite(
+        &self,
+        org: &str,
+        relay: &str,
+        ttl_seconds: f64,
+    ) -> Result<String, JsError> {
+        self.inner
+            .borrow_mut()
+            .create_invite(org, relay, (ttl_seconds.max(0.0) * 1000.0) as u64)
+            .map_err(js_err)
+    }
+
+    /// Read an invite link without claiming it: `{org, relay, expiresMs}`, so the app
+    /// knows where to `connect` before `claimInvite`.
+    #[wasm_bindgen(js_name = parseInvite)]
+    pub fn parse_invite(link: &str) -> Result<js_sys::Object, JsError> {
+        let inv = kith_client::Invite::parse(link).map_err(js_err)?;
+        let o = js_sys::Object::new();
+        let set = |k: &str, v: JsValue| js_sys::Reflect::set(&o, &k.into(), &v).map(|_| ());
+        set("org", inv.org.to_hex().into()).map_err(|_| JsError::new("object"))?;
+        set("relay", inv.relay.into()).map_err(|_| JsError::new("object"))?;
+        set("expiresMs", (inv.expires_ms as f64).into()).map_err(|_| JsError::new("object"))?;
+        Ok(o)
+    }
+
+    /// Claim an invite link on the new device (connect to its relay and org first).
+    /// Returns the short code to show; a `joined` event follows once the admin
+    /// accepts.
+    #[wasm_bindgen(js_name = claimInvite)]
+    pub fn claim_invite(&self, link: &str) -> Result<String, JsError> {
+        let live = self.live()?;
+        let claim = self.inner.borrow_mut().claim_invite(link).map_err(js_err)?;
+        if claim.org != live.org() {
+            return Err(JsError::new(
+                "the invite is for another org than the connection",
+            ));
+        }
+        live.send(&[claim.frame]);
+        Ok(claim.code)
+    }
+
+    /// Admit the device of an `inviteClaimed` event (its `from`), after comparing
+    /// `code` with the new device's screen if the app wants to.
+    #[wasm_bindgen(js_name = acceptClaim)]
+    pub fn accept_claim(&self, device: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let frames = self
+            .inner
+            .borrow_mut()
+            .accept_claim(live.org(), device)
+            .map_err(js_err)?;
+        live.send(&frames);
+        Ok(())
+    }
+
+    /// Refuse the claim of an `inviteClaimed` event; the invite stays valid.
+    #[wasm_bindgen(js_name = rejectClaim)]
+    pub fn reject_claim(&self, device: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        self.inner.borrow_mut().reject_claim(live.org(), device);
+        Ok(())
+    }
+
+    /// Make a member an admin of the connected org (only the org's creator can).
+    #[wasm_bindgen(js_name = grantAdmin)]
+    pub fn grant_admin(&self, device: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let f = self
+            .inner
+            .borrow_mut()
+            .grant_admin(live.org(), device)
+            .map_err(js_err)?;
+        live.send(&[f]);
+        Ok(())
     }
 
     /// True if this device is a member of `org`'s group.
@@ -143,33 +230,6 @@ impl KithClient {
     #[wasm_bindgen(js_name = groupMembers)]
     pub fn group_members(&self, org: &str) -> Result<Vec<String>, JsError> {
         self.inner.borrow().group_members(org).map_err(js_err)
-    }
-
-    /// Ask the member `to` (hex device ID, e.g. from a `presence` event) to add this
-    /// device to the connected org. A `joined` event follows if it admits us.
-    #[wasm_bindgen(js_name = requestJoin)]
-    pub fn request_join(&self, to: &str) -> Result<(), JsError> {
-        let live = self.live()?;
-        let f = self
-            .inner
-            .borrow_mut()
-            .join_request_frame(live.org(), to)
-            .map_err(js_err)?;
-        live.send(&[f]);
-        Ok(())
-    }
-
-    /// Admit the device of a `joinRequested` event (pass its `keyPackage`).
-    #[wasm_bindgen(js_name = addMember)]
-    pub fn add_member(&self, key_package: &[u8]) -> Result<(), JsError> {
-        let live = self.live()?;
-        let frames = self
-            .inner
-            .borrow_mut()
-            .add_member(live.org(), key_package)
-            .map_err(js_err)?;
-        live.send(&frames);
-        Ok(())
     }
 
     /// Remove `device` (hex) from the connected org's group.

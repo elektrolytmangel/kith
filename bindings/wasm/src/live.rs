@@ -1,14 +1,14 @@
 //! Live sync over the browser's (or Node's) `WebSocket`.
 //!
 //! The protocol logic is the same sans-IO code the native client uses
-//! (`kith_client::{hello_frame, handshake_reply}`, `Client::broadcast_frame` and
+//! (`kith_client::hello_frame`, `Client::handshake_reply`, `Client::broadcast_frame` and
 //! `Client::handle_frame`); this module only moves frames between the socket and
 //! the client and turns events into plain JS objects for the app's callback.
 
 use std::{cell::RefCell, rc::Rc};
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
-use kith_client::{Change, Client, Event, Store, handshake_reply, hello_frame};
+use kith_client::{Change, Client, Event, Store, hello_frame};
 use kith_protocol::{Frame, decode, encode};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -16,9 +16,14 @@ use web_sys::{BinaryType, CloseEvent, MessageEvent, WebSocket};
 
 pub type SharedClient = Rc<RefCell<Client<Box<dyn Store>>>>;
 
+/// Frames the app sent before the handshake finished; `None` once it has. The
+/// relay refuses everything before `auth`, so they wait here instead of being lost.
+type Outbox = Rc<RefCell<Option<Vec<Frame>>>>;
+
 pub struct Live {
     ws: WebSocket,
     org: String,
+    outbox: Outbox,
     // Kept alive for as long as the socket can call them.
     _on_open: Closure<dyn FnMut()>,
     _on_message: Closure<dyn FnMut(MessageEvent)>,
@@ -113,15 +118,16 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "code", code);
             set(&o, "message", message);
         }
-        Event::JoinRequested {
-            org,
-            from,
-            key_package,
-        } => {
-            set(&o, "type", "joinRequested");
+        Event::InviteClaimed { org, from, code } => {
+            set(&o, "type", "inviteClaimed");
             set(&o, "org", org);
             set(&o, "from", from);
-            set(&o, "keyPackage", Uint8Array::from(key_package.as_slice()));
+            set(&o, "code", code);
+        }
+        Event::CertificateUpdated { org, admin } => {
+            set(&o, "type", "certificateUpdated");
+            set(&o, "org", org);
+            set(&o, "admin", admin);
         }
         Event::Joined { org } => {
             set(&o, "type", "joined");
@@ -213,12 +219,14 @@ impl Live {
             })
         };
 
+        let outbox: Outbox = Rc::new(RefCell::new(Some(Vec::new())));
         let on_message = {
-            let (ws, client, on_event, org) = (
+            let (ws, client, on_event, org, outbox) = (
                 ws.clone(),
                 client.clone(),
                 on_event.clone(),
                 org.to_string(),
+                outbox.clone(),
             );
             Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
                 let data = e.data();
@@ -239,9 +247,14 @@ impl Live {
                     });
                     return;
                 };
-                if let Some(replies) = handshake_reply(client.borrow().signer(), &org, &frame) {
+                let handshake = client.borrow().handshake_reply(&org, &frame);
+                if let Some(replies) = handshake {
+                    // auth + announce, then whatever the app sent meanwhile.
                     for reply in &replies {
                         send_frame(&ws, reply);
+                    }
+                    for queued in outbox.borrow_mut().take().unwrap_or_default() {
+                        send_frame(&ws, &queued);
                     }
                     return;
                 }
@@ -282,6 +295,7 @@ impl Live {
         Ok(Self {
             ws,
             org: org.to_string(),
+            outbox,
             _on_open: on_open,
             _on_message: on_message,
             _on_close: on_close,
@@ -293,10 +307,14 @@ impl Live {
         &self.org
     }
 
-    /// Send frames, in order.
+    /// Send frames, in order (queued until the handshake is done).
     pub fn send(&self, frames: &[Frame]) {
+        let mut outbox = self.outbox.borrow_mut();
         for f in frames {
-            send_frame(&self.ws, f);
+            match outbox.as_mut() {
+                Some(queue) => queue.push(f.clone()),
+                None => send_frame(&self.ws, f),
+            }
         }
     }
 
@@ -306,7 +324,7 @@ impl Live {
             .borrow_mut()
             .sync_request_frame(&self.org)
             .map_err(|e| e.to_string())?;
-        send_frame(&self.ws, &frame);
+        self.send(&[frame]);
         Ok(())
     }
 
@@ -316,7 +334,7 @@ impl Live {
             .borrow_mut()
             .broadcast_frame(&self.org, change)
             .map_err(|e| e.to_string())?;
-        send_frame(&self.ws, &frame);
+        self.send(&[frame]);
         Ok(())
     }
 
