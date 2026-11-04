@@ -5,6 +5,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Golden tests that pin the change envelope and the stored encoding, and [ADR 0012](docs/adr/0012-format-stability.md) (format versions and compatibility rules, proposed).
 - Container images for the relay and the always-on client on GitHub Packages (ghcr.io), built from the
   release binaries by `release.yml` (amd64, arm64); `deploy/docker-compose.yml` (relay with TLS) and
   [deployment guide](docs/guides/deployment.md).

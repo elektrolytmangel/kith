@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (CI skips docs-only PRs, #47; container images in PR `feat/containers`)
+- **Last updated:** 2026-11-04 (containers merged #48; format guards in PR `feat/format-freeze`)
 - **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices) under
   *Unreleased* in the changelog, for the next alpha.
 - **State of `main` (99f6acf, #44 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -87,7 +87,7 @@ Blockers, in suggested order:
 
 1. [ ] **Security review** of the crypto and protocol (MLS use, certificates, policy, backups, relay). Nothing is
    claimed safe for real data until this is done.
-2. [ ] **Compatibility promise:** versioned wire/storage formats with migrations (alpha.1 data already breaks on
+2. [~] **Compatibility promise** (ADR 0012 proposed, golden tests for the change envelope and store codec in PR `feat/format-freeze`; the freeze point is an open question): versioned wire/storage formats with migrations (alpha.1 data already breaks on
    `main`), a stated semver policy, and the first non-alpha version number.
 3. [ ] **Run on real devices:** Swift/Kotlin live-sync glue against a relay (REQ-SYNC-004), the `partial` platform
    requirements (REQ-PLAT-002..005, REQ-RELAY-001).
@@ -171,7 +171,9 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-None.
+- **Freeze point** (ADR 0012): from which version must releases read the previous version's data and talk to the
+  previous protocol? Recommendation: from the first beta (`0.2.0-beta.1`, after the security review and device
+  verification); alphas may keep breaking.
 
 ### Open issues
 
@@ -317,3 +319,4 @@ None.
 - **2026-11-04**: #47 merged (docs-only CI filter). Container images (PR `feat/containers`): `docker/Dockerfile`, `containers` job in
   `release.yml` (ghcr.io, amd64+arm64, no `latest` for pre-releases), `deploy/docker-compose.yml`, deployment guide.
   After the first release with images, the user makes the packages public once. Next: step 1 (compatibility policy), then 3.
+- **2026-11-04**: #48 merged (container images; dry run verified). Format guards: golden tests for the change envelope and the store codec, ADR 0012 (proposed). Next: user picks the freeze point; then step 3 (devices) and 4 (gaps).
