@@ -258,6 +258,13 @@ pub enum RelayEvent {
     ReAddRequested { org: String, from: String },
     /// We re-added `device`, which had fallen too far behind.
     MemberReAdded { org: String, device: String },
+    /// Two members changed the group at the same time. `we_win` false: this device
+    /// asked `peer` to re-add it (data catches up afterwards); nothing to do for the app.
+    Fork {
+        org: String,
+        peer: String,
+        we_win: bool,
+    },
 }
 
 /// Result of [`RelaySession::receive`].
@@ -466,6 +473,7 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
         },
         Event::ReAddRequested { org, from } => RelayEvent::ReAddRequested { org, from },
         Event::MemberReAdded { org, device } => RelayEvent::MemberReAdded { org, device },
+        Event::Fork { org, peer, we_win } => RelayEvent::Fork { org, peer, we_win },
         Event::Ignored => return None,
     })
 }

@@ -614,3 +614,101 @@ fn malformed_bodies_are_rejected_not_fatal() {
         assert!(h.replies.is_empty());
     }
 }
+
+// ---- forks: concurrent commits in one epoch (ADR 0004) ----
+
+/// Devices 0 and 1 ordered by device ID: (lower, higher). The lower one's commit
+/// wins a fork.
+fn by_id(net: &Net) -> (usize, usize) {
+    if net.devs[0].device_id().0 < net.devs[1].device_id().0 {
+        (0, 1)
+    } else {
+        (1, 0)
+    }
+}
+
+/// Every device in `who` is at the same epoch, sees all of `who` as members, and
+/// reaches all the others with a broadcast.
+fn assert_converged(net: &mut Net, who: &[usize]) {
+    let epoch = net.devs[who[0]].group_epoch(ORG).unwrap();
+    for &i in who {
+        assert_eq!(net.devs[i].group_epoch(ORG).unwrap(), epoch, "device {i}");
+        assert_eq!(net.devs[i].group_members(ORG).unwrap().len(), who.len());
+    }
+    for &i in who {
+        let c = net.devs[i]
+            .create(ObjectType::new("note"), format!("from {i}").into_bytes())
+            .unwrap();
+        let f = net.devs[i].broadcast_frame(ORG, &c).unwrap();
+        let events = net.send(i, vec![f]);
+        for &j in who.iter().filter(|&&j| j != i) {
+            assert_eq!(received_by(&events, j), 1, "{i} -> {j}");
+        }
+    }
+}
+
+fn concurrent_rotations(winner_sends_first: bool) {
+    let mut net = Net::org(3);
+    let (lo, hi) = by_id(&net);
+    let f_lo = net.devs[lo].rotate_key(ORG).unwrap();
+    let f_hi = net.devs[hi].rotate_key(ORG).unwrap();
+    let (first, second) = if winner_sends_first {
+        ((lo, f_lo), (hi, f_hi))
+    } else {
+        ((hi, f_hi), (lo, f_lo))
+    };
+    let mut events = net.send(first.0, vec![first.1]);
+    events.extend(net.send(second.0, vec![second.1]));
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == hi && matches!(e, Event::Fork { we_win: false, .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == lo && matches!(e, Event::MemberReAdded { .. }))
+    );
+    assert_converged(&mut net, &[0, 1, 2]);
+}
+
+/// req: REQ-ENC-001
+#[test]
+fn concurrent_commits_converge_when_the_winner_is_heard_first() {
+    concurrent_rotations(true);
+}
+
+/// req: REQ-ENC-001
+#[test]
+fn concurrent_commits_converge_when_the_loser_is_heard_first() {
+    concurrent_rotations(false);
+}
+
+/// req: REQ-ENC-001
+/// req: REQ-ENC-002
+#[test]
+fn a_device_that_missed_the_winning_commit_finds_the_fork_later() {
+    let mut net = Net::org(3);
+    let (lo, hi) = by_id(&net);
+    let f_lo = net.devs[lo].rotate_key(ORG).unwrap();
+    let f_hi = net.devs[hi].rotate_key(ORG).unwrap();
+    // Device 2 follows the losing commit and is offline for the winning one.
+    net.send(hi, vec![f_hi]);
+    net.offline.insert(2);
+    net.send(lo, vec![f_lo]);
+    net.offline.clear();
+    // The next message from the winning branch shows device 2 that it is behind;
+    // the commits it fetches start one epoch back and reveal the fork.
+    let c = net.devs[lo]
+        .create(ObjectType::new("note"), b"after the fork".to_vec())
+        .unwrap();
+    let f = net.devs[lo].broadcast_frame(ORG, &c).unwrap();
+    let events = net.send(lo, vec![f]);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 2 && matches!(e, Event::Fork { we_win: false, .. }))
+    );
+    assert!(net.devs[2].store().contains(&c.change_id).unwrap());
+    assert_converged(&mut net, &[0, 1, 2]);
+}

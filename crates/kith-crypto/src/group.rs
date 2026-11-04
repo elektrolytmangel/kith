@@ -14,7 +14,9 @@
 //! Sans-IO: every operation returns the bytes to send; nothing here does I/O.
 //! Commits are merged locally as soon as they are created. Two members
 //! committing in the same epoch fork the group (the relay does not order
-//! messages); see ADR 0004 for why that is accepted for now.
+//! messages). [`Groups::apply_commit`] detects a competing commit for the epoch
+//! just passed and decides deterministically which branch wins
+//! ([`CommitOutcome::Fork`]); the losing devices get re-added (ADR 0004).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -24,6 +26,7 @@ use openmls::prelude::*;
 use openmls_rust_crypto::{MemoryStorage, RustCrypto};
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::signatures::SignerError;
+use sha2::{Digest, Sha256};
 
 /// MLS epoch number.
 pub type Epoch = u64;
@@ -105,6 +108,42 @@ pub enum CommitOutcome {
     },
     /// The commit is for an epoch we already passed (duplicate or our own).
     Stale,
+    /// A different commit than ours moved the group out of the epoch we just left:
+    /// the group forked. The winner is the commit whose committer has the lower
+    /// device ID (then the lower commit hash), so every device decides the same.
+    /// If `we_win` is false, this device must be re-added by a member of the
+    /// winning branch; otherwise the other branch must be.
+    Fork {
+        /// True if our branch wins.
+        we_win: bool,
+        /// Who made the commit our branch followed.
+        ours: DeviceId,
+        /// Who made the competing commit (as claimed by the caller).
+        theirs: DeviceId,
+    },
+}
+
+/// A commit from the log, with the device that made it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoggedCommit {
+    /// The committer (authenticated by MLS when the commit was applied).
+    pub committer: DeviceId,
+    /// The commit message.
+    pub commit: Vec<u8>,
+}
+
+/// The last epoch change of a group: what fork detection compares against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Transition {
+    /// Epoch the group left.
+    from: Epoch,
+    committer: DeviceId,
+    /// SHA-256 of the commit; `None` if we joined through a Welcome (no commit seen).
+    hash: Option<[u8; 32]>,
+}
+
+fn commit_hash(commit: &[u8]) -> [u8; 32] {
+    Sha256::digest(commit).into()
 }
 
 /// A decrypted application message.
@@ -196,7 +235,9 @@ pub struct Groups {
     provider: Provider,
     groups: HashMap<String, MlsGroup>,
     /// Per org: commit that moved the group *from* epoch `k` to `k + 1`.
-    commit_log: BTreeMap<String, BTreeMap<Epoch, Vec<u8>>>,
+    commit_log: BTreeMap<String, BTreeMap<Epoch, LoggedCommit>>,
+    /// Per org: the last epoch change, for fork detection.
+    last: BTreeMap<String, Transition>,
 }
 
 impl std::fmt::Debug for Groups {
@@ -296,7 +337,7 @@ impl Groups {
         group
             .merge_pending_commit(&self.provider)
             .map_err(backend)?;
-        self.finish_add(org, from, member, &commit, &welcome)
+        self.finish_add(org, from, signer.device_id(), member, &commit, &welcome)
     }
 
     /// Re-add a device that is already a member but lost the group, for example
@@ -320,19 +361,27 @@ impl Groups {
         group
             .merge_pending_commit(&self.provider)
             .map_err(backend)?;
-        self.finish_add(org, from, member, &msgs.commit, &msgs.welcome)
+        self.finish_add(
+            org,
+            from,
+            signer.device_id(),
+            member,
+            &msgs.commit,
+            &msgs.welcome,
+        )
     }
 
     fn finish_add(
         &mut self,
         org: &str,
         from: Epoch,
+        committer: DeviceId,
         member: DeviceId,
         commit: &MlsMessageOut,
         welcome: &MlsMessageOut,
     ) -> Result<Added, GroupError> {
         let commit = ser(commit)?;
-        self.log_commit(org, from, commit.clone());
+        self.log_commit(org, from, committer, commit.clone());
         Ok(Added {
             member,
             commit,
@@ -360,7 +409,7 @@ impl Groups {
             .merge_pending_commit(&self.provider)
             .map_err(backend)?;
         let commit = ser(&commit)?;
-        self.log_commit(org, from, commit.clone());
+        self.log_commit(org, from, signer.device_id(), commit.clone());
         Ok(commit)
     }
 
@@ -380,7 +429,7 @@ impl Groups {
             .merge_pending_commit(&self.provider)
             .map_err(backend)?;
         let commit = ser(bundle.commit())?;
-        self.log_commit(org, from, commit.clone());
+        self.log_commit(org, from, signer.device_id(), commit.clone());
         Ok(commit)
     }
 
@@ -400,9 +449,24 @@ impl Groups {
             .map_err(invalid)?;
         let org = String::from_utf8(staged.group_context().group_id().as_slice().to_vec())
             .map_err(|_| GroupError::Invalid("group id is not an org id".into()))?;
+        let adder = staged
+            .welcome_sender()
+            .ok()
+            .and_then(|leaf| device_of(leaf.signature_key().as_slice()));
         self.groups.remove(&org);
         self.commit_log.remove(&org);
+        self.last.remove(&org);
         let group = staged.into_group(&self.provider).map_err(backend)?;
+        if let (Some(committer), Some(from)) = (adder, group.epoch().as_u64().checked_sub(1)) {
+            self.last.insert(
+                org.clone(),
+                Transition {
+                    from,
+                    committer,
+                    hash: None,
+                },
+            );
+        }
         self.groups.insert(org.clone(), group);
         Ok(org)
     }
@@ -466,12 +530,22 @@ impl Groups {
     /// Apply a commit received from another member. Commits must be applied in
     /// epoch order: a commit for a later epoch returns [`GroupError::EpochGap`]
     /// (fetch the missing ones from a peer's [`Self::commits_since`]).
-    pub fn apply_commit(&mut self, org: &str, commit: &[u8]) -> Result<CommitOutcome, GroupError> {
+    ///
+    /// `committer` is who the commit claims to come from (the relay's sender of a
+    /// broadcast, or the entry in a peer's log). It only matters for a commit we
+    /// cannot apply because we already left its epoch with another commit
+    /// ([`CommitOutcome::Fork`]); applied commits are attributed by MLS.
+    pub fn apply_commit(
+        &mut self,
+        org: &str,
+        commit: &[u8],
+        committer: DeviceId,
+    ) -> Result<CommitOutcome, GroupError> {
         let msg = self.protocol_message(org, commit, ContentType::Commit)?;
         let local = self.epoch(org)?;
         let got = msg.epoch().as_u64();
         if got < local {
-            return Ok(CommitOutcome::Stale);
+            return Ok(self.check_fork(org, got, commit, committer));
         }
         if got > local {
             return Err(GroupError::EpochGap { local, got });
@@ -480,6 +554,13 @@ impl Groups {
         let processed = group
             .process_message(&self.provider, msg)
             .map_err(invalid)?;
+        let sender = match processed.sender() {
+            Sender::Member(leaf) => group
+                .member_at(*leaf)
+                .and_then(|m| device_of(&m.signature_key)),
+            _ => None,
+        }
+        .ok_or_else(|| GroupError::Invalid("committer is not a member".into()))?;
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err(GroupError::Invalid("not a commit".into()));
         };
@@ -488,8 +569,41 @@ impl Groups {
             .map_err(backend)?;
         let epoch = group.epoch().as_u64();
         let removed = !group.is_active();
-        self.log_commit(org, local, commit.to_vec());
+        self.log_commit(org, local, sender, commit.to_vec());
         Ok(CommitOutcome::Applied { epoch, removed })
+    }
+
+    /// A commit for an epoch we already left: a duplicate, or a fork if it competes
+    /// with the commit we followed out of that epoch.
+    fn check_fork(&self, org: &str, got: Epoch, commit: &[u8], theirs: DeviceId) -> CommitOutcome {
+        let Some(last) = self.last.get(org).filter(|t| t.from == got) else {
+            return CommitOutcome::Stale;
+        };
+        let hash = commit_hash(commit);
+        if last.hash == Some(hash) {
+            return CommitOutcome::Stale;
+        }
+        let we_win = match (last.committer.0.cmp(&theirs.0), last.hash) {
+            (std::cmp::Ordering::Equal, Some(ours)) => ours < hash,
+            // Joined through this committer's Welcome: its commit is the one we
+            // followed; we cannot tell the two apart, so assume a duplicate.
+            (std::cmp::Ordering::Equal, None) => return CommitOutcome::Stale,
+            (ord, _) => ord == std::cmp::Ordering::Less,
+        };
+        CommitOutcome::Fork {
+            we_win,
+            ours: last.committer,
+            theirs,
+        }
+    }
+
+    /// The commit this device followed out of the previous epoch, if it has it
+    /// (not when it joined through a Welcome). Sent to a peer on a losing branch so
+    /// it detects the fork.
+    pub fn last_commit(&self, org: &str) -> Option<LoggedCommit> {
+        let last = self.last.get(org)?;
+        last.hash?;
+        self.commit_log.get(org)?.get(&last.from).cloned()
     }
 
     /// Commits from `epoch` on, oldest first, for a peer that is behind
@@ -499,21 +613,29 @@ impl Groups {
         &self,
         org: &str,
         epoch: Epoch,
-    ) -> Result<Option<Vec<Vec<u8>>>, GroupError> {
+    ) -> Result<Option<Vec<LoggedCommit>>, GroupError> {
         let local = self.epoch(org)?;
         if epoch >= local {
             return Ok(Some(vec![]));
         }
         let log = self.commit_log.get(org);
-        let out: Vec<Vec<u8>> = (epoch..local)
+        let out: Vec<LoggedCommit> = (epoch..local)
             .map_while(|e| log.and_then(|l| l.get(&e)).cloned())
             .collect();
         Ok((out.len() as u64 == local - epoch).then_some(out))
     }
 
-    fn log_commit(&mut self, org: &str, from: Epoch, commit: Vec<u8>) {
+    fn log_commit(&mut self, org: &str, from: Epoch, committer: DeviceId, commit: Vec<u8>) {
+        self.last.insert(
+            org.into(),
+            Transition {
+                from,
+                committer,
+                hash: Some(commit_hash(&commit)),
+            },
+        );
         let log = self.commit_log.entry(org.into()).or_default();
-        log.insert(from, commit);
+        log.insert(from, LoggedCommit { committer, commit });
         while log.len() > COMMIT_LOG_LEN {
             log.pop_first();
         }
@@ -607,7 +729,21 @@ impl Groups {
             put_u32(&mut w, log.len());
             for (epoch, c) in log {
                 w.extend_from_slice(&epoch.to_be_bytes());
-                put_bytes(&mut w, c);
+                w.extend_from_slice(&c.committer.0);
+                put_bytes(&mut w, &c.commit);
+            }
+        }
+        put_u32(&mut w, self.last.len());
+        for (org, t) in &self.last {
+            put_bytes(&mut w, org.as_bytes());
+            w.extend_from_slice(&t.from.to_be_bytes());
+            w.extend_from_slice(&t.committer.0);
+            match t.hash {
+                Some(h) => {
+                    w.push(1);
+                    w.extend_from_slice(&h);
+                }
+                None => w.push(0),
             }
         }
         w
@@ -645,10 +781,32 @@ impl Groups {
                 .map_err(|_| GroupError::Corrupt("org id".into()))?;
             let mut log = BTreeMap::new();
             for _ in 0..r.count()? {
-                let epoch = u64::from_be_bytes(r.take(8)?.try_into().expect("8 bytes"));
-                log.insert(epoch, r.bytes()?.to_vec());
+                let epoch = r.u64()?;
+                let committer = r.device()?;
+                let commit = r.bytes()?.to_vec();
+                log.insert(epoch, LoggedCommit { committer, commit });
             }
             commit_log.insert(org, log);
+        }
+        let mut last = BTreeMap::new();
+        for _ in 0..r.count()? {
+            let org = String::from_utf8(r.bytes()?.to_vec())
+                .map_err(|_| GroupError::Corrupt("org id".into()))?;
+            let from = r.u64()?;
+            let committer = r.device()?;
+            let hash = match r.take(1)?[0] {
+                0 => None,
+                1 => Some(r.take(32)?.try_into().expect("32 bytes")),
+                _ => return Err(GroupError::Corrupt("transition hash flag".into())),
+            };
+            last.insert(
+                org,
+                Transition {
+                    from,
+                    committer,
+                    hash,
+                },
+            );
         }
         if !r.0.is_empty() {
             return Err(GroupError::Corrupt("trailing bytes".into()));
@@ -657,6 +815,7 @@ impl Groups {
             provider,
             groups,
             commit_log,
+            last,
         })
     }
 }
@@ -670,7 +829,8 @@ fn group_mut<'a>(
         .ok_or_else(|| GroupError::NotMember(org.into()))
 }
 
-const MAGIC: &[u8] = b"kith/mls-state/v1\0";
+/// v2: committer per logged commit, last transition (fork detection).
+const MAGIC: &[u8] = b"kith/mls-state/v2\0";
 
 fn put_u32(w: &mut Vec<u8>, n: usize) {
     w.extend_from_slice(&(n as u32).to_be_bytes());
@@ -700,6 +860,14 @@ impl<'a> Reader<'a> {
         }
         Ok(n)
     }
+    fn u64(&mut self) -> Result<u64, GroupError> {
+        Ok(u64::from_be_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
+    fn device(&mut self) -> Result<DeviceId, GroupError> {
+        Ok(DeviceId(self.take(32)?.try_into().expect("32 bytes")))
+    }
     fn bytes(&mut self) -> Result<&'a [u8], GroupError> {
         let n = u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes")) as usize;
         self.take(n)
@@ -724,6 +892,12 @@ mod tests {
     }
 
     const ORG: &str = "org-1";
+    /// Claimed committer for commits that apply normally (only forks use it).
+    const ANYONE: DeviceId = DeviceId([0; 32]);
+
+    fn bytes(log: Vec<LoggedCommit>) -> Vec<Vec<u8>> {
+        log.into_iter().map(|c| c.commit).collect()
+    }
 
     /// `admin` creates the group; every other device joins through a Welcome.
     fn group_of(n: usize) -> Vec<Dev> {
@@ -749,7 +923,7 @@ mod tests {
         assert_eq!(added.member, devs[new].key.device_id());
         for (i, d) in devs.iter_mut().enumerate() {
             if i != admin && i != new && d.mls.is_member(ORG) {
-                d.mls.apply_commit(ORG, &added.commit).unwrap();
+                d.mls.apply_commit(ORG, &added.commit, ANYONE).unwrap();
             }
         }
         assert_eq!(devs[new].mls.join(&added.welcome).unwrap(), ORG);
@@ -795,7 +969,7 @@ mod tests {
         assert!(devs[1].mls.decrypt("other-org", &ct).is_err());
         assert!(devs[1].mls.decrypt(ORG, b"garbage").is_err());
         // An application message is not a commit, and vice versa.
-        assert!(devs[1].mls.apply_commit(ORG, &ct).is_err());
+        assert!(devs[1].mls.apply_commit(ORG, &ct, ANYONE).is_err());
         assert_eq!(devs[1].mls.decrypt(ORG, &ct).unwrap().plaintext, b"secret");
     }
 
@@ -826,7 +1000,7 @@ mod tests {
                 d.mls.self_update(&d.key, ORG).unwrap()
             };
             let other = 1 - who;
-            devs[other].mls.apply_commit(ORG, &c).unwrap();
+            devs[other].mls.apply_commit(ORG, &c, ANYONE).unwrap();
             missed.push(c);
         }
         let ct = send(&mut devs, 0, b"after");
@@ -837,19 +1011,19 @@ mod tests {
         ));
         // Applying a later commit first is refused: order matters.
         assert!(matches!(
-            devs[2].mls.apply_commit(ORG, &missed[1]),
+            devs[2].mls.apply_commit(ORG, &missed[1], ANYONE),
             Err(GroupError::EpochGap { .. })
         ));
         // Any peer serves the commits from its log.
-        let commits = devs[1].mls.commits_since(ORG, e2).unwrap().unwrap();
+        let commits = bytes(devs[1].mls.commits_since(ORG, e2).unwrap().unwrap());
         assert_eq!(commits, missed);
         for c in &commits {
-            devs[2].mls.apply_commit(ORG, c).unwrap();
+            devs[2].mls.apply_commit(ORG, c, ANYONE).unwrap();
         }
         assert_eq!(devs[2].mls.decrypt(ORG, &ct).unwrap().plaintext, b"after");
         // Replays are harmless.
         assert_eq!(
-            devs[2].mls.apply_commit(ORG, &commits[0]).unwrap(),
+            devs[2].mls.apply_commit(ORG, &commits[0], ANYONE).unwrap(),
             CommitOutcome::Stale
         );
         assert_eq!(devs[1].mls.commits_since(ORG, 99).unwrap(), Some(vec![]));
@@ -865,7 +1039,7 @@ mod tests {
             d.mls.self_update(&d.key, ORG).unwrap()
         };
         assert_eq!(
-            devs[0].mls.apply_commit(ORG, &c).unwrap(),
+            devs[0].mls.apply_commit(ORG, &c, ANYONE).unwrap(),
             CommitOutcome::Applied {
                 epoch: before + 1,
                 removed: false
@@ -884,7 +1058,7 @@ mod tests {
                 let d = &mut devs[0];
                 d.mls.self_update(&d.key, ORG).unwrap()
             };
-            devs[1].mls.apply_commit(ORG, &c).unwrap();
+            devs[1].mls.apply_commit(ORG, &c, ANYONE).unwrap();
         }
         let e2 = devs[2].mls.epoch(ORG).unwrap();
         assert_eq!(devs[0].mls.commits_since(ORG, e2).unwrap(), None);
@@ -897,7 +1071,10 @@ mod tests {
             let d = &mut devs[1];
             d.mls.readd_member(&d.key, ORG, &kp).unwrap()
         };
-        devs[0].mls.apply_commit(ORG, &added.commit).unwrap();
+        devs[0]
+            .mls
+            .apply_commit(ORG, &added.commit, ANYONE)
+            .unwrap();
         devs[2].mls.join(&added.welcome).unwrap();
         assert_eq!(devs[2].mls.members(ORG).unwrap().len(), 3);
         let ct = send(&mut devs, 0, b"back");
@@ -921,9 +1098,9 @@ mod tests {
             let d = &mut devs[0];
             d.mls.remove_member(&d.key, ORG, removed).unwrap()
         };
-        devs[1].mls.apply_commit(ORG, &c).unwrap();
+        devs[1].mls.apply_commit(ORG, &c, ANYONE).unwrap();
         assert!(matches!(
-            devs[2].mls.apply_commit(ORG, &c).unwrap(),
+            devs[2].mls.apply_commit(ORG, &c, ANYONE).unwrap(),
             CommitOutcome::Applied { removed: true, .. }
         ));
         assert!(!devs[2].mls.is_member(ORG));
@@ -935,6 +1112,104 @@ mod tests {
         );
         let d = &mut devs[2];
         assert!(d.mls.encrypt(&d.key, ORG, b"x").is_err());
+    }
+
+    /// req: REQ-ENC-001
+    #[test]
+    fn concurrent_commits_are_detected_and_everyone_agrees_on_the_winner() {
+        let mut devs = group_of(4);
+        let id = |devs: &[Dev], i: usize| devs[i].key.device_id();
+        // 0 and 1 rotate in the same epoch; 2 follows 0, and 3 joins through 0 later.
+        let c0 = {
+            let d = &mut devs[0];
+            d.mls.self_update(&d.key, ORG).unwrap()
+        };
+        let c1 = {
+            let d = &mut devs[1];
+            d.mls.self_update(&d.key, ORG).unwrap()
+        };
+        devs[2].mls.apply_commit(ORG, &c0, ANYONE).unwrap();
+        let (id0, id1) = (id(&devs, 0), id(&devs, 1));
+        let zero_wins = id0.0 < id1.0;
+
+        let at0 = devs[0].mls.apply_commit(ORG, &c1, id1).unwrap();
+        let at1 = devs[1].mls.apply_commit(ORG, &c0, id0).unwrap();
+        let at2 = devs[2].mls.apply_commit(ORG, &c1, id1).unwrap();
+        assert_eq!(
+            at0,
+            CommitOutcome::Fork {
+                we_win: zero_wins,
+                ours: id0,
+                theirs: id1
+            }
+        );
+        assert_eq!(
+            at1,
+            CommitOutcome::Fork {
+                we_win: !zero_wins,
+                ours: id1,
+                theirs: id0
+            }
+        );
+        assert_eq!(
+            at2,
+            CommitOutcome::Fork {
+                we_win: zero_wins,
+                ours: id0,
+                theirs: id1
+            }
+        );
+        // The same commit again is a duplicate, not a fork.
+        assert_eq!(
+            devs[2].mls.apply_commit(ORG, &c0, id0).unwrap(),
+            CommitOutcome::Stale
+        );
+        // The committer can hand its commit to the other branch.
+        assert_eq!(devs[0].mls.last_commit(ORG).unwrap().commit, c0);
+        assert_eq!(devs[2].mls.last_commit(ORG).unwrap().committer, id0);
+
+        // Detection survives a restart.
+        devs[2].mls = Groups::from_bytes(&devs[2].mls.to_bytes()).unwrap();
+        assert!(matches!(
+            devs[2].mls.apply_commit(ORG, &c1, id1).unwrap(),
+            CommitOutcome::Fork { .. }
+        ));
+    }
+
+    /// req: REQ-ENC-001
+    #[test]
+    fn a_device_that_joined_by_welcome_detects_a_competing_commit() {
+        let mut devs = group_of(2);
+        let mut new = dev();
+        let kp = new.mls.key_package(&new.key).unwrap();
+        // 0 adds `new` while 1 rotates in the same epoch.
+        let added = {
+            let d = &mut devs[0];
+            d.mls.add_member(&d.key, ORG, &kp).unwrap()
+        };
+        let c1 = {
+            let d = &mut devs[1];
+            d.mls.self_update(&d.key, ORG).unwrap()
+        };
+        new.mls.join(&added.welcome).unwrap();
+        assert!(
+            new.mls.last_commit(ORG).is_none(),
+            "joined without seeing a commit"
+        );
+        let (id0, id1) = (devs[0].key.device_id(), devs[1].key.device_id());
+        assert_eq!(
+            new.mls.apply_commit(ORG, &c1, id1).unwrap(),
+            CommitOutcome::Fork {
+                we_win: id0.0 < id1.0,
+                ours: id0,
+                theirs: id1
+            }
+        );
+        // The adder's own commit is the one it followed.
+        assert_eq!(
+            new.mls.apply_commit(ORG, &added.commit, id0).unwrap(),
+            CommitOutcome::Stale
+        );
     }
 
     /// req: REQ-ENC-001
@@ -965,7 +1240,7 @@ mod tests {
         new.mls.join(&added.welcome).unwrap();
         let restored = Groups::from_bytes(&devs[1].mls.to_bytes()).unwrap();
         assert_eq!(
-            restored.commits_since(ORG, 1).unwrap().unwrap(),
+            bytes(restored.commits_since(ORG, 1).unwrap().unwrap()),
             vec![added.commit]
         );
 
