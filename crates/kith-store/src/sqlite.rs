@@ -1,0 +1,418 @@
+//! SQLite backend (REQ-STORE-001).
+//!
+//! Changes are append-only rows. The `objects` table is a materialized view
+//! derived from `changes` and can be rebuilt with [`SqliteStore::rebuild_objects`].
+
+use std::path::Path;
+
+use kith_core::{Change, ChangeId, DeviceId, ObjectId, ObjectType, UnsignedChange};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+
+use crate::{Store, StoreError};
+
+const SCHEMA_VERSION: i64 = 1;
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS changes (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    change_id    BLOB NOT NULL UNIQUE,
+    object_id    BLOB NOT NULL,
+    object_type  TEXT NOT NULL,
+    author       BLOB NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    payload      BLOB NOT NULL,
+    signature    BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS changes_by_object ON changes(object_id, seq);
+CREATE TABLE IF NOT EXISTS change_parents (
+    change_id BLOB NOT NULL,
+    ord       INTEGER NOT NULL,
+    parent_id BLOB NOT NULL,
+    PRIMARY KEY (change_id, ord)
+);
+CREATE INDEX IF NOT EXISTS parents_by_parent ON change_parents(parent_id);
+-- Materialized from `changes`; safe to drop and rebuild.
+CREATE TABLE IF NOT EXISTS objects (
+    object_id      BLOB PRIMARY KEY,
+    object_type    TEXT NOT NULL,
+    change_count   INTEGER NOT NULL,
+    last_change_ms INTEGER NOT NULL
+);
+";
+
+fn backend(e: rusqlite::Error) -> StoreError {
+    StoreError::Backend(e.to_string())
+}
+
+fn corrupt(what: &str) -> StoreError {
+    StoreError::Backend(format!("corrupt database: {what}"))
+}
+
+fn arr<const N: usize>(v: Vec<u8>, what: &str) -> Result<[u8; N], StoreError> {
+    v.try_into().map_err(|_| corrupt(what))
+}
+
+/// Summary of one object from the materialized `objects` table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectSummary {
+    /// Object ID.
+    pub object_id: ObjectId,
+    /// Type tag.
+    pub object_type: ObjectType,
+    /// Number of stored changes.
+    pub change_count: u64,
+    /// Timestamp of the newest change (author clock, informational).
+    pub last_change_ms: u64,
+}
+
+/// SQLite-backed [`Store`].
+pub struct SqliteStore {
+    conn: Connection,
+}
+
+impl SqliteStore {
+    /// Open (creating if needed) the database file at `path`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::init(Connection::open(path).map_err(backend)?)
+    }
+
+    /// Private in-memory database, for tests.
+    pub fn open_in_memory() -> Result<Self, StoreError> {
+        Self::init(Connection::open_in_memory().map_err(backend)?)
+    }
+
+    fn init(conn: Connection) -> Result<Self, StoreError> {
+        // WAL is not supported for in-memory databases; the pragma then reports "memory".
+        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
+            .map_err(backend)?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL;")
+            .map_err(backend)?;
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(backend)?;
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::Backend(format!(
+                "database schema version {version} is newer than supported {SCHEMA_VERSION}"
+            )));
+        }
+        conn.execute_batch(SCHEMA).map_err(backend)?;
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+            .map_err(backend)?;
+        Ok(Self { conn })
+    }
+
+    /// Recompute the `objects` table from `changes`.
+    pub fn rebuild_objects(&mut self) -> Result<(), StoreError> {
+        let tx = self.conn.transaction().map_err(backend)?;
+        tx.execute("DELETE FROM objects", []).map_err(backend)?;
+        tx.execute(
+            "INSERT INTO objects (object_id, object_type, change_count, last_change_ms)
+             SELECT object_id, MIN(object_type), COUNT(*), MAX(timestamp_ms)
+             FROM changes GROUP BY object_id",
+            [],
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)
+    }
+
+    /// All known objects, ordered by object ID.
+    pub fn objects(&self) -> Result<Vec<ObjectSummary>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT object_id, object_type, change_count, last_change_ms
+                 FROM objects ORDER BY object_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, ty, count, last) = row.map_err(backend)?;
+            out.push(ObjectSummary {
+                object_id: ObjectId(arr(id, "object_id")?),
+                object_type: ObjectType::new(ty),
+                change_count: count as u64,
+                last_change_ms: last as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    fn parents_of(&self, id: &ChangeId) -> Result<Vec<ChangeId>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT parent_id FROM change_parents WHERE change_id = ?1 ORDER BY ord",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([id.as_bytes().as_slice()], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(backend)?;
+        rows.map(|r| Ok(ChangeId(arr(r.map_err(backend)?, "parent_id")?)))
+            .collect()
+    }
+
+    fn change_from_row(&self, r: &Row<'_>) -> Result<Change, StoreError> {
+        let change_id = ChangeId(arr(r.get(0).map_err(backend)?, "change_id")?);
+        let ty: String = r.get(2).map_err(backend)?;
+        let ts: i64 = r.get(4).map_err(backend)?;
+        Ok(Change {
+            change_id,
+            body: UnsignedChange {
+                object_id: ObjectId(arr(r.get(1).map_err(backend)?, "object_id")?),
+                object_type: ObjectType::new(ty),
+                parents: self.parents_of(&change_id)?,
+                timestamp_ms: ts as u64,
+                payload: r.get(5).map_err(backend)?,
+            },
+            author: DeviceId(arr(r.get(3).map_err(backend)?, "author")?),
+            signature: arr(r.get(6).map_err(backend)?, "signature")?,
+        })
+    }
+
+    fn query_changes(&self, sql: &str, param: &[u8]) -> Result<Vec<Change>, StoreError> {
+        let mut stmt = self.conn.prepare_cached(sql).map_err(backend)?;
+        let mut rows = stmt.query([param]).map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().map_err(backend)? {
+            out.push(self.change_from_row(r)?);
+        }
+        Ok(out)
+    }
+}
+
+const SELECT: &str = "SELECT change_id, object_id, object_type, author, timestamp_ms, payload, signature FROM changes";
+
+impl Store for SqliteStore {
+    fn put(&mut self, change: Change) -> Result<bool, StoreError> {
+        let tx = self.conn.transaction().map_err(backend)?;
+        let id = change.change_id;
+        let b = &change.body;
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO changes
+                 (change_id, object_id, object_type, author, timestamp_ms, payload, signature)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    id.as_bytes().as_slice(),
+                    b.object_id.as_bytes().as_slice(),
+                    b.object_type.as_str(),
+                    change.author.as_bytes().as_slice(),
+                    b.timestamp_ms as i64,
+                    b.payload,
+                    change.signature.as_slice(),
+                ],
+            )
+            .map_err(backend)?;
+        if inserted == 0 {
+            return Ok(false);
+        }
+        for (ord, p) in b.parents.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO change_parents (change_id, ord, parent_id) VALUES (?1, ?2, ?3)",
+                params![
+                    id.as_bytes().as_slice(),
+                    ord as i64,
+                    p.as_bytes().as_slice()
+                ],
+            )
+            .map_err(backend)?;
+        }
+        tx.execute(
+            "INSERT INTO objects (object_id, object_type, change_count, last_change_ms)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(object_id) DO UPDATE SET
+                 change_count = change_count + 1,
+                 last_change_ms = MAX(last_change_ms, excluded.last_change_ms)",
+            params![
+                b.object_id.as_bytes().as_slice(),
+                b.object_type.as_str(),
+                b.timestamp_ms as i64
+            ],
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)?;
+        Ok(true)
+    }
+
+    fn get(&self, id: &ChangeId) -> Result<Option<Change>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("{SELECT} WHERE change_id = ?1"))
+            .map_err(backend)?;
+        let mut rows = stmt.query([id.as_bytes().as_slice()]).map_err(backend)?;
+        match rows.next().map_err(backend)? {
+            Some(r) => Ok(Some(self.change_from_row(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn contains(&self, id: &ChangeId) -> Result<bool, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM changes WHERE change_id = ?1",
+                [id.as_bytes().as_slice()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|o| o.is_some())
+            .map_err(backend)
+    }
+
+    fn history(&self, object: &ObjectId) -> Result<Vec<Change>, StoreError> {
+        self.query_changes(
+            &format!("{SELECT} WHERE object_id = ?1 ORDER BY seq"),
+            object.as_bytes(),
+        )
+    }
+
+    fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT change_id FROM changes ORDER BY seq")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(backend)?;
+        rows.map(|r| Ok(ChangeId(arr(r.map_err(backend)?, "change_id")?)))
+            .collect()
+    }
+
+    fn heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT c.change_id FROM changes c
+                 WHERE c.object_id = ?1
+                   AND NOT EXISTS (SELECT 1 FROM change_parents p WHERE p.parent_id = c.change_id)
+                 ORDER BY c.change_id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([object.as_bytes().as_slice()], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(backend)?;
+        rows.map(|r| Ok(ChangeId(arr(r.map_err(backend)?, "change_id")?)))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kith_crypto::DeviceKey;
+
+    fn change(key: &DeviceKey, object: ObjectId, parents: Vec<ChangeId>, payload: &[u8]) -> Change {
+        Change::sign(
+            UnsignedChange {
+                object_id: object,
+                object_type: ObjectType::new("note"),
+                parents,
+                timestamp_ms: 1_700_000_000_000,
+                payload: payload.to_vec(),
+            },
+            key,
+        )
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("kith-{name}-{}.db", ObjectId::random()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// req: REQ-STORE-001
+    #[test]
+    fn roundtrip_preserves_change_and_signature() {
+        let key = DeviceKey::generate();
+        let mut s = SqliteStore::open_in_memory().unwrap();
+        let oid = ObjectId::random();
+        let c1 = change(&key, oid, vec![], b"v1");
+        let c2 = change(&key, oid, vec![c1.change_id], b"v2");
+        assert!(s.put(c1.clone()).unwrap());
+        assert!(s.put(c2.clone()).unwrap());
+        assert!(!s.put(c2.clone()).unwrap(), "duplicate is a no-op");
+
+        assert_eq!(s.get(&c2.change_id).unwrap().unwrap(), c2);
+        s.get(&c1.change_id).unwrap().unwrap().verify().unwrap();
+        assert_eq!(s.history(&oid).unwrap(), vec![c1.clone(), c2.clone()]);
+        assert_eq!(s.heads(&oid).unwrap(), vec![c2.change_id]);
+        assert!(s.contains(&c1.change_id).unwrap());
+        assert_eq!(s.all_ids().unwrap(), vec![c1.change_id, c2.change_id]);
+    }
+
+    /// req: REQ-STORE-001
+    #[test]
+    fn data_survives_reopen() {
+        let path = temp_path("reopen");
+        let key = DeviceKey::generate();
+        let oid = ObjectId::random();
+        let c = change(&key, oid, vec![], b"persist");
+        {
+            let mut s = SqliteStore::open(&path).unwrap();
+            s.put(c.clone()).unwrap();
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        assert_eq!(s.history(&oid).unwrap(), vec![c]);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
+
+    /// req: REQ-STORE-001
+    #[test]
+    fn forks_have_two_heads() {
+        let key = DeviceKey::generate();
+        let mut s = SqliteStore::open_in_memory().unwrap();
+        let oid = ObjectId::random();
+        let root = change(&key, oid, vec![], b"root");
+        let a = change(&key, oid, vec![root.change_id], b"a");
+        let b = change(&key, oid, vec![root.change_id], b"b");
+        for c in [&root, &a, &b] {
+            s.put(c.clone()).unwrap();
+        }
+        let mut want = vec![a.change_id, b.change_id];
+        want.sort();
+        assert_eq!(s.heads(&oid).unwrap(), want);
+    }
+
+    /// req: REQ-STORE-001
+    #[test]
+    fn objects_table_is_rebuildable_from_changes() {
+        let key = DeviceKey::generate();
+        let mut s = SqliteStore::open_in_memory().unwrap();
+        let oid = ObjectId::random();
+        let c1 = change(&key, oid, vec![], b"1");
+        let c2 = change(&key, oid, vec![c1.change_id], b"2");
+        s.put(c1).unwrap();
+        s.put(c2).unwrap();
+        s.put(change(&key, ObjectId::random(), vec![], b"other"))
+            .unwrap();
+
+        let before = s.objects().unwrap();
+        assert_eq!(before.len(), 2);
+        s.conn.execute("DELETE FROM objects", []).unwrap();
+        assert!(s.objects().unwrap().is_empty());
+        s.rebuild_objects().unwrap();
+        assert_eq!(s.objects().unwrap(), before);
+    }
+
+    #[test]
+    fn rejects_newer_schema() {
+        let path = temp_path("newer");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("PRAGMA user_version = 99;").unwrap();
+        }
+        assert!(SqliteStore::open(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+}

@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- `kith_store::SqliteStore` (feature `sqlite`, native only): persistent append-only
+  change store with a rebuildable `objects` table (REQ-STORE-001).
+
 ## [0.1.0-alpha.1] - 2026-11-04
 
 First pre-release: a phase 1 skeleton (in-memory store, no encryption). Not for real user data.
