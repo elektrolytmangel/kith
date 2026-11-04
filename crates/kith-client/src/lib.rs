@@ -65,6 +65,74 @@ pub fn auth_frame(signer: &dyn Signer, nonce: &str) -> kith_protocol::Frame {
     }
 }
 
+/// Frame announcing membership of `org` after authenticating.
+/// The relay does not check `proof` yet (REQ-RELAY-004, phase 5).
+pub fn announce_frame(org: &str, proof: &str) -> kith_protocol::Frame {
+    kith_protocol::Frame::Announce {
+        orgs: vec![kith_protocol::Membership {
+            org: org.into(),
+            proof: proof.into(),
+        }],
+    }
+}
+
+/// Frame that broadcasts a new change to the other online devices of `org`
+/// (REQ-SYNC-004). The body is the encoded change.
+/// TODO(phase 4, REQ-ENC-001): encrypt the body with the org's MLS group; until
+/// then it is **plaintext on the relay**.
+pub fn broadcast_frame(org: &str, change: &Change) -> kith_protocol::Frame {
+    kith_protocol::Frame::Broadcast {
+        org: org.into(),
+        body: kith_store::codec::encode_change(change),
+    }
+}
+
+/// What a frame from the relay meant for this client.
+#[derive(Debug)]
+pub enum Event {
+    /// A peer's change was valid and handled. `is_new` is false if it was already stored.
+    Received {
+        /// Organization.
+        org: String,
+        /// Sender device (hex).
+        from: String,
+        /// The change.
+        change: Box<Change>,
+        /// True if the change was not stored before.
+        is_new: bool,
+    },
+    /// A peer's change was refused (undecodable, bad hash or signature). Nothing was stored.
+    Rejected {
+        /// Organization.
+        org: String,
+        /// Sender device (hex).
+        from: String,
+        /// Why.
+        reason: String,
+    },
+    /// Devices currently online in an org.
+    Presence {
+        /// Organization.
+        org: String,
+        /// Online devices (hex).
+        online: Vec<String>,
+    },
+    /// Which devices a broadcast of ours reached.
+    Receipt {
+        /// Devices that received it.
+        delivered: Vec<String>,
+    },
+    /// The relay refused something.
+    RelayError {
+        /// Machine-readable code.
+        code: String,
+        /// Human-readable message.
+        message: String,
+    },
+    /// A frame this client has nothing to do with.
+    Ignored,
+}
+
 fn hex_encode(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -111,6 +179,41 @@ impl<S: Store, K: Signer> Client<S, K> {
         // TODO(phase 6, REQ-PERM-002): check author permissions under the
         // policy as of the change's parents before storing.
         Ok(self.store.put(change)?)
+    }
+
+    /// Handle a frame from the relay: validate and store peers' changes
+    /// (REQ-SYNC-004). A bad change from a peer is reported as
+    /// [`Event::Rejected`], not as an error, so a misbehaving device cannot
+    /// break the receive loop. Only local storage failures return `Err`.
+    pub fn handle_frame(&mut self, frame: kith_protocol::Frame) -> Result<Event, ClientError> {
+        use kith_protocol::Frame;
+        Ok(match frame {
+            Frame::Deliver { org, from, body } => {
+                let rejected = |reason: String| Event::Rejected {
+                    org: org.clone(),
+                    from: from.clone(),
+                    reason,
+                };
+                let change = match kith_store::codec::decode_change(&body) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(rejected(e.to_string())),
+                };
+                match self.receive(change.clone()) {
+                    Ok(is_new) => Event::Received {
+                        org,
+                        from,
+                        change: Box::new(change),
+                        is_new,
+                    },
+                    Err(ClientError::Rejected(e)) => rejected(e.to_string()),
+                    Err(e) => return Err(e),
+                }
+            }
+            Frame::Presence { org, online } => Event::Presence { org, online },
+            Frame::Receipt { delivered } => Event::Receipt { delivered },
+            Frame::Error { code, message } => Event::RelayError { code, message },
+            _ => Event::Ignored,
+        })
     }
 
     /// The merged state of an object: all its changes, including concurrent
@@ -218,6 +321,64 @@ mod tests {
 
         assert_eq!(a.store().heads(&oid).unwrap().len(), 2);
         assert_eq!(b.store().heads(&oid).unwrap().len(), 2);
+    }
+
+    fn deliver(from: &DeviceKey, c: &Change) -> kith_protocol::Frame {
+        kith_protocol::Frame::Deliver {
+            org: "org".into(),
+            from: from.device_id().to_hex(),
+            body: kith_store::codec::encode_change(c),
+        }
+    }
+
+    /// req: REQ-SYNC-004
+    #[test]
+    fn delivered_change_is_validated_and_stored() {
+        let (ka, mut b) = (DeviceKey::generate(), client());
+        let mut a = Client::new(ka, MemoryStore::new());
+        let c = a.create(ObjectType::new("note"), b"v1".to_vec()).unwrap();
+        let frame = broadcast_frame("org", &c);
+        let kith_protocol::Frame::Broadcast { body, .. } = frame else {
+            panic!("broadcast frame expected")
+        };
+        let delivered = kith_protocol::Frame::Deliver {
+            org: "org".into(),
+            from: a.device_id().to_hex(),
+            body,
+        };
+        let ev = b.handle_frame(delivered.clone()).unwrap();
+        assert!(matches!(ev, Event::Received { is_new: true, .. }));
+        assert!(b.store().contains(&c.change_id).unwrap());
+        // Delivered again: valid, but not new.
+        assert!(matches!(
+            b.handle_frame(delivered).unwrap(),
+            Event::Received { is_new: false, .. }
+        ));
+    }
+
+    /// req: REQ-SYNC-004
+    #[test]
+    fn bad_delivered_changes_are_rejected_not_fatal() {
+        let ka = DeviceKey::generate();
+        let mut b = client();
+        let mut a = Client::new(ka, MemoryStore::new());
+        let mut c = a.create(ObjectType::new("note"), b"v1".to_vec()).unwrap();
+        c.body.payload = b"tampered".to_vec();
+        let from = DeviceKey::generate();
+        assert!(matches!(
+            b.handle_frame(deliver(&from, &c)).unwrap(),
+            Event::Rejected { .. }
+        ));
+        assert!(!b.store().contains(&c.change_id).unwrap());
+        let garbage = kith_protocol::Frame::Deliver {
+            org: "org".into(),
+            from: "x".into(),
+            body: vec![1, 2, 3],
+        };
+        assert!(matches!(
+            b.handle_frame(garbage).unwrap(),
+            Event::Rejected { .. }
+        ));
     }
 
     /// req: REQ-PERM-002

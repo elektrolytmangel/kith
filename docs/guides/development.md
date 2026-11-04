@@ -26,6 +26,7 @@ python3 scripts/reqs.py --write     # after touching requirements or `req:` tags
 | New field in the change envelope | `kith-core` (+ ADR, it breaks signatures) |
 | New wire message | `kith-protocol` (+ bump `PROTOCOL_VERSION` if incompatible) |
 | Storage | `kith-store` |
+| Native network client (WebSocket to the relay) | `kith-net` |
 | Merging concurrent edits | `kith-merge` (`Merger` impls; Automerge is the default) |
 | Sync algorithm | `kith-sync` (keep it sans-IO: no sockets, no clocks) |
 | App-facing API | `kith-client`, then expose it in `bindings/ffi` and `bindings/wasm` |

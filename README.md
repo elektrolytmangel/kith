@@ -23,7 +23,8 @@ crates/                    Rust libraries (all logic lives here)
   kith-store/              Store trait; in-memory, SQLite, byte codec
   kith-sync/               sans-IO catch-up / reconciliation
   kith-merge/              Merger trait + Automerge merger (concurrent edits)
-  kith-client/             high-level SDK apps embed
+  kith-client/             high-level SDK apps embed (sans-IO live sync: handle_frame)
+  kith-net/                native WebSocket client: relay connection + live sync
   kith-relay/              RAM-only routing table, embeddable
 apps/
   relay-server/            standalone WebSocket relay + Dockerfile
