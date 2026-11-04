@@ -28,13 +28,23 @@ final class KithTests: XCTestCase {
     }
 
     /// req: REQ-SYNC-004
+    /// req: REQ-ENC-001
     func testRelaySessionProducesFrames() throws {
         let client = KithClient()
         let session = client.relaySession(org: "org")
         XCTAssertFalse(try session.hello().isEmpty)
         let change = try client.create(type: "note", text: "hello")
+        // Not a member of the org's group yet: nothing can be sent.
+        XCTAssertThrowsError(try session.broadcast(changeId: change.changeId))
+        try client.createGroup(org: "org")
+        XCTAssertTrue(client.isMember(org: "org"))
+        XCTAssertEqual(try client.groupMembers(org: "org"), [client.deviceId()])
         XCTAssertFalse(try session.broadcast(changeId: change.changeId).isEmpty)
+        XCTAssertFalse(try session.rotateKey().isEmpty)
         XCTAssertThrowsError(try session.receive(frame: Data("not a frame".utf8)))
+        // Another device's join request is a frame too.
+        let other = KithClient().relaySession(org: "org")
+        XCTAssertFalse(try other.joinRequest(to: client.deviceId()).isEmpty)
     }
 
     /// req: REQ-PLAT-002

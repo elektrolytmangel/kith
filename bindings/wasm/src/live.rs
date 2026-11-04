@@ -1,14 +1,14 @@
 //! Live sync over the browser's (or Node's) `WebSocket`.
 //!
 //! The protocol logic is the same sans-IO code the native client uses
-//! (`kith_client::{hello_frame, auth_frame, announce_frame, broadcast_frame}` and
+//! (`kith_client::{hello_frame, handshake_reply}`, `Client::broadcast_frame` and
 //! `Client::handle_frame`); this module only moves frames between the socket and
 //! the client and turns events into plain JS objects for the app's callback.
 
 use std::{cell::RefCell, rc::Rc};
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
-use kith_client::{Change, Client, Event, Store, broadcast_frame, handshake_reply, hello_frame};
+use kith_client::{Change, Client, Event, Store, handshake_reply, hello_frame};
 use kith_protocol::{Frame, decode, encode};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -108,6 +108,69 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "type", "relayError");
             set(&o, "code", code);
             set(&o, "message", message);
+        }
+        Event::JoinRequested {
+            org,
+            from,
+            key_package,
+        } => {
+            set(&o, "type", "joinRequested");
+            set(&o, "org", org);
+            set(&o, "from", from);
+            set(&o, "keyPackage", Uint8Array::from(key_package.as_slice()));
+        }
+        Event::Joined { org } => {
+            set(&o, "type", "joined");
+            set(&o, "org", org);
+        }
+        Event::GroupChanged {
+            org,
+            epoch,
+            removed,
+        } => {
+            set(&o, "type", "groupChanged");
+            set(&o, "org", org);
+            set(&o, "epoch", epoch as f64);
+            set(&o, "removed", removed);
+        }
+        Event::EpochBehind { org, from } => {
+            set(&o, "type", "epochBehind");
+            set(&o, "org", org);
+            set(&o, "from", from);
+        }
+        Event::CommitsServed {
+            org,
+            to,
+            commits,
+            readd_needed,
+        } => {
+            set(&o, "type", "commitsServed");
+            set(&o, "org", org);
+            set(&o, "to", to);
+            set(&o, "commits", commits as f64);
+            set(&o, "readdNeeded", readd_needed);
+        }
+        Event::CommitsApplied {
+            org,
+            from,
+            applied,
+            epoch,
+        } => {
+            set(&o, "type", "commitsApplied");
+            set(&o, "org", org);
+            set(&o, "from", from);
+            set(&o, "applied", applied as f64);
+            set(&o, "epoch", epoch as f64);
+        }
+        Event::ReAddRequested { org, from } => {
+            set(&o, "type", "reAddRequested");
+            set(&o, "org", org);
+            set(&o, "from", from);
+        }
+        Event::MemberReAdded { org, device } => {
+            set(&o, "type", "memberReAdded");
+            set(&o, "org", org);
+            set(&o, "device", device);
         }
         Event::Ignored => return None,
     }
@@ -216,19 +279,35 @@ impl Live {
         })
     }
 
+    pub fn org(&self) -> &str {
+        &self.org
+    }
+
+    /// Send frames, in order.
+    pub fn send(&self, frames: &[Frame]) {
+        for f in frames {
+            send_frame(&self.ws, f);
+        }
+    }
+
     /// Ask one online peer for the changes we lack and offer ours.
     pub fn catch_up(&self, client: &SharedClient) -> Result<(), String> {
         let frame = client
-            .borrow()
+            .borrow_mut()
             .sync_request_frame(&self.org)
             .map_err(|e| e.to_string())?;
         send_frame(&self.ws, &frame);
         Ok(())
     }
 
-    /// Tell the other online devices about a new local change.
-    pub fn broadcast(&self, change: &Change) {
-        send_frame(&self.ws, &broadcast_frame(&self.org, change));
+    /// Tell the other online devices about a new local change (encrypted).
+    pub fn broadcast(&self, client: &SharedClient, change: &Change) -> Result<(), String> {
+        let frame = client
+            .borrow_mut()
+            .broadcast_frame(&self.org, change)
+            .map_err(|e| e.to_string())?;
+        send_frame(&self.ws, &frame);
+        Ok(())
     }
 
     pub fn close(&self) {

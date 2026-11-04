@@ -4,8 +4,8 @@
 use kith_client::{Client, DeviceKey, MemoryStore, ObjectType, Store};
 
 fn main() {
-    let mut laptop = Client::new(DeviceKey::generate(), MemoryStore::new());
-    let mut phone = Client::new(DeviceKey::generate(), MemoryStore::new());
+    let mut laptop = Client::new(DeviceKey::generate(), MemoryStore::new()).unwrap();
+    let mut phone = Client::new(DeviceKey::generate(), MemoryStore::new()).unwrap();
 
     let note = laptop
         .create(ObjectType::new("note"), b"groceries: milk".to_vec())

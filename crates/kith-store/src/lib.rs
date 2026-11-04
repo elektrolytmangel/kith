@@ -35,6 +35,13 @@ pub trait Store {
     fn history(&self, object: &ObjectId) -> Result<Vec<Change>, StoreError>;
     /// IDs of all stored changes (input to set reconciliation).
     fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError>;
+    /// A small named blob kept next to the changes (e.g. `"mls"`, the MLS group
+    /// state). `None` if never written.
+    fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
+    /// Replace a named blob. Must be durable when it returns, as far as the backend
+    /// allows: the MLS state is saved before each encrypted message is sent, and
+    /// losing it could reuse an encryption key.
+    fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError>;
     /// Current heads of an object: changes no other stored change names as
     /// parent. Sorted, so every device reports the same heads for the same set.
     fn heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, StoreError> {
@@ -67,6 +74,12 @@ impl<S: Store + ?Sized> Store for Box<S> {
     fn heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, StoreError> {
         (**self).heads(object)
     }
+    fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).get_meta(key)
+    }
+    fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        (**self).put_meta(key, value)
+    }
 }
 
 /// In-memory store, for tests and ephemeral clients.
@@ -74,6 +87,7 @@ impl<S: Store + ?Sized> Store for Box<S> {
 pub struct MemoryStore {
     changes: HashMap<ChangeId, Change>,
     by_object: BTreeMap<ObjectId, Vec<ChangeId>>,
+    meta: HashMap<String, Vec<u8>>,
 }
 
 impl MemoryStore {
@@ -116,5 +130,14 @@ impl Store for MemoryStore {
 
     fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError> {
         Ok(self.changes.keys().copied().collect())
+    }
+
+    fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(self.meta.get(key).cloned())
+    }
+
+    fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        self.meta.insert(key.into(), value.to_vec());
+        Ok(())
     }
 }

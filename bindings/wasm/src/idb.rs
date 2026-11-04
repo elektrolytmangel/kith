@@ -7,7 +7,8 @@
 //! synchronously inside `put`; only its completion is asynchronous. If it
 //! later fails (quota, user clearing data) the error is logged to the console.
 //! Changes are append-only rows with auto-increment keys, so the load order
-//! is the arrival order.
+//! is the arrival order. Named blobs (`Store::put_meta`, the MLS state) live in a
+//! second object store, `meta`, and are written through the same way.
 
 use js_sys::{Promise, Reflect, Uint8Array};
 use kith_client::{Change, ChangeId, MemoryStore, ObjectId, Store, StoreError};
@@ -21,7 +22,9 @@ use web_sys::{
 };
 
 const STORE: &str = "changes";
-const DB_VERSION: u32 = 1;
+const META: &str = "meta";
+/// 2: `meta` object store.
+const DB_VERSION: u32 = 2;
 
 pub struct IdbStore {
     mem: MemoryStore,
@@ -79,7 +82,9 @@ impl IdbStore {
                 let db: IdbDatabase = db.unchecked_into();
                 let params = IdbObjectStoreParameters::new();
                 params.set_auto_increment(true);
+                // Each fails harmlessly if the store exists (upgrade from version 1).
                 let _ = db.create_object_store_with_optional_parameters(STORE, &params);
+                let _ = db.create_object_store(META);
             }
         });
         open_req.set_onupgradeneeded(Some(upgrade.unchecked_ref()));
@@ -98,6 +103,16 @@ impl IdbStore {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 
+        let tx = db.transaction_with_str(META)?;
+        let meta = tx.object_store(META)?;
+        let keys = js_sys::Array::from(&request_future(&meta.get_all_keys()?).await?);
+        let values = js_sys::Array::from(&request_future(&meta.get_all()?).await?);
+        for (k, v) in keys.iter().zip(values.iter()) {
+            let key = k.as_string().ok_or("meta key is not a string")?;
+            mem.put_meta(&key, &Uint8Array::new(&v).to_vec())
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+
         let on_write_error = Closure::<dyn FnMut(Event)>::new(|_: Event| {
             web_sys::console::error_1(&"kith: writing a change to IndexedDB failed".into());
         });
@@ -108,14 +123,18 @@ impl IdbStore {
         })
     }
 
-    fn persist(&self, change: &Change) -> Result<(), JsValue> {
+    fn write_tx(&self, store: &str) -> Result<web_sys::IdbObjectStore, JsValue> {
         let tx = self
             .db
-            .transaction_with_str_and_mode(STORE, IdbTransactionMode::Readwrite)?;
+            .transaction_with_str_and_mode(store, IdbTransactionMode::Readwrite)?;
         let handler = self.on_write_error.as_ref().unchecked_ref();
         tx.set_onerror(Some(handler));
         tx.set_onabort(Some(handler));
-        tx.object_store(STORE)?
+        tx.object_store(store)
+    }
+
+    fn persist(&self, change: &Change) -> Result<(), JsValue> {
+        self.write_tx(STORE)?
             .add(&Uint8Array::from(codec::encode_change(change).as_slice()))?;
         Ok(())
     }
@@ -146,5 +165,19 @@ impl Store for IdbStore {
 
     fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError> {
         self.mem.all_ids()
+    }
+
+    fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.mem.get_meta(key)
+    }
+
+    /// Queued like change writes: durable once the browser commits the transaction.
+    /// Transactions on one store commit in order, so a newer state never loses to an
+    /// older one.
+    fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        self.write_tx(META)
+            .and_then(|s| s.put_with_key(&Uint8Array::from(value), &JsValue::from_str(key)))
+            .map_err(|e| StoreError::Backend(js_message(&e)))?;
+        self.mem.put_meta(key, value)
     }
 }

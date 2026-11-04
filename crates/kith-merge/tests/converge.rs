@@ -7,7 +7,7 @@ use kith_merge::Merger;
 use kith_merge::automerge_merger::{AutomergeMerger, author, put_str};
 
 fn client() -> Client<MemoryStore> {
-    Client::new(DeviceKey::generate(), MemoryStore::new())
+    Client::new(DeviceKey::generate(), MemoryStore::new()).unwrap()
 }
 
 fn text(c: &Client<MemoryStore>, oid: &ObjectId, key: &str) -> Option<String> {

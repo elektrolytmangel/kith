@@ -19,7 +19,7 @@ Design: [docs/design/0001-local-first-e2ee-sync.md](docs/design/0001-local-first
 crates/                    Rust libraries (all logic lives here)
   kith-core/               ids, signed hash-linked change envelope. Pure, no I/O
   kith-protocol/           client ↔ relay wire frames
-  kith-crypto/             device keys (Ed25519), MLS group interface
+  kith-crypto/             device keys (Ed25519), MLS groups (OpenMLS)
   kith-store/              Store trait; in-memory, SQLite, byte codec
   kith-sync/               sans-IO catch-up / reconciliation
   kith-merge/              Merger trait + Automerge merger (concurrent edits)

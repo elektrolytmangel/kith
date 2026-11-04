@@ -43,6 +43,15 @@ await assert.rejects(() => kith.KithClient.open("smoke-db", new Uint8Array(5)));
 const other = await kith.KithClient.open("other-db", key);
 assert.equal(other.historyLength(oid), 0); // separate database, no data
 
+// The MLS group state is persisted in the same database.
+assert.equal(second.isMember("org-p"), false);
+second.createGroup("org-p");
+second.free();
+await new Promise((r) => setTimeout(r, 50));
+const third = await kith.KithClient.open("smoke-db", key);
+assert.equal(third.isMember("org-p"), true);
+assert.deepEqual(third.groupMembers("org-p"), [device]);
+
 
 // Live sync through a real relay. Needs the relay binary:
 //   cargo build -p kith-relay-server && KITH_RELAY_BIN=target/debug/kith-relay node ...
@@ -80,9 +89,18 @@ if (process.env.KITH_RELAY_BIN) {
 
     const evA = listen(), evB = listen();
     const a = new kith.KithClient(), b = new kith.KithClient();
-    a.connect(url, "org", (e) => evA.push(e));
+    a.createGroup("org");
+    // a admits every device that asks (an app would ask the user first).
+    a.connect(url, "org", (e) => {
+      if (e.type === "joinRequested") a.addMember(e.keyPackage);
+      evA.push(e);
+    });
     b.connect(url, "org", (e) => evB.push(e));
     await waitFor(evA, (e) => e.type === "presence" && e.online.length === 2, "both devices online");
+    b.requestJoin(a.deviceId());
+    await waitFor(evB, (e) => e.type === "joined", "b to join a's group");
+    assert.equal(b.isMember("org"), true);
+    assert.equal(a.groupMembers("org").length, 2);
 
     const objectId = a.create("acme.note", new TextEncoder().encode("from a"));
     const got = await waitFor(evB, (e) => e.type === "received", "b to receive a's change");
@@ -95,14 +113,17 @@ if (process.env.KITH_RELAY_BIN) {
     await waitFor(evA, (e) => e.type === "received" && e.from === b.deviceId(), "a to receive b's edit");
     assert.equal(a.historyLength(objectId), 2);
 
-    // Catch-up: a new device downloads the history from an online peer.
+    // A new device joins and downloads the history from an online peer (joining
+    // requests it on its own); later catchUp calls work the same way.
     const evC = listen();
     const c = new kith.KithClient();
     c.connect(url, "org", (e) => evC.push(e));
     await waitFor(evC, (e) => e.type === "presence" && e.online.length === 3, "c online");
-    c.catchUp();
-    await waitFor(evC, (e) => e.type === "syncReceived" && e.stored > 0, "c to catch up");
+    c.requestJoin(a.deviceId());
+    await waitFor(evC, (e) => e.type === "syncReceived" && e.stored > 0, "c to join and catch up");
     assert.equal(c.historyLength(objectId), 2);
+    c.catchUp();
+    await waitFor(evC, (e) => e.type === "receipt" && e.delivered.length === 1, "catch-up receipt");
     assert.throws(() => new kith.KithClient().catchUp(), /not connected/);
 
     a.disconnect();

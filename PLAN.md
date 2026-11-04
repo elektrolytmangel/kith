@@ -22,9 +22,9 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41 (#20), automerge 0.12, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
-### What the library can do today (alpha, phases 1-3 done)
+### What the library can do today (alpha, phases 1-4 done except 4d)
 
-Requirements: 12 implemented, 10 partial, 19 accepted/proposed.
+Requirements: 15 implemented, 12 partial, 14 accepted/proposed.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -32,13 +32,15 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - relay with device authentication (challenge/response); live sync of new changes between online devices
   (`kith-net` in Rust, `KithClient.connect` on web, `RelaySession` on Swift/Kotlin);
 - catch-up: a new or returning device downloads what it lacks from one online peer (`catchUp`);
+- end-to-end encryption (MLS, one group per org): create group, join request + admit, remove, key rotation,
+  automatic commit catch-up and re-add; the relay sees only routing metadata;
 - merging concurrent edits (Automerge, pluggable `Merger`): **Rust only** (`Client::materialize`).
 
 **Not usable for real apps yet:**
 
 | Gap | Effect | Requirement |
 | --- | --- | --- |
-| No encryption (MLS): relay frame bodies are plaintext | Anyone running the relay can read all data | REQ-ENC-001..004 |
+| Concurrent MLS commits (two devices add/remove/rotate in the same epoch) fork the group | Those devices stop understanding each other until re-added | ADR 0004, 4d |
 | Relay checks device keys but not org membership proofs (any device can join any org id) | Don't expose it publicly | REQ-RELAY-004 |
 | No permission checks on incoming changes | Any device can write anything | REQ-PERM-002 |
 | Sync needs another device online; ID exchange caps at ~32,000 changes per device (`SyncTooLarge`) | Offline-only devices can't catch up | REQ-RELAY-005, REQ-SYNC-002 |
@@ -59,10 +61,11 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 1. **Phase 4, Encryption (MLS / OpenMLS)**: REQ-ENC-001..004. **Required before any real user data.**
    Design decided ([ADR 0004](docs/adr/0004-mls-openmls-rustcrypto.md)).
    - [x] 4a `kith_crypto::Groups` (OpenMLS, KeyPackages, add/re-add/remove, commit log, save/restore), MSRV 1.91 (PR `feat/mls-group`).
-   - [ ] 4b Client: every body MLS-encrypted (outer kinds app / commit / welcome / key-package / commit-request),
-     auto commit catch-up on `EpochGap`, re-add flow, `Groups` persisted next to the store; plaintext rejected.
-   - [ ] 4c Bindings (web, Swift/Kotlin): group create, key package, add member, join, state persistence; smoke test.
-   - [ ] 4d Concurrent-commit forks (open, see ADR 0004 *Consequences*).
+   - [x] 4b+4c Client + bindings: every body MLS-encrypted, auto commit catch-up, auto re-add, MLS state in
+     `Store` meta (saved before sending); web/Swift/Kotlin/`kith-net` group API; smoke test joins through the relay
+     (PR `feat/mls-client`). wasm package 1.97 MB with OpenMLS.
+   - [ ] 4d Concurrent-commit forks (open, see ADR 0004 *Consequences*): e.g. deterministic tie-break, or only
+     admins commit + always-on client orders commits (phase 7). Periodic `rotate_key` is app-driven (REQ-ENC-003 partial).
 2. **Expose merged state in the bindings** (REQ-DATA-004): a JSON-like document API for Swift/Kotlin/JS on top of
    `kith-merge`. Measure the wasm size with Automerge first (it is opt-in via `kith-client/automerge` for that reason).
 3. **Phase 3 follow-ups**: replace the naive full-ID exchange with range-based reconciliation (Negentropy, same
@@ -164,3 +167,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
   PRs when CI is green (#18), continues after each merge. Dependabot #20 (rusqlite 0.41) tested against `main`, merged by the user.
   **Stopped on the user's request** after re-checking `main`; next is Phase 4 (needs a design decision).
 - **2026-11-04**: User answered the phase 4 questions (see *Decisions*). `kith_crypto::Groups` on OpenMLS + ADR 0004, MSRV 1.91 (PR `feat/mls-group`). Next: 4b client integration.
+- **2026-11-04**: #28 merged. Client + bindings on MLS (PR `feat/mls-client`): encrypted bodies, join flow, commit catch-up, re-add, `Store` meta. Smoke test (web, real relay) passes locally. Next: 4d or REQ-DATA-004 bindings.

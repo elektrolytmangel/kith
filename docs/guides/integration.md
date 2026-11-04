@@ -5,7 +5,29 @@ All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`,
 restarts (store the key in the platform's secure storage).
 `generateSecretKey()` and `KithClient.open(...)` also persist the data: in a SQLite
 file on Swift and Kotlin (`dbPath`), in IndexedDB on the web (`dbName`, returns a
-Promise). `KithClient()` stays ephemeral. Sync, encryption and invitations will be added in later phases.
+Promise). `KithClient()` stays ephemeral. Invitations (links/QR) and permissions come in later phases.
+
+## Organizations and encryption
+
+Everything a device sends through the relay is end-to-end encrypted for the
+organization's MLS group ([ADR 0004](../adr/0004-mls-openmls-rustcrypto.md)); the
+relay sees only routing data, sizes and timing. A device must be in the group to send
+or read:
+
+1. The device that creates the organization calls `createGroup(org)` once.
+2. A new device connects and sends a join request to an online member
+   (`requestJoin(memberDeviceId)`, using an ID from a `presence` event).
+3. The member gets a `joinRequested` event with a `keyPackage`; the app decides
+   (for example after the user confirms the device) and calls `addMember(keyPackage)`.
+4. The new device gets `joined` and downloads the history from a peer on its own.
+
+Devices that missed group changes while offline catch up automatically
+(`epochBehind`, `commitsApplied` events); one that missed more than the last 256
+changes is re-added automatically by an online member (`reAddRequested`,
+`memberReAdded`). Call `rotateKey()` now and then (for example weekly) and
+`removeMember(deviceId)` to revoke a device. The group state contains secrets and is
+saved with the data (`KithClient.open`), so keep the database in app-private storage.
+Until phase 5 (invitations) both devices must be online to add a device.
 
 Every package is a GitHub Release asset:
 `https://github.com/elektrolytmangel/kith/releases/download/vX.Y.Z/<asset>`. The repository
@@ -41,11 +63,15 @@ Changes are kept in memory and written through to IndexedDB (database `my-app`).
 Live sync with other devices through a relay (see [Relay](#relay) below):
 
 ```ts
+client.createGroup("my-org"); // first device only (see "Organizations and encryption")
 client.connect("wss://relay.example.com/v1/ws", "my-org", (e) => {
-  // e.type: "received" | "rejected" | "presence" | "receipt" | "relayError" | "closed" | "error"
-  if (e.type === "received") render(e.objectId); // the change is already validated and stored
+  // e.type: "received" | "rejected" | "presence" | "receipt" | "joinRequested" | "joined" | ...
+  if (e.type === "received") render(e.objectId); // the change is already decrypted, validated and stored
+  if (e.type === "joinRequested" && userApproves(e.from)) client.addMember(e.keyPackage);
 });
-client.create("acme.note", bytes); // now also broadcast to the other online devices
+client.create("acme.note", bytes); // now also broadcast (encrypted) to the other online devices
+
+// On a new device: client.connect(...), then client.requestJoin(memberId) and wait for "joined".
 ```
 
 Catch up on changes made while this device was offline (and download the history on a
@@ -55,8 +81,7 @@ new device) by asking one online peer; the answer arrives as `syncReceived` even
 client.catchUp(); // after connecting, once a "presence" event shows another device
 ```
 
-Live updates only reach devices that are online at the same time, and message bodies
-are not encrypted yet (phase 4); don't use it for real user data. Node 22+ has a global
+Live updates only reach devices that are online at the same time. Node 22+ has a global
 `WebSocket`; older Node needs a polyfill.
 
 Bundlers: build with `scripts/build-wasm.sh bundler` for webpack and Vite
@@ -82,19 +107,21 @@ Live sync with other devices (`RelayConnection` wraps `URLSessionWebSocketTask`;
 protocol logic is in Rust):
 
 ```swift
+try client.createGroup(org: "my-org")   // first device only
 let conn = RelayConnection(client: client, url: URL(string: "wss://relay.example.com/v1/ws")!,
                            org: "my-org", onEvent: { event in
-    if case .received(_, _, let objectId, _, _) = event { /* validated and stored */ }
+    if case .received(_, _, let objectId, _, _) = event { /* decrypted, validated, stored */ }
+    if case .joinRequested(_, _, let keyPackage) = event { try? conn.addMember(keyPackage: keyPackage) }
 })
 conn.start()
+// On a new device: conn.requestJoin(to: memberId), then wait for `.joined`.
 let change = try client.create(type: "acme.note", text: "hi")
 conn.broadcast(change)   // to the other online devices
 ```
 
 Call `conn.catchUp()` once a `.presence` event shows another device to download what this
 device missed (or the whole history on a new device); answers arrive as `.syncReceived`
-events. Live updates only reach devices online at the same time, and message bodies are not
-encrypted yet (phase 4); don't use it for real user data.
+events. Live updates only reach devices online at the same time.
 
 Keep the device key in the Keychain: after the first launch save
 `client.secretKey()` (32 bytes), and on later launches restore the same device
@@ -123,6 +150,7 @@ Live sync with other devices: you own the WebSocket (here OkHttp), `RelaySession
 (Rust) does the protocol:
 
 ```kotlin
+client.createGroup("my-org")            // first device only
 val session = client.relaySession("my-org")
 val ws = okHttp.newWebSocket(Request.Builder().url("wss://relay.example.com/v1/ws").build(),
     object : WebSocketListener() {
@@ -130,7 +158,8 @@ val ws = okHttp.newWebSocket(Request.Builder().url("wss://relay.example.com/v1/w
         override fun onMessage(ws: WebSocket, bytes: ByteString) {
             val out = session.receive(bytes.toByteArray())
             out.replies.forEach { ws.send(it.toByteString()) }
-            out.event?.let { /* RelayEvent.Received, .Rejected, .Presence, ... */ }
+            out.event?.let { /* RelayEvent.Received, .JoinRequested, .Joined, ... */ }
+            // JoinRequested: session.addMember(keyPackage).forEach { ws.send(it.toByteString()) }
         }
     })
 // after create/edit:
@@ -138,8 +167,9 @@ ws.send(session.broadcast(change.changeId).toByteString())
 ```
 
 Catch up with `ws.send(session.catchUp().toByteString())` once a `RelayEvent.Presence` shows
-another device (answers come back through `receive` as `RelayEvent.SyncReceived`). Same
-limits as above (online devices only, not encrypted yet).
+another device (answers come back through `receive` as `RelayEvent.SyncReceived`). A new
+device sends `session.joinRequest(memberId)` and waits for `RelayEvent.Joined`. Live updates
+only reach online devices.
 
 Keep the device key in the Android Keystore: save `client.secretKey()` (encrypted with a
 Keystore key) and restore with `KithClient.withSecretKey(bytes)`.
@@ -154,9 +184,14 @@ kith-client = { git = "https://github.com/elektrolytmangel/kith", tag = "v0.1.0-
 ```rust
 use kith_client::{Client, DeviceKey, MemoryStore, ObjectType};
 
-let mut client = Client::new(DeviceKey::generate(), MemoryStore::new());
+let mut client = Client::new(DeviceKey::generate(), MemoryStore::new())?;
 let change = client.create(ObjectType::new("acme.note"), b"hello".to_vec())?;
+client.create_group("my-org")?; // or join: join_request_frame / add_member
+let frame = client.broadcast_frame("my-org", &change)?; // encrypted; send it to the relay
 ```
+
+`kith_net::LiveClient` (native) does the WebSocket part: `create`/`edit` broadcast,
+`request_join`, `add_member`, `catch_up`, `next_event`.
 
 The always-on client (phase 7) is a headless Rust binary built this way.
 
@@ -183,4 +218,6 @@ Devices authenticate by signing a challenge with their key (`hello` → `challen
 `auth`; Rust clients use `kith_client::hello_frame` and `auth_frame`). The relay
 does not check organization membership proofs yet (REQ-RELAY-004, needs the org
 root of trust from phase 5): any device with a valid key can join any org id.
-Don't expose the relay publicly until then.
+Message bodies are end-to-end encrypted, so a relay operator cannot read data, but
+without membership proofs anyone can connect to an org id and see its metadata or
+flood it. Don't expose the relay publicly until then.

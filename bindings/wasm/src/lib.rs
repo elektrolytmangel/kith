@@ -39,11 +39,15 @@ pub struct KithClient {
     live: Option<live::Live>,
 }
 
-fn wrap(key: DeviceKey, store: Box<dyn Store>) -> KithClient {
-    KithClient {
-        inner: Rc::new(RefCell::new(Client::new(key, store))),
+fn js_err(e: impl std::fmt::Display) -> JsError {
+    JsError::new(&e.to_string())
+}
+
+fn wrap(key: DeviceKey, store: Box<dyn Store>) -> Result<KithClient, JsError> {
+    Ok(KithClient {
+        inner: Rc::new(RefCell::new(Client::new(key, store).map_err(js_err)?)),
         live: None,
-    }
+    })
 }
 
 #[wasm_bindgen]
@@ -56,26 +60,28 @@ impl KithClient {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         wrap(DeviceKey::generate(), Box::new(MemoryStore::new()))
+            .expect("an empty memory store has no MLS state to load")
     }
 
     /// Restore a device identity from its 32-byte secret key (as returned by
     /// `secretKey()`), with an in-memory store.
     #[wasm_bindgen(js_name = withSecretKey)]
     pub fn with_secret_key(secret_key: &[u8]) -> Result<KithClient, JsError> {
-        Ok(wrap(device_key(secret_key)?, Box::new(MemoryStore::new())))
+        wrap(device_key(secret_key)?, Box::new(MemoryStore::new()))
     }
 
-    /// Persistent client: changes are stored in the IndexedDB database
-    /// `dbName` (created if missing) and the identity comes from `secretKey`.
-    /// Returns a Promise. Opening the same `dbName` with the same key later
-    /// restores all data and the identity.
+    /// Persistent client: changes and the MLS group state are stored in the
+    /// IndexedDB database `dbName` (created if missing) and the identity comes from
+    /// `secretKey`. Returns a Promise. Opening the same `dbName` with the same key
+    /// later restores all data, the identity and group membership. The database
+    /// holds group secrets.
     #[wasm_bindgen(js_name = open)]
     pub async fn open(db_name: String, secret_key: Vec<u8>) -> Result<KithClient, JsError> {
         let key = device_key(&secret_key)?;
         let store = idb::IdbStore::open(&db_name)
             .await
             .map_err(|e| JsError::new(&idb::js_message(&e)))?;
-        Ok(wrap(key, Box::new(store)))
+        wrap(key, Box::new(store))
     }
 
     /// Connect to a relay (`ws://host:port/v1/ws`, `wss://` in production),
@@ -85,11 +91,14 @@ impl KithClient {
     /// `{type: "received", org, from, objectId, changeId, isNew}`,
     /// `{type: "rejected", org, from, reason}`, `{type: "presence", org, online}`,
     /// `{type: "receipt", delivered}`, `{type: "relayError", code, message}`,
+    /// `{type: "syncServed", ...}`, `{type: "syncReceived", ...}`, group events
+    /// (`joinRequested` with `keyPackage`, `joined`, `groupChanged`, `epochBehind`,
+    /// `commitsServed`, `commitsApplied`, `reAddRequested`, `memberReAdded`),
     /// `{type: "closed"}` and `{type: "error"}`.
     ///
-    /// Only devices online at the same time are reached; changes made while
-    /// offline are not sent later (catch-up sync is not implemented yet), and
-    /// message bodies are not encrypted yet.
+    /// Every body is encrypted for `org`'s MLS group: the device must be a member
+    /// (`createGroup` on the first device; `requestJoin` + `addMember` for others).
+    /// Only devices online at the same time are reached; use `catchUp` for the rest.
     pub fn connect(
         &mut self,
         url: &str,
@@ -114,6 +123,78 @@ impl KithClient {
             Some(live) => live.catch_up(&self.inner).map_err(|e| JsError::new(&e)),
             None => Err(JsError::new("not connected: call connect first")),
         }
+    }
+
+    /// Create `org`'s encrypted group with this device as its only member. Call it
+    /// once, on the device that creates the organization.
+    #[wasm_bindgen(js_name = createGroup)]
+    pub fn create_group(&self, org: &str) -> Result<(), JsError> {
+        self.inner.borrow_mut().create_group(org).map_err(js_err)
+    }
+
+    /// True if this device is a member of `org`'s group.
+    #[wasm_bindgen(js_name = isMember)]
+    pub fn is_member(&self, org: &str) -> bool {
+        self.inner.borrow().is_member(org)
+    }
+
+    /// Devices (hex IDs) in `org`'s group.
+    #[wasm_bindgen(js_name = groupMembers)]
+    pub fn group_members(&self, org: &str) -> Result<Vec<String>, JsError> {
+        self.inner.borrow().group_members(org).map_err(js_err)
+    }
+
+    /// Ask the member `to` (hex device ID, e.g. from a `presence` event) to add this
+    /// device to the connected org. A `joined` event follows if it admits us.
+    #[wasm_bindgen(js_name = requestJoin)]
+    pub fn request_join(&self, to: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let f = self
+            .inner
+            .borrow_mut()
+            .join_request_frame(live.org(), to)
+            .map_err(js_err)?;
+        live.send(&[f]);
+        Ok(())
+    }
+
+    /// Admit the device of a `joinRequested` event (pass its `keyPackage`).
+    #[wasm_bindgen(js_name = addMember)]
+    pub fn add_member(&self, key_package: &[u8]) -> Result<(), JsError> {
+        let live = self.live()?;
+        let frames = self
+            .inner
+            .borrow_mut()
+            .add_member(live.org(), key_package)
+            .map_err(js_err)?;
+        live.send(&frames);
+        Ok(())
+    }
+
+    /// Remove `device` (hex) from the connected org's group.
+    #[wasm_bindgen(js_name = removeMember)]
+    pub fn remove_member(&self, device: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let f = self
+            .inner
+            .borrow_mut()
+            .remove_member(live.org(), device)
+            .map_err(js_err)?;
+        live.send(&[f]);
+        Ok(())
+    }
+
+    /// Rotate this device's key in the connected org's group (do it periodically).
+    #[wasm_bindgen(js_name = rotateKey)]
+    pub fn rotate_key(&self) -> Result<(), JsError> {
+        let live = self.live()?;
+        let f = self
+            .inner
+            .borrow_mut()
+            .rotate_key(live.org())
+            .map_err(js_err)?;
+        live.send(&[f]);
+        Ok(())
     }
 
     /// Close the relay connection, if any.
@@ -173,9 +254,19 @@ impl KithClient {
 }
 
 impl KithClient {
+    fn live(&self) -> Result<&live::Live, JsError> {
+        self.live
+            .as_ref()
+            .ok_or_else(|| JsError::new("not connected: call connect first"))
+    }
+
+    /// Broadcast if connected. A change made before this device is in the group
+    /// stays local and reaches peers through catch-up later.
     fn broadcast(&self, change: &kith_client::Change) {
-        if let Some(live) = &self.live {
-            live.broadcast(change);
+        if let Some(live) = &self.live
+            && let Err(e) = live.broadcast(&self.inner, change)
+        {
+            web_sys::console::warn_1(&format!("kith: change not broadcast: {e}").into());
         }
     }
 }

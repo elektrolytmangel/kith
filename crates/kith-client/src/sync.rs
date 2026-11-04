@@ -1,6 +1,12 @@
-//! Catch-up sync messages (REQ-SYNC-001..003), sans-IO.
+//! Relay bodies, sans-IO: the outer MLS layer (REQ-ENC-001..004) and the
+//! data messages inside it (REQ-SYNC-001..004).
 //!
-//! Everything travels in the opaque `body` of relay frames as `[kind][payload]`:
+//! **Outer** (what the relay sees), `[kind][payload]`, see [`Outer`]: an MLS
+//! application message, a commit, a Welcome, a KeyPackage, or the group catch-up
+//! messages (commit request, commits, re-add needed). Only the MLS messages'
+//! clear headers (group, epoch, content type) and these kinds are visible.
+//!
+//! **Inner** (plaintext of an MLS application message), `[kind][payload]`:
 //!
 //! - `Change`: one encoded change (live updates, REQ-SYNC-004).
 //! - `Have`: all change IDs the sender has. Sent as a `SyncRequest`, which the
@@ -11,8 +17,7 @@
 //!
 //! The set comparison is the naive full-ID exchange of `kith_sync::diff`; the
 //! `Have` message therefore caps at about 32,000 changes per device until range
-//! based reconciliation (Negentropy) replaces it. TODO(phase 4): bodies are
-//! plaintext on the relay until MLS lands.
+//! based reconciliation (Negentropy) replaces it.
 
 use kith_core::{Change, ChangeId};
 use kith_protocol::MAX_BODY_BYTES;
@@ -25,7 +30,122 @@ const KIND_OFFER: u8 = 3;
 /// only after this check, and one oversized change must not block the others.
 const MAX_OFFER_BYTES: usize = 512 * 1024;
 
-/// A parsed relay body.
+const OUTER_APP: u8 = 0x10;
+const OUTER_COMMIT: u8 = 0x11;
+const OUTER_WELCOME: u8 = 0x12;
+const OUTER_KEY_PACKAGE: u8 = 0x13;
+const OUTER_COMMIT_REQUEST: u8 = 0x14;
+const OUTER_COMMITS: u8 = 0x15;
+const OUTER_READD_NEEDED: u8 = 0x16;
+
+/// A parsed relay body (outer layer).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Outer {
+    /// MLS application message; plaintext is an inner [`Message`].
+    App(Vec<u8>),
+    /// MLS commit, broadcast to the group.
+    Commit(Vec<u8>),
+    /// MLS Welcome, direct to a new member.
+    Welcome(Vec<u8>),
+    /// KeyPackage of a device that wants to be added (or re-added), direct to a member.
+    KeyPackage(Vec<u8>),
+    /// "I am at this epoch, send me the commits since."
+    CommitRequest(u64),
+    /// Commits in epoch order, answering a `CommitRequest`.
+    Commits(Vec<Vec<u8>>),
+    /// "My commit log does not reach back to your epoch; send a KeyPackage to be re-added."
+    ReaddNeeded,
+}
+
+pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
+    let (kind, payload): (u8, &[u8]) = match msg {
+        Outer::App(b) => (OUTER_APP, b),
+        Outer::Commit(b) => (OUTER_COMMIT, b),
+        Outer::Welcome(b) => (OUTER_WELCOME, b),
+        Outer::KeyPackage(b) => (OUTER_KEY_PACKAGE, b),
+        Outer::CommitRequest(e) => {
+            let mut out = vec![OUTER_COMMIT_REQUEST];
+            out.extend_from_slice(&e.to_be_bytes());
+            return out;
+        }
+        Outer::Commits(cs) => {
+            let mut out = vec![OUTER_COMMITS];
+            out.extend_from_slice(&(cs.len() as u32).to_be_bytes());
+            for c in cs {
+                out.extend_from_slice(&(c.len() as u32).to_be_bytes());
+                out.extend_from_slice(c);
+            }
+            return out;
+        }
+        Outer::ReaddNeeded => return vec![OUTER_READD_NEEDED],
+    };
+    let mut out = Vec::with_capacity(1 + payload.len());
+    out.push(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// `Commits` bodies for `commits`, split to stay under the frame limit, in order.
+pub(crate) fn commits_bodies(commits: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut bodies = vec![];
+    let mut batch = vec![];
+    let mut size = 0;
+    for c in commits {
+        if size + c.len() > MAX_OFFER_BYTES && !batch.is_empty() {
+            bodies.push(outer_body(&Outer::Commits(std::mem::take(&mut batch))));
+            size = 0;
+        }
+        size += c.len();
+        batch.push(c);
+    }
+    if !batch.is_empty() {
+        bodies.push(outer_body(&Outer::Commits(batch)));
+    }
+    bodies
+}
+
+pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
+    let (&kind, rest) = body.split_first().ok_or("empty body")?;
+    let mut r = Reader(rest);
+    let msg = match kind {
+        OUTER_APP => Outer::App(rest.to_vec()),
+        OUTER_COMMIT => Outer::Commit(rest.to_vec()),
+        OUTER_WELCOME => Outer::Welcome(rest.to_vec()),
+        OUTER_KEY_PACKAGE => Outer::KeyPackage(rest.to_vec()),
+        OUTER_COMMIT_REQUEST => {
+            Outer::CommitRequest(u64::from_be_bytes(r.take(8)?.try_into().expect("8 bytes")))
+        }
+        OUTER_COMMITS => {
+            let n = r.u32()? as usize;
+            if n > r.0.len() / 4 {
+                return Err("commit count exceeds data".into());
+            }
+            let mut cs = Vec::with_capacity(n);
+            for _ in 0..n {
+                let len = r.u32()? as usize;
+                cs.push(r.take(len)?.to_vec());
+            }
+            Outer::Commits(cs)
+        }
+        OUTER_READD_NEEDED => Outer::ReaddNeeded,
+        // 1..=3 were plaintext data bodies before MLS (hard break, ADR 0004).
+        1..=3 => return Err("unencrypted body refused".into()),
+        other => return Err(format!("unknown body kind {other}")),
+    };
+    let fixed = matches!(
+        kind,
+        OUTER_COMMIT_REQUEST | OUTER_COMMITS | OUTER_READD_NEEDED
+    );
+    if fixed && !r.0.is_empty() {
+        return Err("trailing bytes".into());
+    }
+    if !fixed && rest.is_empty() {
+        return Err("empty payload".into());
+    }
+    Ok(msg)
+}
+
+/// A parsed inner (decrypted) message.
 pub(crate) enum Message {
     Change(Change),
     Have(Vec<ChangeId>),
@@ -176,6 +296,53 @@ mod tests {
         assert!(parse(&[99, 0, 0, 0, 0]).is_err());
         // Claims a billion IDs but carries none.
         assert!(parse(&[KIND_HAVE, 0x3b, 0x9a, 0xca, 0x00]).is_err());
+    }
+
+    #[test]
+    fn outer_roundtrip_and_rejects_garbage() {
+        for msg in [
+            Outer::App(vec![1, 2]),
+            Outer::Commit(vec![3]),
+            Outer::Welcome(vec![4]),
+            Outer::KeyPackage(vec![5]),
+            Outer::CommitRequest(7),
+            Outer::Commits(vec![vec![1], vec![2, 3]]),
+            Outer::Commits(vec![]),
+            Outer::ReaddNeeded,
+        ] {
+            assert_eq!(parse_outer(&outer_body(&msg)).unwrap(), msg);
+        }
+        let body = outer_body(&Outer::Commits(vec![vec![1], vec![2, 3]]));
+        for len in 1..body.len() {
+            assert!(parse_outer(&body[..len]).is_err(), "len {len}");
+        }
+        assert!(parse_outer(&[]).is_err());
+        assert!(parse_outer(&[OUTER_APP]).is_err());
+        assert!(parse_outer(&[OUTER_READD_NEEDED, 0]).is_err());
+        assert!(parse_outer(&[0x99, 1]).is_err());
+    }
+
+    /// req: REQ-ENC-001
+    #[test]
+    fn plaintext_data_bodies_are_refused() {
+        let ids = vec![ChangeId([1; 32])];
+        assert!(parse_outer(&have_body(&ids)).is_err());
+        assert!(parse_outer(&offer_bodies(&[], &[]).remove(0)).is_err());
+    }
+
+    #[test]
+    fn many_commits_are_split_in_order() {
+        let commits: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i; 200 * 1024]).collect();
+        let bodies = commits_bodies(commits.clone());
+        assert!(bodies.len() >= 2);
+        let back: Vec<Vec<u8>> = bodies
+            .iter()
+            .flat_map(|b| match parse_outer(b).unwrap() {
+                Outer::Commits(cs) => cs,
+                _ => panic!("commits expected"),
+            })
+            .collect();
+        assert_eq!(back, commits);
     }
 
     #[test]

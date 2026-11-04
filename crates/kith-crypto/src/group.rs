@@ -424,6 +424,17 @@ impl Groups {
         ser(&msg)
     }
 
+    /// The epoch a message (application or commit) was sent in, read from its
+    /// clear header without decrypting.
+    pub fn message_epoch(message: &[u8]) -> Result<Epoch, GroupError> {
+        Ok(MlsMessageIn::tls_deserialize_exact(message)
+            .map_err(invalid)?
+            .try_into_protocol_message()
+            .map_err(invalid)?
+            .epoch()
+            .as_u64())
+    }
+
     /// Decrypt an application message for `org`'s group.
     pub fn decrypt(&mut self, org: &str, message: &[u8]) -> Result<Decrypted, GroupError> {
         let msg = self.protocol_message(org, message, ContentType::Application)?;
