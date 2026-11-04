@@ -5,6 +5,22 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- End-to-end encryption on the wire (REQ-ENC-001..004): every relay body is an MLS message for
+  the org's group. `Client::create_group`, `join_request_frame`, `add_member`, `remove_member`,
+  `rotate_key`, `is_member`, `group_members`; new events `JoinRequested`, `Joined`, `GroupChanged`,
+  `EpochBehind`, `CommitsServed`, `CommitsApplied`, `ReAddRequested`, `MemberReAdded`. Missed
+  commits are fetched from a peer automatically, and a device beyond the commit log is re-added
+  automatically. The MLS state is saved in the store (`Store::get_meta`/`put_meta`; SQLite schema 2,
+  IndexedDB version 2) before anything encrypted is sent. Same API in `kith-net` (`LiveClient`),
+  web (`createGroup`, `requestJoin`, `addMember`, ...), Swift/Kotlin (`KithClient.createGroup`,
+  `RelaySession.joinRequest`/`addMember`/...; Swift `RelayConnection`).
+
+### Changed
+- **Breaking:** plaintext bodies are refused; clients must be in the org's group to send or read.
+  `broadcast_frame` and `sync_request_frame` are now `Client` methods and return `Result`;
+  `Client::new` returns `Result` (it loads the MLS state). `Store` has two new required methods.
+
+### Added
 - `kith-crypto`: MLS group encryption with OpenMLS (`Groups`, REQ-ENC-001..004, ADR 0004):
   ciphersuite `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, the device key signs MLS
   messages, KeyPackages, `create_group`, `add_member`/`readd_member`/`remove_member`, `join`,

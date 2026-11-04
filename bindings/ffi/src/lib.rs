@@ -98,10 +98,13 @@ impl KithClient {
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Client::new(
-                DeviceKey::generate(),
-                Box::new(MemoryStore::new()),
-            )),
+            inner: Mutex::new(
+                Client::new(
+                    DeviceKey::generate(),
+                    Box::new(MemoryStore::new()) as DynStore,
+                )
+                .expect("an empty memory store has no MLS state to load"),
+            ),
         }
     }
 
@@ -112,20 +115,41 @@ impl KithClient {
         Ok(Self {
             inner: Mutex::new(Client::new(
                 seed_from(secret_key)?,
-                Box::new(MemoryStore::new()),
-            )),
+                Box::new(MemoryStore::new()) as DynStore,
+            )?),
         })
     }
 
     /// Persistent client: SQLite database at `db_path` (created if missing)
     /// and the device identity from `secret_key`. Reopening the same path with
-    /// the same key restores all data and the identity.
+    /// the same key restores all data, the identity and the MLS group state.
+    /// The database holds group secrets: keep it in app-private storage.
     #[uniffi::constructor]
     pub fn open(db_path: String, secret_key: Vec<u8>) -> Result<Self, KithError> {
         let store = SqliteStore::open(db_path)?;
         Ok(Self {
-            inner: Mutex::new(Client::new(seed_from(secret_key)?, Box::new(store))),
+            inner: Mutex::new(Client::new(
+                seed_from(secret_key)?,
+                Box::new(store) as DynStore,
+            )?),
         })
+    }
+
+    /// Create `org`'s encrypted group with this device as its only member. Call it
+    /// once, on the device that creates the organization; other devices join with
+    /// `RelaySession.joinRequest`.
+    pub fn create_group(&self, org: String) -> Result<(), KithError> {
+        Ok(self.inner.lock().unwrap().create_group(&org)?)
+    }
+
+    /// True if this device is a member of `org`'s group (it can send and read).
+    pub fn is_member(&self, org: String) -> bool {
+        self.inner.lock().unwrap().is_member(&org)
+    }
+
+    /// Devices (hex IDs) in `org`'s group.
+    pub fn group_members(&self, org: String) -> Result<Vec<String>, KithError> {
+        Ok(self.inner.lock().unwrap().group_members(&org)?)
     }
 
     /// The 32-byte secret key of this device. Store it only in the platform's
@@ -171,7 +195,8 @@ pub enum RelayEvent {
         change_id: String,
         is_new: bool,
     },
-    /// A peer's change was refused (bad hash or signature); nothing was stored.
+    /// A peer's message was refused (not decryptable, unencrypted, bad hash or
+    /// signature); nothing was stored.
     Rejected {
         org: String,
         from: String,
@@ -198,6 +223,41 @@ pub enum RelayEvent {
     Receipt { delivered: Vec<String> },
     /// The relay refused something (for example `auth-failed`, after which it closes).
     RelayError { code: String, message: String },
+    /// A device asks to join `org`. To admit it, call `RelaySession.addMember(keyPackage)`
+    /// and send the frames; ignore the event to refuse.
+    JoinRequested {
+        org: String,
+        from: String,
+        key_package: Vec<u8>,
+    },
+    /// This device joined `org`; the history is requested by the replies.
+    Joined { org: String },
+    /// A commit changed `org`'s group. `removed`: this device was removed.
+    GroupChanged {
+        org: String,
+        epoch: u64,
+        removed: bool,
+    },
+    /// This device missed group commits; the replies ask `from` for them.
+    EpochBehind { org: String, from: String },
+    /// We sent commits to a peer that was behind, or (`readd_needed`) asked it to rejoin.
+    CommitsServed {
+        org: String,
+        to: String,
+        commits: u64,
+        readd_needed: bool,
+    },
+    /// We applied commits we had missed.
+    CommitsApplied {
+        org: String,
+        from: String,
+        applied: u64,
+        epoch: u64,
+    },
+    /// We were too far behind and asked `from` to re-add us.
+    ReAddRequested { org: String, from: String },
+    /// We re-added `device`, which had fallen too far behind.
+    MemberReAdded { org: String, device: String },
 }
 
 /// Result of [`RelaySession::receive`].
@@ -215,7 +275,10 @@ pub struct SessionOutput {
 /// relay's `/v1/ws`, sends [`hello`](Self::hello) when it opens, passes every
 /// binary message to [`receive`](Self::receive) and sends the returned
 /// `replies`. After `create`/`edit`, send [`broadcast`](Self::broadcast).
-/// Only online devices are reached; message bodies are not encrypted yet.
+/// Only online devices are reached. Every body is encrypted for the org's MLS
+/// group, so the device must be a member: `KithClient.createGroup` on the first
+/// device, [`join_request`](Self::join_request) + [`add_member`](Self::add_member)
+/// for the others.
 #[derive(uniffi::Object)]
 pub struct RelaySession {
     client: Arc<KithClient>,
@@ -269,19 +332,48 @@ impl RelaySession {
     /// to download the full history. The relay's `Receipt` event has an empty
     /// `delivered` list if nobody was online. Answers arrive through `receive`.
     pub fn catch_up(&self) -> Result<Vec<u8>, KithError> {
-        let c = self.client.inner.lock().unwrap();
+        let mut c = self.client.inner.lock().unwrap();
         encode_frame(&c.sync_request_frame(&self.org)?)
     }
 
+    /// The frame that asks the member `to` (hex device ID, e.g. from a `Presence`
+    /// event) to add this device to the org. Wait for `Joined`.
+    pub fn join_request(&self, to: String) -> Result<Vec<u8>, KithError> {
+        let mut c = self.client.inner.lock().unwrap();
+        encode_frame(&c.join_request_frame(&self.org, &to)?)
+    }
+
+    /// Admit the device of a `JoinRequested` event. Send all returned frames, in order.
+    pub fn add_member(&self, key_package: Vec<u8>) -> Result<Vec<Vec<u8>>, KithError> {
+        let mut c = self.client.inner.lock().unwrap();
+        c.add_member(&self.org, &key_package)?
+            .iter()
+            .map(encode_frame)
+            .collect()
+    }
+
+    /// Remove `device` (hex) from the org's group. Send the returned frame.
+    pub fn remove_member(&self, device: String) -> Result<Vec<u8>, KithError> {
+        let mut c = self.client.inner.lock().unwrap();
+        encode_frame(&c.remove_member(&self.org, &device)?)
+    }
+
+    /// Rotate this device's group key (do it periodically, e.g. weekly). Send the
+    /// returned frame.
+    pub fn rotate_key(&self) -> Result<Vec<u8>, KithError> {
+        let mut c = self.client.inner.lock().unwrap();
+        encode_frame(&c.rotate_key(&self.org)?)
+    }
+
     /// The frame that tells the other online devices about a local change
-    /// (as returned by `create`/`edit`).
+    /// (as returned by `create`/`edit`), encrypted for the org's group.
     pub fn broadcast(&self, change_id: String) -> Result<Vec<u8>, KithError> {
         let id = kith_client::ChangeId::from_hex(&change_id)?;
-        let c = self.client.inner.lock().unwrap();
+        let mut c = self.client.inner.lock().unwrap();
         let change = c.store().get(&id)?.ok_or_else(|| KithError::Failed {
             msg: format!("unknown change {change_id}"),
         })?;
-        encode_frame(&kith_client::broadcast_frame(&self.org, &change))
+        encode_frame(&c.broadcast_frame(&self.org, &change)?)
     }
 }
 
@@ -330,6 +422,50 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
         Event::Presence { org, online } => RelayEvent::Presence { org, online },
         Event::Receipt { delivered } => RelayEvent::Receipt { delivered },
         Event::RelayError { code, message } => RelayEvent::RelayError { code, message },
+        Event::JoinRequested {
+            org,
+            from,
+            key_package,
+        } => RelayEvent::JoinRequested {
+            org,
+            from,
+            key_package,
+        },
+        Event::Joined { org } => RelayEvent::Joined { org },
+        Event::GroupChanged {
+            org,
+            epoch,
+            removed,
+        } => RelayEvent::GroupChanged {
+            org,
+            epoch,
+            removed,
+        },
+        Event::EpochBehind { org, from } => RelayEvent::EpochBehind { org, from },
+        Event::CommitsServed {
+            org,
+            to,
+            commits,
+            readd_needed,
+        } => RelayEvent::CommitsServed {
+            org,
+            to,
+            commits: commits as u64,
+            readd_needed,
+        },
+        Event::CommitsApplied {
+            org,
+            from,
+            applied,
+            epoch,
+        } => RelayEvent::CommitsApplied {
+            org,
+            from,
+            applied: applied as u64,
+            epoch,
+        },
+        Event::ReAddRequested { org, from } => RelayEvent::ReAddRequested { org, from },
+        Event::MemberReAdded { org, device } => RelayEvent::MemberReAdded { org, device },
         Event::Ignored => return None,
     })
 }
@@ -390,69 +526,6 @@ mod tests {
         assert!(KithClient::open(":memory:".into(), vec![1; 5]).is_err());
     }
 
-    /// What the relay does for a broadcast: wrap the body in a deliver frame.
-    fn relay_deliver(from: &KithClient, broadcast: &[u8]) -> Vec<u8> {
-        let kith_protocol::Frame::Broadcast { org, body } =
-            kith_protocol::decode(broadcast).unwrap()
-        else {
-            panic!("broadcast frame expected")
-        };
-        kith_protocol::encode(&kith_protocol::Frame::Deliver {
-            org,
-            from: from.device_id(),
-            body,
-        })
-        .unwrap()
-    }
-
-    /// req: REQ-SYNC-004
-    #[test]
-    fn sessions_exchange_changes_through_frames() {
-        let a = Arc::new(KithClient::new());
-        let b = Arc::new(KithClient::new());
-        let (sa, sb) = (
-            a.clone().relay_session("org".into()),
-            b.clone().relay_session("org".into()),
-        );
-
-        // Handshake: hello -> (relay) challenge -> auth + announce.
-        let hello = kith_protocol::decode(&sa.hello().unwrap()).unwrap();
-        assert!(matches!(hello, kith_protocol::Frame::Hello { .. }));
-        let challenge =
-            kith_protocol::encode(&kith_protocol::Frame::Challenge { nonce: "ab".into() }).unwrap();
-        let out = sa.receive(challenge).unwrap();
-        assert!(out.event.is_none());
-        let frames: Vec<_> = out
-            .replies
-            .iter()
-            .map(|f| kith_protocol::decode(f).unwrap())
-            .collect();
-        assert!(matches!(frames[0], kith_protocol::Frame::Auth { .. }));
-        assert!(matches!(frames[1], kith_protocol::Frame::Announce { .. }));
-
-        // A change made on a reaches b.
-        let created = a.create("note".into(), b"v1".to_vec()).unwrap();
-        let broadcast = sa.broadcast(created.change_id.clone()).unwrap();
-        let out = sb.receive(relay_deliver(&a, &broadcast)).unwrap();
-        match out.event {
-            Some(RelayEvent::Received {
-                object_id,
-                change_id,
-                is_new,
-                from,
-                ..
-            }) => {
-                assert_eq!(object_id, created.object_id);
-                assert_eq!(change_id, created.change_id);
-                assert_eq!(from, a.device_id());
-                assert!(is_new);
-            }
-            _ => panic!("expected a received event"),
-        }
-        assert_eq!(b.history(created.object_id).unwrap().len(), 1);
-        assert!(sa.broadcast("00".repeat(32)).is_err(), "unknown change");
-    }
-
     /// Deliver a frame one session sent to the other, as the relay would.
     fn relay_to(from: &KithClient, to: &RelaySession, frame: &[u8]) -> SessionOutput {
         use kith_protocol::Frame;
@@ -471,20 +544,115 @@ mod tests {
             .unwrap()
     }
 
-    /// req: REQ-SYNC-003
-    #[test]
-    fn catch_up_downloads_the_history_into_an_empty_client() {
+    /// `a` creates the group, `b` asks to join and `a` admits it. Returns the
+    /// replies `b` sent after joining (its catch-up request).
+    fn join(
+        a: &Arc<KithClient>,
+        sa: &RelaySession,
+        b: &Arc<KithClient>,
+        sb: &RelaySession,
+    ) -> Vec<Vec<u8>> {
+        a.create_group("org".into()).unwrap();
+        let req = sb.join_request(a.device_id()).unwrap();
+        let out = relay_to(b, sa, &req);
+        let Some(RelayEvent::JoinRequested { key_package, .. }) = out.event else {
+            panic!("join request expected")
+        };
+        let frames = sa.add_member(key_package).unwrap();
+        assert_eq!(frames.len(), 2, "commit + welcome");
+        // The commit reaches b before it is a member; the Welcome then adds it.
+        let _ = relay_to(a, sb, &frames[0]);
+        let out = relay_to(a, sb, &frames[1]);
+        assert!(matches!(out.event, Some(RelayEvent::Joined { .. })));
+        assert!(b.is_member("org".into()));
+        assert_eq!(a.group_members("org".into()).unwrap().len(), 2);
+        out.replies
+    }
+
+    fn pair() -> (
+        Arc<KithClient>,
+        Arc<RelaySession>,
+        Arc<KithClient>,
+        Arc<RelaySession>,
+    ) {
         let a = Arc::new(KithClient::new());
         let b = Arc::new(KithClient::new());
-        let (sa, sb) = (
-            a.clone().relay_session("org".into()),
-            b.clone().relay_session("org".into()),
-        );
+        let sa = a.clone().relay_session("org".into());
+        let sb = b.clone().relay_session("org".into());
+        (a, sa, b, sb)
+    }
+
+    /// req: REQ-SYNC-004
+    /// req: REQ-ENC-001
+    #[test]
+    fn sessions_exchange_encrypted_changes_through_frames() {
+        let (a, sa, b, sb) = pair();
+
+        // Handshake: hello -> (relay) challenge -> auth + announce.
+        let hello = kith_protocol::decode(&sa.hello().unwrap()).unwrap();
+        assert!(matches!(hello, kith_protocol::Frame::Hello { .. }));
+        let challenge =
+            kith_protocol::encode(&kith_protocol::Frame::Challenge { nonce: "ab".into() }).unwrap();
+        let out = sa.receive(challenge).unwrap();
+        assert!(out.event.is_none());
+        let frames: Vec<_> = out
+            .replies
+            .iter()
+            .map(|f| kith_protocol::decode(f).unwrap())
+            .collect();
+        assert!(matches!(frames[0], kith_protocol::Frame::Auth { .. }));
+        assert!(matches!(frames[1], kith_protocol::Frame::Announce { .. }));
+
+        // Not a member yet: nothing can be sent.
+        let early = a.create("note".into(), b"early".to_vec()).unwrap();
+        assert!(sa.broadcast(early.change_id).is_err());
+        join(&a, &sa, &b, &sb);
+
+        // A change made on a reaches b.
+        let created = a.create("note".into(), b"v1".to_vec()).unwrap();
+        let broadcast = sa.broadcast(created.change_id.clone()).unwrap();
+        let out = relay_to(&a, &sb, &broadcast);
+        match out.event {
+            Some(RelayEvent::Received {
+                object_id,
+                change_id,
+                is_new,
+                from,
+                ..
+            }) => {
+                assert_eq!(object_id, created.object_id);
+                assert_eq!(change_id, created.change_id);
+                assert_eq!(from, a.device_id());
+                assert!(is_new);
+            }
+            _ => panic!("expected a received event"),
+        }
+        assert_eq!(b.history(created.object_id).unwrap().len(), 1);
+        assert!(sa.broadcast("00".repeat(32)).is_err(), "unknown change");
+        // Key rotation and removal produce frames.
+        let rotate = relay_to(&b, &sa, &sb.rotate_key().unwrap());
+        assert!(matches!(
+            rotate.event,
+            Some(RelayEvent::GroupChanged { removed: false, .. })
+        ));
+        let removal = relay_to(&a, &sb, &sa.remove_member(b.device_id()).unwrap());
+        assert!(matches!(
+            removal.event,
+            Some(RelayEvent::GroupChanged { removed: true, .. })
+        ));
+    }
+
+    /// req: REQ-SYNC-003
+    #[test]
+    fn joining_downloads_the_history_into_an_empty_client() {
+        let (a, sa, b, sb) = pair();
         let created = a.create("note".into(), b"v1".to_vec()).unwrap();
         a.edit(created.object_id.clone(), b"v2".to_vec()).unwrap();
 
-        // b asks, a answers, b stores.
-        let served = relay_to(&b, &sa, &sb.catch_up().unwrap());
+        // Joining asks for the history on its own; a answers, b stores.
+        let replies = join(&a, &sa, &b, &sb);
+        assert_eq!(replies.len(), 1);
+        let served = relay_to(&b, &sa, &replies[0]);
         assert!(matches!(
             served.event,
             Some(RelayEvent::SyncServed { sending: 2, .. })
@@ -495,21 +663,23 @@ mod tests {
             received.event,
             Some(RelayEvent::SyncReceived { stored: 2, .. })
         ));
-        assert_eq!(b.history(created.object_id).unwrap().len(), 2);
+        assert_eq!(b.history(created.object_id.clone()).unwrap().len(), 2);
+        // And catch_up works the same way later.
+        let served = relay_to(&b, &sa, &sb.catch_up().unwrap());
+        assert!(matches!(
+            served.event,
+            Some(RelayEvent::SyncServed { sending: 0, .. })
+        ));
     }
 
     /// req: REQ-SYNC-004
+    /// req: REQ-ENC-001
     #[test]
     fn tampered_and_garbage_frames_do_not_store_anything() {
-        let a = Arc::new(KithClient::new());
-        let b = Arc::new(KithClient::new());
-        let (sa, sb) = (
-            a.clone().relay_session("org".into()),
-            b.clone().relay_session("org".into()),
-        );
+        let (a, sa, b, sb) = pair();
+        join(&a, &sa, &b, &sb);
         let created = a.create("note".into(), b"v1".to_vec()).unwrap();
         let broadcast = sa.broadcast(created.change_id).unwrap();
-        // Flip a payload byte inside the encoded change (the last bytes are the payload).
         let kith_protocol::Frame::Broadcast { org, mut body } =
             kith_protocol::decode(&broadcast).unwrap()
         else {
@@ -526,6 +696,28 @@ mod tests {
         assert!(matches!(out.event, Some(RelayEvent::Rejected { .. })));
         assert!(sb.receive(b"not a frame".to_vec()).is_err());
         assert!(b.history(created.object_id).unwrap().is_empty());
+    }
+
+    /// req: REQ-ENC-001
+    #[test]
+    fn group_membership_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!(
+            "kith-ffi-mls-{}",
+            generate_secret_key()[0..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kith.db").to_string_lossy().into_owned();
+        let key = generate_secret_key();
+        {
+            let c = KithClient::open(path.clone(), key.clone()).unwrap();
+            c.create_group("org".into()).unwrap();
+        }
+        let c = KithClient::open(path, key).unwrap();
+        assert!(c.is_member("org".into()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// req: REQ-PLAT-002

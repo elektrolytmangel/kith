@@ -13,7 +13,10 @@ public extension KithClient {
 ///
 /// All protocol logic lives in Rust (`RelaySession`); this class only moves
 /// binary messages between the socket and the session. Only devices online at the
-/// same time are reached, and message bodies are not encrypted yet.
+/// same time are reached; `catchUp()` fetches the rest. Every message is
+/// encrypted for the org's MLS group, so the device must be a member:
+/// `client.createGroup(org:)` on the first device, `requestJoin(to:)` on others
+/// (a member admits them with `addMember(keyPackage:)` on `.joinRequested`).
 ///
 ///     let conn = RelayConnection(client: client, url: relayURL, org: "my-org",
 ///                                onEvent: { event in ... })
@@ -73,6 +76,31 @@ public final class RelayConnection {
         } catch {
             onClose(error)
         }
+    }
+
+    /// Ask the member `deviceId` (e.g. from a `.presence` event) to add this device to
+    /// the org. A `.joined` event follows if it does.
+    public func requestJoin(to deviceId: String) {
+        do {
+            send(try session.joinRequest(to: deviceId))
+        } catch {
+            onClose(error)
+        }
+    }
+
+    /// Admit the device of a `.joinRequested` event.
+    public func addMember(keyPackage: Data) throws {
+        for frame in try session.addMember(keyPackage: keyPackage) { send(frame) }
+    }
+
+    /// Remove a device from the org's group.
+    public func removeMember(_ deviceId: String) throws {
+        send(try session.removeMember(device: deviceId))
+    }
+
+    /// Rotate this device's group key; call it periodically (e.g. weekly).
+    public func rotateKey() throws {
+        send(try session.rotateKey())
     }
 
     /// Close the connection.

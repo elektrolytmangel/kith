@@ -4,6 +4,11 @@
 //! apps, Tauri, headless always-on clients) or through the generated
 //! bindings in `bindings/` (Swift, Kotlin, JavaScript/WASM).
 //!
+//! Every relay body is end-to-end encrypted with the organization's MLS group
+//! (REQ-ENC-001, ADR 0004): create the group with [`Client::create_group`] on the
+//! first device, then admit devices with [`Client::join_request_frame`] (new
+//! device) and [`Client::add_member`] (member). Plaintext bodies are refused.
+//!
 //! Extension points (see `docs/guides/adapting.md`):
 //! - [`Store`]: bring your own storage backend.
 //! - [`Signer`]: bring your own key storage (keychain, secure enclave).
@@ -13,13 +18,20 @@
 pub use kith_core::{
     Change, ChangeId, DeviceId, IdError, ObjectId, ObjectType, Signer, UnsignedChange,
 };
-pub use kith_crypto::DeviceKey;
+pub use kith_crypto::{DeviceKey, GroupError, Groups};
 #[cfg(feature = "automerge")]
 pub use kith_merge::automerge_merger;
 mod sync;
 
 pub use kith_merge::{Materialized, MergeError, Merger};
 pub use kith_store::{MemoryStore, Store, StoreError};
+
+use kith_crypto::CommitOutcome;
+use kith_protocol::Frame;
+use sync::Outer;
+
+/// Key under which the MLS state is kept in the [`Store`] (`Store::put_meta`).
+pub const MLS_STATE_KEY: &str = "mls";
 
 /// Library version (all kith crates are versioned together).
 pub fn kith_core_version() -> &'static str {
@@ -44,41 +56,43 @@ pub enum ClientError {
     /// Object does not exist locally.
     #[error("unknown object {0}")]
     UnknownObject(ObjectId),
+    /// MLS group operation failed (for example: not a member of the org yet).
+    #[error(transparent)]
+    Group(#[from] GroupError),
+    /// Not a valid device ID.
+    #[error(transparent)]
+    Id(#[from] IdError),
 }
 
 /// Connection to the relay (or a direct peer). Implemented per platform:
 /// tokio WebSocket on native, browser WebSocket on web.
 pub trait Transport {
     /// Send an encoded protocol frame.
-    fn send(&mut self, frame: kith_protocol::Frame) -> Result<(), String>;
+    fn send(&mut self, frame: Frame) -> Result<(), String>;
 }
 
 /// The first frame to send after connecting to the relay.
-pub fn hello_frame(signer: &dyn Signer) -> kith_protocol::Frame {
-    kith_protocol::Frame::Hello {
+pub fn hello_frame(signer: &dyn Signer) -> Frame {
+    Frame::Hello {
         version: kith_protocol::PROTOCOL_VERSION,
         device: signer.device_id().to_hex(),
     }
 }
 
-/// The answer to the relay's [`kith_protocol::Frame::Challenge`]: a signature
-/// proving this device owns its key (REQ-RELAY-004).
-pub fn auth_frame(signer: &dyn Signer, nonce: &str) -> kith_protocol::Frame {
+/// The answer to the relay's [`Frame::Challenge`]: a signature proving this
+/// device owns its key (REQ-RELAY-004).
+pub fn auth_frame(signer: &dyn Signer, nonce: &str) -> Frame {
     let msg = kith_protocol::auth_message(&signer.device_id().to_hex(), nonce);
-    kith_protocol::Frame::Auth {
+    Frame::Auth {
         signature: hex_encode(&signer.sign(&msg)),
     }
 }
 
 /// The frames to send in answer to a relay's `challenge`: the signature that proves
 /// device ownership, then the organization announcement. `None` for any other frame.
-pub fn handshake_reply(
-    signer: &dyn Signer,
-    org: &str,
-    frame: &kith_protocol::Frame,
-) -> Option<Vec<kith_protocol::Frame>> {
+pub fn handshake_reply(signer: &dyn Signer, org: &str, frame: &Frame) -> Option<Vec<Frame>> {
     match frame {
-        kith_protocol::Frame::Challenge { nonce } => {
+        Frame::Challenge { nonce } => {
             // Pipelined: a failed auth makes the relay send an error and close.
             Some(vec![auth_frame(signer, nonce), announce_frame(org, "")])
         }
@@ -88,23 +102,12 @@ pub fn handshake_reply(
 
 /// Frame announcing membership of `org` after authenticating.
 /// The relay does not check `proof` yet (REQ-RELAY-004, phase 5).
-pub fn announce_frame(org: &str, proof: &str) -> kith_protocol::Frame {
-    kith_protocol::Frame::Announce {
+pub fn announce_frame(org: &str, proof: &str) -> Frame {
+    Frame::Announce {
         orgs: vec![kith_protocol::Membership {
             org: org.into(),
             proof: proof.into(),
         }],
-    }
-}
-
-/// Frame that broadcasts a new change to the other online devices of `org`
-/// (REQ-SYNC-004).
-/// TODO(phase 4, REQ-ENC-001): encrypt the body with the org's MLS group; until
-/// then it is **plaintext on the relay**.
-pub fn broadcast_frame(org: &str, change: &Change) -> kith_protocol::Frame {
-    kith_protocol::Frame::Broadcast {
-        org: org.into(),
-        body: sync::change_body(change),
     }
 }
 
@@ -114,7 +117,16 @@ pub struct Handled {
     /// What the frame meant for the app.
     pub event: Event,
     /// Frames to send to the relay in answer (catch-up replies); usually empty.
-    pub replies: Vec<kith_protocol::Frame>,
+    pub replies: Vec<Frame>,
+}
+
+impl Handled {
+    fn event(event: Event) -> Self {
+        Self {
+            event,
+            replies: vec![],
+        }
+    }
 }
 
 /// What a frame from the relay meant for this client.
@@ -131,7 +143,8 @@ pub enum Event {
         /// True if the change was not stored before.
         is_new: bool,
     },
-    /// A peer's change was refused (undecodable, bad hash or signature). Nothing was stored.
+    /// A peer's message was refused (undecodable, not decryptable, bad hash or
+    /// signature, unencrypted). Nothing was stored.
     Rejected {
         /// Organization.
         org: String,
@@ -184,6 +197,77 @@ pub enum Event {
         /// Changes the peer asked us to send back (we replied with them).
         requested: usize,
     },
+    /// A device asks to join `org`. To admit it, pass `key_package` to
+    /// [`Client::add_member`] and send the frames it returns. Ignore it to refuse.
+    JoinRequested {
+        /// Organization.
+        org: String,
+        /// The device asking (hex).
+        from: String,
+        /// Its MLS KeyPackage.
+        key_package: Vec<u8>,
+    },
+    /// This device joined `org`'s group from a Welcome; the reply asks a peer
+    /// for the history (catch-up).
+    Joined {
+        /// Organization.
+        org: String,
+    },
+    /// A commit changed `org`'s group: a member was added or removed, or keys rotated.
+    GroupChanged {
+        /// Organization.
+        org: String,
+        /// New epoch.
+        epoch: u64,
+        /// True if this device was removed: it can no longer read or send in `org`.
+        removed: bool,
+    },
+    /// This device missed commits of `org`'s group; the reply asks `from` for them.
+    EpochBehind {
+        /// Organization.
+        org: String,
+        /// The peer whose message showed we are behind (hex).
+        from: String,
+    },
+    /// A peer that was behind got the commits it missed from us (`commits`), or,
+    /// if our log does not reach back far enough, a request to be re-added.
+    CommitsServed {
+        /// Organization.
+        org: String,
+        /// The peer (hex).
+        to: String,
+        /// Commits sent.
+        commits: usize,
+        /// True if we asked the peer to send a KeyPackage instead.
+        readd_needed: bool,
+    },
+    /// We applied commits we had missed (REQ-ENC-002); the reply restarts data
+    /// catch-up with that peer.
+    CommitsApplied {
+        /// Organization.
+        org: String,
+        /// The sending peer (hex).
+        from: String,
+        /// Commits applied.
+        applied: usize,
+        /// Our epoch now.
+        epoch: u64,
+    },
+    /// A peer is too far behind for our log: we asked to be re-added and sent it a
+    /// fresh KeyPackage (REQ-ENC-004).
+    ReAddRequested {
+        /// Organization.
+        org: String,
+        /// The peer that will re-add us (hex).
+        from: String,
+    },
+    /// We re-added `device`, which had fallen too far behind (REQ-ENC-004).
+    MemberReAdded {
+        /// Organization.
+        org: String,
+        /// The device (hex).
+        device: String,
+    },
     /// A frame this client has nothing to do with.
     Ignored,
 }
@@ -192,16 +276,30 @@ fn hex_encode(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+fn direct(org: &str, to: &str, body: Vec<u8>) -> Frame {
+    Frame::Direct {
+        org: org.into(),
+        to: to.into(),
+        body,
+    }
+}
+
 /// A device's view of the organizations it belongs to.
 pub struct Client<S: Store, K: Signer = DeviceKey> {
     key: K,
     store: S,
+    groups: Groups,
 }
 
 impl<S: Store, K: Signer> Client<S, K> {
-    /// Create a client from a signer and a store.
-    pub fn new(key: K, store: S) -> Self {
-        Self { key, store }
+    /// Create a client from a signer and a store. Loads the MLS group state from
+    /// the store if there is one.
+    pub fn new(key: K, store: S) -> Result<Self, ClientError> {
+        let groups = match store.get_meta(MLS_STATE_KEY)? {
+            Some(bytes) => Groups::from_bytes(&bytes)?,
+            None => Groups::new(),
+        };
+        Ok(Self { key, store, groups })
     }
 
     /// This device's ID.
@@ -236,41 +334,159 @@ impl<S: Store, K: Signer> Client<S, K> {
         Ok(self.store.put(change)?)
     }
 
+    // ---- MLS group (REQ-ENC-001..004) ----
+
+    /// Create `org`'s MLS group with this device as the only member. Call it once,
+    /// on the device that creates the organization.
+    pub fn create_group(&mut self, org: &str) -> Result<(), ClientError> {
+        self.groups.create_group(&self.key, org)?;
+        self.save_groups()
+    }
+
+    /// True if this device is a member of `org`'s group (it can send and read).
+    pub fn is_member(&self, org: &str) -> bool {
+        self.groups.is_member(org)
+    }
+
+    /// Current epoch of `org`'s group.
+    pub fn group_epoch(&self, org: &str) -> Result<u64, ClientError> {
+        Ok(self.groups.epoch(org)?)
+    }
+
+    /// Devices (hex) in `org`'s group.
+    pub fn group_members(&self, org: &str) -> Result<Vec<String>, ClientError> {
+        Ok(self
+            .groups
+            .members(org)?
+            .iter()
+            .map(DeviceId::to_hex)
+            .collect())
+    }
+
+    /// Ask the member `to` (a device ID in hex, e.g. from `Presence`) to add this
+    /// device to `org`: sends a fresh KeyPackage. The member sees
+    /// [`Event::JoinRequested`]; if it admits us we get [`Event::Joined`].
+    pub fn join_request_frame(&mut self, org: &str, to: &str) -> Result<Frame, ClientError> {
+        let kp = self.groups.key_package(&self.key)?;
+        // The private part must be stored before the KeyPackage leaves.
+        self.save_groups()?;
+        Ok(direct(org, to, sync::outer_body(&Outer::KeyPackage(kp))))
+    }
+
+    /// Add the device whose KeyPackage came with [`Event::JoinRequested`] to
+    /// `org`'s group. Send the returned frames: the commit to the group, then the
+    /// Welcome to the new device.
+    pub fn add_member(&mut self, org: &str, key_package: &[u8]) -> Result<Vec<Frame>, ClientError> {
+        let added = self.groups.add_member(&self.key, org, key_package)?;
+        self.save_groups()?;
+        Ok(self.added_frames(org, added))
+    }
+
+    fn added_frames(&self, org: &str, added: kith_crypto::Added) -> Vec<Frame> {
+        vec![
+            Frame::Broadcast {
+                org: org.into(),
+                body: sync::outer_body(&Outer::Commit(added.commit)),
+            },
+            direct(
+                org,
+                &added.member.to_hex(),
+                sync::outer_body(&Outer::Welcome(added.welcome)),
+            ),
+        ]
+    }
+
+    /// Remove `device` (hex) from `org`'s group. Send the returned commit; the
+    /// device cannot read anything sent afterwards.
+    pub fn remove_member(&mut self, org: &str, device: &str) -> Result<Frame, ClientError> {
+        let device = DeviceId::from_hex(device)?;
+        let commit = self.groups.remove_member(&self.key, org, device)?;
+        self.save_groups()?;
+        Ok(Frame::Broadcast {
+            org: org.into(),
+            body: sync::outer_body(&Outer::Commit(commit)),
+        })
+    }
+
+    /// Rotate this device's key in `org`'s group (MLS update, REQ-ENC-003): call
+    /// it periodically, e.g. weekly or on start after a long pause. Send the
+    /// returned commit.
+    pub fn rotate_key(&mut self, org: &str) -> Result<Frame, ClientError> {
+        let commit = self.groups.self_update(&self.key, org)?;
+        self.save_groups()?;
+        Ok(Frame::Broadcast {
+            org: org.into(),
+            body: sync::outer_body(&Outer::Commit(commit)),
+        })
+    }
+
+    // ---- data sync ----
+
+    /// Frame that broadcasts a new change, encrypted for `org`'s group, to the
+    /// other online devices (REQ-SYNC-004).
+    pub fn broadcast_frame(&mut self, org: &str, change: &Change) -> Result<Frame, ClientError> {
+        let body = self.app_body(org, &sync::change_body(change))?;
+        self.save_groups()?;
+        Ok(Frame::Broadcast {
+            org: org.into(),
+            body,
+        })
+    }
+
     /// The request that starts catch-up (REQ-SYNC-001..003): send it to the relay,
     /// which hands it to one online peer. That peer answers with what we lack and
     /// asks for what it lacks. Works from an empty store (join). The relay's
     /// `Receipt` shows whether a peer was online (`delivered` empty: try later).
-    pub fn sync_request_frame(&self, org: &str) -> Result<kith_protocol::Frame, ClientError> {
+    pub fn sync_request_frame(&mut self, org: &str) -> Result<Frame, ClientError> {
+        let body = self.have_body(org)?;
+        self.save_groups()?;
+        Ok(Frame::SyncRequest {
+            org: org.into(),
+            body,
+        })
+    }
+
+    fn have_body(&mut self, org: &str) -> Result<Vec<u8>, ClientError> {
         let ids = self.store.all_ids()?;
         if ids.len() > sync::MAX_HAVE_IDS {
             return Err(ClientError::SyncTooLarge(ids.len()));
         }
-        Ok(kith_protocol::Frame::SyncRequest {
-            org: org.into(),
-            body: sync::have_body(&ids),
-        })
+        self.app_body(org, &sync::have_body(&ids))
     }
 
-    /// Handle a frame from the relay: validate and store peers' changes
-    /// (REQ-SYNC-004), serve catch-up requests and absorb offers (REQ-SYNC-001..003).
-    /// Send `Handled::replies` to the relay.
+    /// Encrypt an inner message as an outer `App` body. The caller saves the
+    /// MLS state before the body leaves the device.
+    fn app_body(&mut self, org: &str, inner: &[u8]) -> Result<Vec<u8>, ClientError> {
+        let ct = self.groups.encrypt(&self.key, org, inner)?;
+        Ok(sync::outer_body(&Outer::App(ct)))
+    }
+
+    fn save_groups(&mut self) -> Result<(), ClientError> {
+        Ok(self
+            .store
+            .put_meta(MLS_STATE_KEY, &self.groups.to_bytes())?)
+    }
+
+    /// Handle a frame from the relay: decrypt it, validate and store peers'
+    /// changes (REQ-SYNC-004), serve catch-up requests and absorb offers
+    /// (REQ-SYNC-001..003), apply MLS commits and Welcomes and catch up on missed
+    /// commits (REQ-ENC-001..004). Send `Handled::replies` to the relay.
     ///
-    /// A bad change from a peer is reported as [`Event::Rejected`], not as an error,
-    /// so a misbehaving device cannot break the receive loop. Only local storage
-    /// failures return `Err`.
-    pub fn handle_frame(&mut self, frame: kith_protocol::Frame) -> Result<Handled, ClientError> {
-        use kith_protocol::Frame;
-        let event = |event| Handled {
-            event,
-            replies: vec![],
-        };
-        Ok(match frame {
+    /// A bad message from a peer is reported as [`Event::Rejected`], not as an
+    /// error, so a misbehaving device cannot break the receive loop. Only local
+    /// failures (storage, MLS state) return `Err`.
+    pub fn handle_frame(&mut self, frame: Frame) -> Result<Handled, ClientError> {
+        let handled = match frame {
             Frame::Deliver { org, from, body } => self.handle_deliver(org, from, &body)?,
-            Frame::Presence { org, online } => event(Event::Presence { org, online }),
-            Frame::Receipt { delivered } => event(Event::Receipt { delivered }),
-            Frame::Error { code, message } => event(Event::RelayError { code, message }),
-            _ => event(Event::Ignored),
-        })
+            Frame::Presence { org, online } => Handled::event(Event::Presence { org, online }),
+            Frame::Receipt { delivered } => Handled::event(Event::Receipt { delivered }),
+            Frame::Error { code, message } => Handled::event(Event::RelayError { code, message }),
+            _ => return Ok(Handled::event(Event::Ignored)),
+        };
+        // Decrypting advances ratchets and replies are encrypted: save before any
+        // reply is sent.
+        self.save_groups()?;
+        Ok(handled)
     }
 
     fn handle_deliver(
@@ -279,37 +495,210 @@ impl<S: Store, K: Signer> Client<S, K> {
         from: String,
         body: &[u8],
     ) -> Result<Handled, ClientError> {
-        use sync::Message;
-        let rejected = |reason: String| Handled {
-            event: Event::Rejected {
+        let rejected = |reason: String| {
+            Handled::event(Event::Rejected {
                 org: org.clone(),
                 from: from.clone(),
                 reason,
-            },
-            replies: vec![],
+            })
         };
-        let msg = match sync::parse(body) {
+        let outer = match sync::parse_outer(body) {
+            Ok(m) => m,
+            Err(e) => return Ok(rejected(e)),
+        };
+        match outer {
+            Outer::App(ct) => self.handle_app(org, from, &ct),
+            Outer::Commit(commit) => match self.groups.apply_commit(&org, &commit) {
+                Ok(CommitOutcome::Applied { epoch, removed }) => {
+                    Ok(Handled::event(Event::GroupChanged {
+                        org,
+                        epoch,
+                        removed,
+                    }))
+                }
+                Ok(CommitOutcome::Stale) => Ok(Handled::event(Event::Ignored)),
+                Err(GroupError::EpochGap { local, .. }) => Ok(self.behind(org, from, local)),
+                Err(e) => Ok(rejected(e.to_string())),
+            },
+            Outer::Welcome(welcome) => {
+                let joined = match self.groups.join(&welcome) {
+                    Ok(o) => o,
+                    Err(e) => return Ok(rejected(e.to_string())),
+                };
+                // Start from whatever we have (usually nothing): ask a peer for history.
+                let body = self.have_body(&joined)?;
+                Ok(Handled {
+                    event: Event::Joined {
+                        org: joined.clone(),
+                    },
+                    replies: vec![Frame::SyncRequest { org: joined, body }],
+                })
+            }
+            Outer::KeyPackage(kp) => {
+                let known = self
+                    .groups
+                    .members(&org)
+                    .is_ok_and(|m| m.iter().any(|d| d.to_hex() == from));
+                if !known {
+                    return Ok(Handled::event(Event::JoinRequested {
+                        org,
+                        from,
+                        key_package: kp,
+                    }));
+                }
+                // A member that lost the group (REQ-ENC-004). Only for its own key.
+                match self.groups.readd_member(&self.key, &org, &kp) {
+                    Ok(added) if added.member.to_hex() == from => Ok(Handled {
+                        replies: self.added_frames(&org, added),
+                        event: Event::MemberReAdded { org, device: from },
+                    }),
+                    Ok(_) => Err(ClientError::Group(GroupError::Invalid(
+                        "re-added device does not match the sender".into(),
+                    ))),
+                    Err(e) => Ok(rejected(e.to_string())),
+                }
+            }
+            Outer::CommitRequest(epoch) => Ok(self.serve_commits(org, from, epoch)?),
+            Outer::Commits(commits) => {
+                let mut applied = 0;
+                for c in &commits {
+                    match self.groups.apply_commit(&org, c) {
+                        Ok(CommitOutcome::Applied { .. }) => applied += 1,
+                        Ok(CommitOutcome::Stale) => {}
+                        Err(e) => return Ok(rejected(e.to_string())),
+                    }
+                }
+                let epoch = self.groups.epoch(&org)?;
+                // Data sent while we were behind could not be read: resync with this peer.
+                let replies = if applied > 0 && self.groups.is_member(&org) {
+                    vec![direct(&org, &from, self.have_body(&org)?)]
+                } else {
+                    vec![]
+                };
+                Ok(Handled {
+                    event: Event::CommitsApplied {
+                        org,
+                        from,
+                        applied,
+                        epoch,
+                    },
+                    replies,
+                })
+            }
+            Outer::ReaddNeeded => {
+                // Only a group we have can be re-joined; ignore strangers' requests.
+                if self.groups.epoch(&org).is_err() {
+                    return Ok(rejected("not in this group".into()));
+                }
+                let frame = self.join_request_frame(&org, &from)?;
+                Ok(Handled {
+                    event: Event::ReAddRequested { org, from },
+                    replies: vec![frame],
+                })
+            }
+        }
+    }
+
+    /// We are behind on `org`: ask `from` for the commits since `local`.
+    fn behind(&self, org: String, from: String, local: u64) -> Handled {
+        Handled {
+            replies: vec![direct(
+                &org,
+                &from,
+                sync::outer_body(&Outer::CommitRequest(local)),
+            )],
+            event: Event::EpochBehind { org, from },
+        }
+    }
+
+    /// Send `to` the commits since `epoch`, or ask it to be re-added.
+    fn serve_commits(&self, org: String, to: String, epoch: u64) -> Result<Handled, ClientError> {
+        let (bodies, commits, readd_needed) = match self.groups.commits_since(&org, epoch) {
+            Ok(Some(cs)) => {
+                let n = cs.len();
+                (sync::commits_bodies(cs), n, false)
+            }
+            Ok(None) => (vec![sync::outer_body(&Outer::ReaddNeeded)], 0, true),
+            Err(e) => {
+                return Ok(Handled::event(Event::Rejected {
+                    org,
+                    from: to,
+                    reason: e.to_string(),
+                }));
+            }
+        };
+        Ok(Handled {
+            replies: bodies.into_iter().map(|b| direct(&org, &to, b)).collect(),
+            event: Event::CommitsServed {
+                org,
+                to,
+                commits,
+                readd_needed,
+            },
+        })
+    }
+
+    fn handle_app(&mut self, org: String, from: String, ct: &[u8]) -> Result<Handled, ClientError> {
+        // A sender at an older epoch missed commits: send them along (REQ-ENC-002).
+        let help = match (Groups::message_epoch(ct), self.groups.epoch(&org)) {
+            (Ok(theirs), Ok(ours)) if theirs < ours => {
+                self.serve_commits(org.clone(), from.clone(), theirs)?
+                    .replies
+            }
+            _ => vec![],
+        };
+        let mut handled = match self.groups.decrypt(&org, ct) {
+            Ok(d) if d.sender.to_hex() == from => self.handle_plain(org, from, &d.plaintext)?,
+            Ok(_) => Handled::event(Event::Rejected {
+                org,
+                from,
+                reason: "MLS sender does not match the relay's sender".into(),
+            }),
+            Err(GroupError::EpochGap { local, .. }) => self.behind(org, from, local),
+            Err(e) => Handled::event(Event::Rejected {
+                org,
+                from,
+                reason: e.to_string(),
+            }),
+        };
+        // Commits first, so the peer can read the encrypted replies that follow.
+        handled.replies.splice(0..0, help);
+        Ok(handled)
+    }
+
+    fn handle_plain(
+        &mut self,
+        org: String,
+        from: String,
+        plaintext: &[u8],
+    ) -> Result<Handled, ClientError> {
+        use sync::Message;
+        let rejected = |reason: String| {
+            Handled::event(Event::Rejected {
+                org: org.clone(),
+                from: from.clone(),
+                reason,
+            })
+        };
+        let msg = match sync::parse(plaintext) {
             Ok(m) => m,
             Err(e) => return Ok(rejected(e)),
         };
         match msg {
             Message::Change(change) => match self.receive(change.clone()) {
-                Ok(is_new) => Ok(Handled {
-                    event: Event::Received {
-                        org,
-                        from,
-                        change: Box::new(change),
-                        is_new,
-                    },
-                    replies: vec![],
-                }),
+                Ok(is_new) => Ok(Handled::event(Event::Received {
+                    org,
+                    from,
+                    change: Box::new(change),
+                    is_new,
+                })),
                 Err(ClientError::Rejected(e)) => Ok(rejected(e.to_string())),
                 Err(e) => Err(e),
             },
             Message::Have(theirs) => {
                 let diff = kith_sync::diff(&self.store.all_ids()?, &theirs);
                 let to_send = self.changes_for(&diff.to_send)?;
-                let replies = self.offer_frames(&org, &from, &diff.to_request, &to_send);
+                let replies = self.offer_frames(&org, &from, &diff.to_request, &to_send)?;
                 Ok(Handled {
                     event: Event::SyncServed {
                         from,
@@ -341,7 +730,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                     vec![]
                 } else {
                     let wanted = self.changes_for(&want)?;
-                    self.offer_frames(&org, &from, &[], &wanted)
+                    self.offer_frames(&org, &from, &[], &wanted)?
                 };
                 Ok(Handled {
                     event: Event::SyncReceived {
@@ -370,19 +759,15 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 
     fn offer_frames(
-        &self,
+        &mut self,
         org: &str,
         to: &str,
         want: &[ChangeId],
         changes: &[Change],
-    ) -> Vec<kith_protocol::Frame> {
+    ) -> Result<Vec<Frame>, ClientError> {
         sync::offer_bodies(want, changes)
             .into_iter()
-            .map(|body| kith_protocol::Frame::Direct {
-                org: org.into(),
-                to: to.into(),
-                body,
-            })
+            .map(|inner| Ok(direct(org, to, self.app_body(org, &inner)?)))
             .collect()
     }
 
@@ -457,320 +842,4 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn client() -> Client<MemoryStore> {
-        Client::new(DeviceKey::generate(), MemoryStore::new())
-    }
-
-    /// req: REQ-DATA-003
-    #[test]
-    fn edits_build_history() {
-        let mut c = client();
-        let created = c.create(ObjectType::new("note"), b"v1".to_vec()).unwrap();
-        let oid = created.body.object_id;
-        let edited = c.edit(oid, b"v2".to_vec()).unwrap();
-        assert_eq!(edited.body.parents, vec![created.change_id]);
-        assert_eq!(c.history(&oid).unwrap().len(), 2);
-    }
-
-    /// req: REQ-DATA-004
-    #[test]
-    fn concurrent_edits_fork_without_locks() {
-        let mut a = client();
-        let mut b = client();
-        let created = a.create(ObjectType::new("note"), b"v1".to_vec()).unwrap();
-        let oid = created.body.object_id;
-        b.receive(created).unwrap();
-
-        let ea = a.edit(oid, b"a".to_vec()).unwrap();
-        let eb = b.edit(oid, b"b".to_vec()).unwrap();
-        a.receive(eb).unwrap();
-        b.receive(ea).unwrap();
-
-        assert_eq!(a.store().heads(&oid).unwrap().len(), 2);
-        assert_eq!(b.store().heads(&oid).unwrap().len(), 2);
-    }
-
-    fn deliver(from: &DeviceKey, c: &Change) -> kith_protocol::Frame {
-        kith_protocol::Frame::Deliver {
-            org: "org".into(),
-            from: from.device_id().to_hex(),
-            body: sync::change_body(c),
-        }
-    }
-
-    /// req: REQ-SYNC-004
-    #[test]
-    fn delivered_change_is_validated_and_stored() {
-        let (ka, mut b) = (DeviceKey::generate(), client());
-        let mut a = Client::new(ka, MemoryStore::new());
-        let c = a.create(ObjectType::new("note"), b"v1".to_vec()).unwrap();
-        let frame = broadcast_frame("org", &c);
-        let kith_protocol::Frame::Broadcast { body, .. } = frame else {
-            panic!("broadcast frame expected")
-        };
-        let delivered = kith_protocol::Frame::Deliver {
-            org: "org".into(),
-            from: a.device_id().to_hex(),
-            body,
-        };
-        let ev = b.handle_frame(delivered.clone()).unwrap().event;
-        assert!(matches!(ev, Event::Received { is_new: true, .. }));
-        assert!(b.store().contains(&c.change_id).unwrap());
-        // Delivered again: valid, but not new.
-        assert!(matches!(
-            b.handle_frame(delivered).unwrap().event,
-            Event::Received { is_new: false, .. }
-        ));
-    }
-
-    /// req: REQ-SYNC-004
-    #[test]
-    fn bad_delivered_changes_are_rejected_not_fatal() {
-        let ka = DeviceKey::generate();
-        let mut b = client();
-        let mut a = Client::new(ka, MemoryStore::new());
-        let mut c = a.create(ObjectType::new("note"), b"v1".to_vec()).unwrap();
-        c.body.payload = b"tampered".to_vec();
-        let from = DeviceKey::generate();
-        assert!(matches!(
-            b.handle_frame(deliver(&from, &c)).unwrap().event,
-            Event::Rejected { .. }
-        ));
-        assert!(!b.store().contains(&c.change_id).unwrap());
-        let garbage = kith_protocol::Frame::Deliver {
-            org: "org".into(),
-            from: "x".into(),
-            body: vec![1, 2, 3],
-        };
-        assert!(matches!(
-            b.handle_frame(garbage).unwrap().event,
-            Event::Rejected { .. }
-        ));
-    }
-
-    /// req: REQ-PERM-002
-    #[test]
-    fn invalid_change_is_not_stored() {
-        let mut a = client();
-        let mut b = client();
-        let mut c = a.create(ObjectType::new("note"), b"v1".to_vec()).unwrap();
-        c.body.payload = b"tampered".to_vec();
-        assert!(b.receive(c.clone()).is_err());
-        assert!(!b.store().contains(&c.change_id).unwrap());
-    }
-
-    // ---- catch-up sync (REQ-SYNC-001..003) ----
-
-    use std::collections::{BTreeSet, VecDeque};
-
-    use kith_protocol::Frame;
-
-    /// What the relay does with a frame: hand the body to the other device.
-    fn relay(from: &DeviceId, frame: Frame) -> Option<Frame> {
-        match frame {
-            Frame::SyncRequest { org, body }
-            | Frame::Broadcast { org, body }
-            | Frame::Direct { org, body, .. } => Some(Frame::Deliver {
-                org,
-                from: from.to_hex(),
-                body,
-            }),
-            _ => None,
-        }
-    }
-
-    /// `requester` asks `partner` to sync; frames are relayed until none are left.
-    fn run_sync(
-        requester: &mut Client<MemoryStore>,
-        partner: &mut Client<MemoryStore>,
-    ) -> Vec<Event> {
-        let mut queue: VecDeque<(bool, Frame)> =
-            VecDeque::from([(true, requester.sync_request_frame("org").unwrap())]);
-        let mut events = vec![];
-        while let Some((to_partner, frame)) = queue.pop_front() {
-            let from = if to_partner {
-                requester.device_id()
-            } else {
-                partner.device_id()
-            };
-            let Some(delivered) = relay(&from, frame) else {
-                continue;
-            };
-            let handled = if to_partner {
-                partner.handle_frame(delivered)
-            } else {
-                requester.handle_frame(delivered)
-            }
-            .unwrap();
-            events.push(handled.event);
-            queue.extend(handled.replies.into_iter().map(|f| (!to_partner, f)));
-        }
-        events
-    }
-
-    fn ids(c: &Client<MemoryStore>) -> BTreeSet<ChangeId> {
-        c.store().all_ids().unwrap().into_iter().collect()
-    }
-
-    /// req: REQ-SYNC-003
-    #[test]
-    fn empty_device_gets_the_full_history() {
-        let mut a = client();
-        let n1 = a.create(ObjectType::new("note"), b"1".to_vec()).unwrap();
-        a.edit(n1.body.object_id, b"2".to_vec()).unwrap();
-        a.create(ObjectType::new("todo"), b"x".to_vec()).unwrap();
-        let mut b = client();
-        run_sync(&mut b, &mut a);
-        assert_eq!(ids(&b), ids(&a));
-        assert_eq!(b.history(&n1.body.object_id).unwrap().len(), 2);
-        // The received history is usable: edits build on the received heads.
-        let next = b.edit(n1.body.object_id, b"3".to_vec()).unwrap();
-        assert_eq!(next.body.parents.len(), 1);
-    }
-
-    /// req: REQ-SYNC-001
-    /// req: REQ-SYNC-002
-    #[test]
-    fn both_sides_receive_only_what_they_lack() {
-        let mut a = client();
-        let mut b = client();
-        let shared = a
-            .create(ObjectType::new("note"), b"shared".to_vec())
-            .unwrap();
-        b.receive(shared).unwrap();
-        a.create(ObjectType::new("note"), b"only a".to_vec())
-            .unwrap();
-        b.create(ObjectType::new("note"), b"only b".to_vec())
-            .unwrap();
-
-        let events = run_sync(&mut b, &mut a);
-        assert_eq!(ids(&a), ids(&b));
-        assert_eq!(ids(&a).len(), 3);
-        // a served: sends its 1, wants b's 1. b stored 1 and was asked for 1; a stored 1.
-        assert!(matches!(
-            events[0],
-            Event::SyncServed {
-                sending: 1,
-                wanting: 1,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events[1],
-            Event::SyncReceived {
-                stored: 1,
-                known: 0,
-                rejected: 0,
-                requested: 1,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events[2],
-            Event::SyncReceived {
-                stored: 1,
-                requested: 0,
-                ..
-            }
-        ));
-        assert_eq!(events.len(), 3, "no further messages once both sides agree");
-    }
-
-    /// req: REQ-SYNC-002
-    #[test]
-    fn nothing_is_transferred_when_already_in_sync() {
-        let mut a = client();
-        let mut b = client();
-        let c = a.create(ObjectType::new("note"), b"v".to_vec()).unwrap();
-        b.receive(c).unwrap();
-        let events = run_sync(&mut b, &mut a);
-        assert!(matches!(
-            events[0],
-            Event::SyncServed {
-                sending: 0,
-                wanting: 0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events[1],
-            Event::SyncReceived {
-                stored: 0,
-                known: 0,
-                requested: 0,
-                ..
-            }
-        ));
-        assert_eq!(events.len(), 2);
-    }
-
-    /// req: REQ-SYNC-002
-    #[test]
-    fn large_histories_are_split_into_several_offers() {
-        let mut a = client();
-        for _ in 0..3 {
-            a.create(ObjectType::new("blob"), vec![7; 300 * 1024])
-                .unwrap();
-        }
-        let all = a.store().all_ids().unwrap();
-        let changes: Vec<Change> = all
-            .iter()
-            .map(|id| a.store().get(id).unwrap().unwrap())
-            .collect();
-        assert!(sync::offer_bodies(&[], &changes).len() >= 2);
-        let mut b = client();
-        run_sync(&mut b, &mut a);
-        assert_eq!(ids(&b), ids(&a));
-    }
-
-    /// req: REQ-SYNC-001
-    #[test]
-    fn forged_changes_in_an_offer_are_rejected_and_the_rest_is_kept() {
-        let mut a = client();
-        let good = a.create(ObjectType::new("note"), b"good".to_vec()).unwrap();
-        let mut forged = a
-            .create(ObjectType::new("note"), b"forged".to_vec())
-            .unwrap();
-        forged.body.payload = b"tampered".to_vec();
-        let mut b = client();
-        let from = a.device_id();
-        let body = sync::offer_bodies(&[], &[good.clone(), forged.clone()]).remove(0);
-        let handled = b
-            .handle_frame(Frame::Deliver {
-                org: "org".into(),
-                from: from.to_hex(),
-                body,
-            })
-            .unwrap();
-        assert!(matches!(
-            handled.event,
-            Event::SyncReceived {
-                stored: 1,
-                rejected: 1,
-                ..
-            }
-        ));
-        assert!(b.store().contains(&good.change_id).unwrap());
-        assert!(!b.store().contains(&forged.change_id).unwrap());
-    }
-
-    /// req: REQ-SYNC-001
-    #[test]
-    fn malformed_sync_bodies_are_rejected_not_fatal() {
-        let mut b = client();
-        for body in [vec![], vec![2], vec![3, 0, 0, 0, 9], vec![42, 1, 2, 3]] {
-            let h = b
-                .handle_frame(Frame::Deliver {
-                    org: "org".into(),
-                    from: "x".into(),
-                    body,
-                })
-                .unwrap();
-            assert!(matches!(h.event, Event::Rejected { .. }));
-            assert!(h.replies.is_empty());
-        }
-    }
-}
+mod tests;

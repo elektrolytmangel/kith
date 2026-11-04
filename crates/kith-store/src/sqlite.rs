@@ -10,7 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::{Store, StoreError};
 
-const SCHEMA_VERSION: i64 = 1;
+/// 2: `meta` table (MLS state).
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS changes (
@@ -37,6 +38,11 @@ CREATE TABLE IF NOT EXISTS objects (
     object_type    TEXT NOT NULL,
     change_count   INTEGER NOT NULL,
     last_change_ms INTEGER NOT NULL
+);
+-- Small named blobs, e.g. the MLS group state (contains secrets).
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value BLOB NOT NULL
 );
 ";
 
@@ -303,6 +309,36 @@ impl Store for SqliteStore {
         rows.map(|r| Ok(ChangeId(arr(r.map_err(backend)?, "change_id")?)))
             .collect()
     }
+
+    fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.conn
+            .prepare_cached("SELECT value FROM meta WHERE key = ?1")
+            .map_err(backend)?
+            .query_row([key], |r| r.get(0))
+            .optional()
+            .map_err(backend)
+    }
+
+    fn put_meta(&mut self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        // `synchronous = NORMAL` in WAL mode can lose the last commit on power loss.
+        // For the MLS state that could mean reusing an encryption key, so this write
+        // is synced fully.
+        self.conn
+            .execute_batch("PRAGMA synchronous = FULL;")
+            .map_err(backend)?;
+        let res = self
+            .conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(backend);
+        self.conn
+            .execute_batch("PRAGMA synchronous = NORMAL;")
+            .map_err(backend)?;
+        res.map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -360,8 +396,15 @@ mod tests {
             let mut s = SqliteStore::open(&path).unwrap();
             s.put(c.clone()).unwrap();
         }
+        {
+            let mut s = SqliteStore::open(&path).unwrap();
+            assert_eq!(s.get_meta("mls").unwrap(), None);
+            s.put_meta("mls", b"one").unwrap();
+            s.put_meta("mls", b"two").unwrap();
+        }
         let s = SqliteStore::open(&path).unwrap();
         assert_eq!(s.history(&oid).unwrap(), vec![c]);
+        assert_eq!(s.get_meta("mls").unwrap(), Some(b"two".to_vec()));
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
         }
