@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (end of session; work stopped on request)
+- **Last updated:** 2026-11-04 (phase 4 in progress)
 - **Version:** `v0.1.0-alpha.1` released as a pre-release. `main` has moved on (see Log) and is **not released**; the next tag is the user's call.
 - **State of `main` (51e0b8b):** CI green on all 11 jobs; also re-checked locally after the rusqlite 0.41 bump (fmt, clippy, tests, wasm32 per crate, MSRV 1.90).
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
@@ -54,12 +54,15 @@ Work top to bottom; check items off here as they land.
 
 ### Next steps (in order)
 
-Work stopped here on 2026-11-04 at the user's request. Phases 1-3 and the repository setup are done;
-the checked items are in the Log and `git log`. What is left:
+Phases 1-3 and the repository setup are done; the checked items are in the Log and `git log`. What is left:
 
 1. **Phase 4, Encryption (MLS / OpenMLS)**: REQ-ENC-001..004. **Required before any real user data.**
-   Needs an ADR and the user's input first, see *Open questions*. Touches `kith-crypto`, the sync bodies
-   (`crates/kith-client/src/sync.rs`, `broadcast_frame`), the relay (key packages) and all bindings.
+   Design decided ([ADR 0004](docs/adr/0004-mls-openmls-rustcrypto.md)).
+   - [x] 4a `kith_crypto::Groups` (OpenMLS, KeyPackages, add/re-add/remove, commit log, save/restore), MSRV 1.91 (PR `feat/mls-group`).
+   - [ ] 4b Client: every body MLS-encrypted (outer kinds app / commit / welcome / key-package / commit-request),
+     auto commit catch-up on `EpochGap`, re-add flow, `Groups` persisted next to the store; plaintext rejected.
+   - [ ] 4c Bindings (web, Swift/Kotlin): group create, key package, add member, join, state persistence; smoke test.
+   - [ ] 4d Concurrent-commit forks (open, see ADR 0004 *Consequences*).
 2. **Expose merged state in the bindings** (REQ-DATA-004): a JSON-like document API for Swift/Kotlin/JS on top of
    `kith-merge`. Measure the wasm size with Automerge first (it is opt-in via `kith-client/automerge` for that reason).
 3. **Phase 3 follow-ups**: replace the naive full-ID exchange with range-based reconciliation (Negentropy, same
@@ -72,9 +75,6 @@ the checked items are in the Log and `git log`. What is left:
 
 ### Open questions for the user
 
-- **Phase 4 design** (before any code): OpenMLS vs. alternatives, ciphersuite, how key packages are distributed
-  (through the relay?), what the relay may still see (metadata), how the first org/group is created, and how old
-  plaintext data is handled (alpha, so probably "not at all").
 - Release a `v0.1.0-alpha.2` now, or wait for encryption?
 
 ### Open issues
@@ -91,6 +91,10 @@ the checked items are in the Log and `git log`. What is left:
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| MLS ciphersuite `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, OpenMLS + RustCrypto provider | User choice (2026-11-04): reuses Ed25519 device key, pure Rust, builds on wasm32 | Phase 4 ADR 0004 |
+| KeyPackages travel `direct` to an online admin; relay stays stateless | User choice (2026-11-04) | Phase 4 / 5 |
+| Until phase 5: creator makes the group (first admin), low-level `add_member(key_package)` → commit + Welcome | User choice (2026-11-04); invitations wrap it later | Phase 4 |
+| Encryption is a hard break: plaintext bodies rejected, no migration; keep going through the plan after MLS | User choice (2026-11-04), alpha | Phase 4 |
 | Mobile bindings are sans-IO: the app owns the WebSocket, Rust owns the protocol (`RelaySession`) | Keeps tokio/TLS out of iOS/Android builds, uses platform networking | `bindings/ffi/src/lib.rs` |
 | Name `kith`, owner `elektrolytmangel` | User's choice; repo renamed to `kith` | `rename.py` replaces both |
 | License MIT, copyright Marc Muehlheim | User's choice | `LICENSE`. `authors` in Cargo.toml stays "kith contributors" (user said no) |
@@ -118,9 +122,11 @@ the checked items are in the Log and `git log`. What is left:
 
 - **`git pull` over SSH can fail** ("Permission denied (publickey)"). The repo is public: `git fetch https://github.com/elektrolytmangel/kith.git main && git merge --ff-only FETCH_HEAD`. Then check `git log`, otherwise you test a stale `main`.
 - **Cargo.lock matters:** CI uses `--locked`. After changing dependencies run `cargo metadata` (or `cargo update -p ...`) in Docker and commit the lockfile.
-- **automerge** 0.7.x does not compile against current `hexane`; 0.12 needs Rust 1.90 (that is why MSRV is 1.90). Don't downgrade.
+- **automerge** 0.7.x does not compile against current `hexane`; 0.12 needs Rust 1.90. **openmls 0.9 needs 1.91** (current MSRV). Don't downgrade.
 - **Web tests locally:** build the wasm package and relay in `rust:1-bookworm` (`cargo install wasm-pack --locked` into a cached volume), then run `bindings/wasm/tests/smoke.mjs` in the official `node:22` image with `KITH_RELAY_BIN` set (Node 18 from apt can't load the ES module). The apt `binaryen` is too old for `wasm-opt`; CI uses wasm-pack's own.
 - **Don't pipe downloaded installers into `sh`**: the permission classifier blocks it. Use apt, `cargo install --locked` or official images.
+- **OpenMLS on wasm32** needs `openmls/js` (getrandom 0.4 `wasm_js` + web-time); set per target in `kith-crypto/Cargo.toml`.
+- **OpenMLS refuses a Welcome for an existing group** (`GroupAlreadyExists`): `Groups::join` uses `build_from_welcome(..).replace_old_group()`.
 - **Relay bodies:** the first byte of a body is the kind (1 change, 2 have, 3 offer); a client from `v0.1.0-alpha.1` can't talk to current `main`.
 
 ## Working agreements
@@ -157,3 +163,4 @@ the checked items are in the Log and `git log`. What is left:
   Swift/Kotlin `RelaySession` (#25). Phase 3: catch-up sync (#26). Rule changes by the user: the agent merges its own
   PRs when CI is green (#18), continues after each merge. Dependabot #20 (rusqlite 0.41) tested against `main`, merged by the user.
   **Stopped on the user's request** after re-checking `main`; next is Phase 4 (needs a design decision).
+- **2026-11-04**: User answered the phase 4 questions (see *Decisions*). `kith_crypto::Groups` on OpenMLS + ADR 0004, MSRV 1.91 (PR `feat/mls-group`). Next: 4b client integration.

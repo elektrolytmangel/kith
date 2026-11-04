@@ -2,13 +2,15 @@
 //!
 //! - [`DeviceKey`]: Ed25519 key created on first launch; its public key is
 //!   the device ID and it signs every change.
-//! - [`group`]: the MLS (RFC 9420) abstraction. Implemented with OpenMLS in
-//!   phase 4 (see `docs/requirements/encryption.md`).
+//! - [`group`]: MLS (RFC 9420) group encryption with OpenMLS, one group per
+//!   organization ([`Groups`]); see ADR 0004.
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use kith_core::{DeviceId, Signer};
 
 pub mod group;
+
+pub use group::{Added, CommitOutcome, Decrypted, Epoch, GroupError, Groups};
 
 /// A device's long-term signing key.
 pub struct DeviceKey(SigningKey);

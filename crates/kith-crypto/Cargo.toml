@@ -15,6 +15,15 @@ workspace = true
 kith-core.workspace = true
 ed25519-dalek.workspace = true
 thiserror.workspace = true
+openmls.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_traits.workspace = true
+openmls_memory_storage.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+
+# Browser randomness (getrandom wasm_js) and clock (web-time) for OpenMLS:
+# std's clock panics on wasm32-unknown-unknown.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+openmls = { workspace = true, features = ["js"] }

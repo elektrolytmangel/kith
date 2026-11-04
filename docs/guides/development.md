@@ -66,7 +66,7 @@ docker run --rm -v "$PWD":/src:ro -w /src -e CARGO_TARGET_DIR=/tmp/t rust:1-book
   cargo test --workspace --locked &&
   for c in kith-core kith-protocol kith-sync kith-crypto kith-store kith-merge kith-client; do
     cargo check --locked --target wasm32-unknown-unknown -p $c || exit 1; done &&
-  rustup toolchain install 1.90 --profile minimal && RUSTUP_TOOLCHAIN=1.90 cargo check --workspace --locked'
+  rustup toolchain install 1.91 --profile minimal && RUSTUP_TOOLCHAIN=1.91 cargo check --workspace --locked'
 python3 scripts/reqs.py
 scripts/build-wasm.sh web && node bindings/wasm/tests/smoke.mjs   # needs wasm-pack + Node
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7   # after editing workflows

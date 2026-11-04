@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `kith-crypto`: MLS group encryption with OpenMLS (`Groups`, REQ-ENC-001..004, ADR 0004):
+  ciphersuite `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, the device key signs MLS
+  messages, KeyPackages, `create_group`, `add_member`/`readd_member`/`remove_member`, `join`,
+  `encrypt`/`decrypt`, `apply_commit` with epoch-gap detection, `self_update`, a commit log
+  (`commits_since`) and save/restore. Not wired into the client yet.
+
+### Changed
+- MSRV is now Rust 1.91 (required by `openmls` 0.9).
+
+### Added
 - Catch-up sync (REQ-SYNC-001..003): a returning or new device asks one online peer for what it
   lacks and offers what the peer lacks (`Client::sync_request_frame`; answers through
   `Client::handle_frame`, which now returns `Handled { event, replies }`). `LiveClient::catch_up` (Rust),
