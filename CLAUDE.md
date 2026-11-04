@@ -22,4 +22,6 @@ web, Swift, Kotlin) plus a generic relay. Start with [README.md](README.md).
 - Workflow, local commands (Docker, no local Rust toolchain): [docs/guides/development.md](docs/guides/development.md).
 - Requirements: `docs/requirements/`; tag tests `/// req: REQ-…`; run `python3 scripts/reqs.py --write`.
 - Releases: [docs/guides/releasing.md](docs/guides/releasing.md).
-- Branch + PR for every change; the user merges.
+- Branch + PR for every change. Once all CI checks on your PR have passed, merge it yourself
+  (`gh pr merge <n> --merge --delete-branch`, then update local `main`). Never merge with failing or
+  pending checks, never force-push, and tags/releases stay the user's.

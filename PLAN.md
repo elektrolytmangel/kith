@@ -99,6 +99,7 @@ None right now.
 | Publish to GitHub Releases only | User: "not more is needed". No npm/Maven/ghcr/crates.io pushes | `release.yml`, [releasing.md](docs/guides/releasing.md) |
 | First release is the pre-release `v0.1.0-alpha.1` | The library is a phase 1 skeleton; the version should say so | Next steps 1 |
 | Phase 1 starts with SQLite store + key restore in the bindings | Minimum for an app to keep data and device identity across restarts | Next steps 3 |
+| Agent merges its own PRs when all CI checks pass; tags/releases stay the user's | User: "when the CI passes, you merge by yourself" (2026-11-04) | `CLAUDE.md`, Working agreements |
 | Rust core, thin bindings | Same validation/merge logic everywhere | [ADR 0001](docs/adr/0001-monorepo-rust-core-thin-bindings.md) |
 | Requirements as code | Versioned with code, traced to tests | [ADR 0002](docs/adr/0002-requirements-as-code.md) |
 | Randomness only via `kith_core::random_bytes()` (getrandom); no `rand_core` | ed25519-dalek majors change rand_core; seed → `SigningKey::from_bytes` | `crates/kith-core/src/lib.rs`; RFC 8032 test vector guards signatures |
@@ -116,7 +117,9 @@ None right now.
 
 ## Working agreements
 
-- Branch from `main`, open a PR, wait for CI. **The user merges** (agent merges and force-pushes are blocked).
+- Branch from `main`, open a PR, wait for CI. **Once every check is green the agent merges its own PR**
+  (`gh pr merge --merge --delete-branch`; decided 2026-11-04). Never merge on red or pending checks, never
+  force-push. Tags and releases stay the user's.
 - `gh` is logged in as `finocchio-42` (push access, not admin).
 - Commits end with the `Co-Authored-By` line; PR descriptions follow `.github/pull_request_template.md`.
 
@@ -132,3 +135,4 @@ None right now.
 - **2026-11-04**: Added `SqliteStore` (PR `feat/sqlite-store`). Next: key restore in bindings, then store selection in constructors.
 - **2026-11-04**: `v0.1.0-alpha.1` released; label, vulnerability reporting set up; #15 merged. Added key restore to bindings (PR `feat/key-restore`). Next: store selection (SQLite path) in binding constructors.
 - **2026-11-04**: Swift/Kotlin can persist (`KithClient.open`, PR `feat/ffi-sqlite`). Cross-compiling bundled SQLite for iOS/Android is only verified by CI. Next: IndexedDB store for web, then REQ-DATA-004 (Automerge).
+- **2026-11-04**: Rule change (user): agent merges its own PRs once CI is green. CLAUDE.md and Working agreements updated.
