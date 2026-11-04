@@ -62,6 +62,9 @@ pub enum ClientError {
     /// Not a valid device ID.
     #[error(transparent)]
     Id(#[from] IdError),
+    /// A document's JSON or merge patch is invalid (not JSON, or not an object).
+    #[error("invalid document: {0}")]
+    InvalidDocument(String),
 }
 
 /// Connection to the relay (or a direct peer). Implemented per platform:
@@ -910,6 +913,57 @@ impl<S: Store, K: Signer> Client<S, K> {
         );
         self.store.put(change.clone())?;
         Ok(change)
+    }
+}
+
+/// JSON documents (REQ-DATA-004): objects whose changes are Automerge changes,
+/// read and written as JSON. Concurrent patches of different keys both survive;
+/// the same key gets the same winner on every device.
+#[cfg(feature = "automerge")]
+impl<S: Store, K: Signer> Client<S, K> {
+    /// Create a document from a JSON object. Broadcast the returned change like any other.
+    pub fn create_document(&mut self, ty: ObjectType, json: &str) -> Result<Change, ClientError> {
+        let patch = parse_object(json)?;
+        let mut doc = automerge_merger::automerge::AutoCommit::new();
+        let payload =
+            automerge_merger::author(&mut doc, |d| automerge_merger::merge_patch(d, &patch))?
+                // An empty object still needs a change to exist.
+                .unwrap_or_default();
+        self.create(ty, payload)
+    }
+
+    /// Change a document with an RFC 7396 JSON merge patch (`null` removes a key,
+    /// objects merge, other values replace). `None` if the patch changes nothing.
+    pub fn update_document(
+        &mut self,
+        object: ObjectId,
+        patch: &str,
+    ) -> Result<Option<Change>, ClientError> {
+        let patch = parse_object(patch)?;
+        let mut doc = self
+            .materialize(&object, &automerge_merger::AutomergeMerger)?
+            .state;
+        match automerge_merger::author(&mut doc, |d| automerge_merger::merge_patch(d, &patch))? {
+            Some(payload) => Ok(Some(self.edit(object, payload)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The merged state of a document as JSON, all forks included.
+    pub fn document_json(&self, object: &ObjectId) -> Result<String, ClientError> {
+        let doc = self
+            .materialize(object, &automerge_merger::AutomergeMerger)?
+            .state;
+        Ok(automerge_merger::to_json(&doc).to_string())
+    }
+}
+
+#[cfg(feature = "automerge")]
+fn parse_object(json: &str) -> Result<serde_json::Value, ClientError> {
+    match serde_json::from_str(json) {
+        Ok(v @ serde_json::Value::Object(_)) => Ok(v),
+        Ok(_) => Err(ClientError::InvalidDocument("must be a JSON object".into())),
+        Err(e) => Err(ClientError::InvalidDocument(e.to_string())),
     }
 }
 

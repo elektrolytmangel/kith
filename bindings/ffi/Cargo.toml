@@ -25,9 +25,12 @@ required-features = ["cli"]
 cli = ["uniffi/cli"]
 
 [dependencies]
-kith-client.workspace = true
+kith-client = { workspace = true, features = ["automerge"] }
 kith-protocol.workspace = true
 # Native only: the bundled C SQLite does not build for wasm32 (the web package has its own store).
 kith-store = { workspace = true, features = ["sqlite"] }
 uniffi.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

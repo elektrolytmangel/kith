@@ -24,7 +24,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 ### What the library can do today (alpha, phases 1-4 done)
 
-Requirements: 15 implemented, 12 partial, 14 accepted/proposed.
+Requirements: 16 implemented, 11 partial, 15 accepted/proposed.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -34,7 +34,8 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - catch-up: a new or returning device downloads what it lacks from one online peer (`catchUp`);
 - end-to-end encryption (MLS, one group per org): create group, join request + admit, remove, key rotation,
   automatic commit catch-up, re-add and fork resolution; the relay sees only routing metadata;
-- merging concurrent edits (Automerge, pluggable `Merger`): **Rust only** (`Client::materialize`).
+- merging concurrent edits: JSON documents on Automerge on every platform (`createDocument`, `updateDocument`,
+  `documentJson`); pluggable `Merger` in Rust.
 
 **Not usable for real apps yet:**
 
@@ -44,7 +45,6 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | Relay checks device keys but not org membership proofs (any device can join any org id) | Don't expose it publicly | REQ-RELAY-004 |
 | No permission checks on incoming changes | Any device can write anything | REQ-PERM-002 |
 | Sync needs another device online; ID exchange caps at ~32,000 changes per device (`SyncTooLarge`) | Offline-only devices can't catch up | REQ-RELAY-005, REQ-SYNC-002 |
-| Merged state is not exposed in the bindings | Swift/Kotlin/JS apps see forks, not merged documents | REQ-DATA-004 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
 
 Fine for: building and testing an integration. Not fine for: any real user data.
@@ -70,8 +70,8 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
      re-adds it (existing re-add path). Commit requests are served from one epoch earlier so the requester can spot a
      fork; a member's undecryptable message at our own epoch triggers a commit request. Limit: a device that the
      losing commit added must be admitted again (app sees `JoinRequested`). Periodic `rotate_key` stays app-driven.
-2. **Expose merged state in the bindings** (REQ-DATA-004): a JSON-like document API for Swift/Kotlin/JS on top of
-   `kith-merge`. Measure the wasm size with Automerge first (it is opt-in via `kith-client/automerge` for that reason).
+2. [x] **Merged state in the bindings** (REQ-DATA-004): JSON documents (`createDocument`, `updateDocument` with RFC 7396
+   merge patches, `documentJson`) on all platforms (PR `feat/documents`). wasm: 1.97 MB → 3.18 MB with Automerge.
 3. **Phase 3 follow-ups**: replace the naive full-ID exchange with range-based reconciliation (Negentropy, same
    interface in `kith-sync`); offline peers (REQ-RELAY-005 buffer or an always-on client, phase 7).
 4. **Phases 5-8**: invitations + org root key (then relay membership proofs, REQ-RELAY-004), permissions
@@ -127,6 +127,7 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **Signatures must stay byte-identical** across crypto upgrades: keep `rfc8032_test_vector_1` passing.
 - **Local machine has no Rust toolchain.** Run everything in Docker (`rust:1-bookworm`), see [Run CI locally](docs/guides/development.md#run-ci-locally). Android: `cimg/android:2026.10.1`.
 
+- **`git push` over SSH fails intermittently** too. Fallback: `git -c credential.helper='!gh auth git-credential' push https://github.com/elektrolytmangel/kith.git <branch>`, then `gh pr create --head <branch>`.
 - **`git pull` over SSH can fail** ("Permission denied (publickey)"). The repo is public: `git fetch https://github.com/elektrolytmangel/kith.git main && git merge --ff-only FETCH_HEAD`. Then check `git log`, otherwise you test a stale `main`.
 - **Cargo.lock matters:** CI uses `--locked`. After changing dependencies run `cargo metadata` (or `cargo update -p ...`) in Docker and commit the lockfile.
 - **automerge** 0.7.x does not compile against current `hexane`; 0.12 needs Rust 1.90. **openmls 0.9 needs 1.91** (current MSRV). Don't downgrade.
@@ -173,3 +174,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: User answered the phase 4 questions (see *Decisions*). `kith_crypto::Groups` on OpenMLS + ADR 0004, MSRV 1.91 (PR `feat/mls-group`). Next: 4b client integration.
 - **2026-11-04**: #28 merged. Client + bindings on MLS (PR `feat/mls-client`): encrypted bodies, join flow, commit catch-up, re-add, `Store` meta. Smoke test (web, real relay) passes locally. Next: 4d or REQ-DATA-004 bindings.
 - **2026-11-04**: MLS fork resolution (PR `feat/mls-forks`): lower committer ID wins, losers re-added; tests cover both orders and a device that missed the winning commit. Next: REQ-DATA-004 merged state in bindings.
+- **2026-11-04**: JSON documents in all bindings (PR `feat/documents`), wasm 3.18 MB. Next: phase 3 follow-ups (Negentropy).

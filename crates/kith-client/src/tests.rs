@@ -712,3 +712,69 @@ fn a_device_that_missed_the_winning_commit_finds_the_fork_later() {
     assert!(net.devs[2].store().contains(&c.change_id).unwrap());
     assert_converged(&mut net, &[0, 1, 2]);
 }
+
+// ---- JSON documents (REQ-DATA-004) ----
+
+#[cfg(feature = "automerge")]
+mod documents {
+    use super::*;
+
+    fn json(c: &C, oid: &ObjectId) -> serde_json::Value {
+        serde_json::from_str(&c.document_json(oid).unwrap()).unwrap()
+    }
+
+    /// req: REQ-DATA-004
+    #[test]
+    fn concurrent_patches_merge_on_every_device() {
+        let mut net = Net::org(2);
+        let created = net.devs[0]
+            .create_document(ObjectType::new("acme.todo"), r#"{"title":"draft","n":1}"#)
+            .unwrap();
+        let oid = created.body.object_id;
+        let f = net.devs[0].broadcast_frame(ORG, &created).unwrap();
+        net.send(0, vec![f]);
+        // Both edit while apart, then sync.
+        net.offline.insert(1);
+        let a = net.devs[0]
+            .update_document(oid, r#"{"owner":"ann","n":2}"#)
+            .unwrap()
+            .unwrap();
+        let f = net.devs[0].broadcast_frame(ORG, &a).unwrap();
+        net.send(0, vec![f]);
+        net.offline.clear();
+        net.devs[1]
+            .update_document(oid, r#"{"done":true,"title":null}"#)
+            .unwrap()
+            .unwrap();
+        let f = net.devs[1].sync_request_frame(ORG).unwrap();
+        net.send(1, vec![f]);
+
+        let want = serde_json::json!({"owner": "ann", "n": 2, "done": true});
+        assert_eq!(json(&net.devs[0], &oid), want);
+        assert_eq!(json(&net.devs[1], &oid), want);
+        // A patch that changes nothing makes no change.
+        assert!(
+            net.devs[0]
+                .update_document(oid, r#"{"done":true}"#)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bad_documents_are_refused() {
+        let mut c = client();
+        for bad in ["not json", "[1,2]", "3"] {
+            assert!(matches!(
+                c.create_document(ObjectType::new("d"), bad),
+                Err(ClientError::InvalidDocument(_))
+            ));
+        }
+        let empty = c.create_document(ObjectType::new("d"), "{}").unwrap();
+        assert_eq!(c.document_json(&empty.body.object_id).unwrap(), "{}");
+        assert!(matches!(
+            c.document_json(&ObjectId::random()),
+            Err(ClientError::UnknownObject(_))
+        ));
+    }
+}
