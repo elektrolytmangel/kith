@@ -2,8 +2,13 @@
 //!
 //! The [`Store`] trait is the seam apps can implement for their platform
 //! (SQLite on native, IndexedDB on web, ...). [`MemoryStore`] is the
-//! reference implementation used in tests. The SQLite backend lands in
-//! phase 1 (REQ-STORE-001).
+//! reference implementation used in tests. [`SqliteStore`] (feature
+//! `sqlite`, native only) persists to disk (REQ-STORE-001).
+
+#[cfg(feature = "sqlite")]
+mod sqlite;
+#[cfg(feature = "sqlite")]
+pub use sqlite::{ObjectSummary, SqliteStore};
 
 use std::collections::{BTreeMap, HashMap};
 

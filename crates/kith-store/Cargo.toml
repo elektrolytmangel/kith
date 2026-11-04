@@ -14,3 +14,13 @@ workspace = true
 [dependencies]
 kith-core.workspace = true
 thiserror.workspace = true
+rusqlite = { workspace = true, optional = true }
+
+[features]
+default = []
+# SQLite backend (REQ-STORE-001). Native targets only: it bundles C code and
+# does not build for wasm32-unknown-unknown.
+sqlite = ["dep:rusqlite"]
+
+[dev-dependencies]
+kith-crypto.workspace = true

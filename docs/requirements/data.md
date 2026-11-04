@@ -40,10 +40,13 @@ policy agreed by the organization.
 
 ### REQ-STORE-001: SQLite local store
 
-- **Priority:** must | **Phase:** 1 | **Status:** accepted | **Verify:** test | **Source:** design §Local storage
+- **Priority:** must | **Phase:** 1 | **Status:** partial | **Verify:** test | **Source:** design §Local storage
 
 Native clients must store changes append-only in SQLite with a materialized
 objects table that is rebuildable from changes.
+
+`kith_store::SqliteStore` (feature `sqlite`) implements this. Still open: wiring it
+into the bindings, and the IndexedDB store for web.
 
 ### REQ-STORE-002: Pluggable storage
 

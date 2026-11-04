@@ -23,7 +23,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 ### What the library can do today (phase 1 skeleton)
 
-Requirements: 7 implemented, 12 partial, 22 accepted/proposed.
+Requirements: 7 implemented, 13 partial, 21 accepted/proposed.
 
 Works: signed, hash-linked changes; per-object history and fork detection;
 in-memory store; device keys; naive reconciliation; relay routing table; relay
@@ -33,7 +33,7 @@ WebSocket server; the `create` / `edit` / `history` API on every platform.
 
 | Gap | Effect | Requirement |
 | --- | --- | --- |
-| Storage is in memory only | Data lost on restart | REQ-STORE-001 |
+| Bindings still use the in-memory store (`SqliteStore` exists in Rust but is not wired in; web needs IndexedDB) | Data lost on restart | REQ-STORE-001 |
 | Bindings make a new device key per launch (`from_secret_bytes` exists only in Rust) | New identity every start | REQ-PLAT-002, REQ-PLAT-003 |
 | `Transport` is only a trait; no WebSocket client | Clients can't talk to the relay | REQ-SYNC-004 |
 | Relay has no device authentication | Don't expose it publicly | REQ-RELAY-004 |
@@ -63,7 +63,9 @@ Work top to bottom; check items off here as they land.
 3. **Phase 1, Local core** (makes it usable in a real app). Start here, in this order
    (decided 2026-11-03): SQLite store and key restore first, because together they let an app
    keep its data and its device identity across restarts, which is the minimum for real integration.
-   - [ ] REQ-STORE-001: SQLite `Store` in `kith-store` (native); IndexedDB store for the web package.
+   - [x] REQ-STORE-001, native: `SqliteStore` in `kith-store` (feature `sqlite`, off by default because the bundled
+         C SQLite does not build for wasm32; CI tests it explicitly). PR `feat/sqlite-store`.
+   - [ ] REQ-STORE-001, web: IndexedDB store for the web package.
    - [ ] Key restore in bindings: expose key seed in/out in `bindings/ffi` and `bindings/wasm`
          (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`).
    - [ ] Database path / store selection in the binding constructors (`TODO(phase 1)` in `bindings/ffi/src/lib.rs`, `bindings/wasm/src/lib.rs`).
@@ -126,3 +128,4 @@ None right now.
   This plan written; user accepted the recommendations (alpha pre-release, phase 1 starts with store + key restore).
   macOS cancellations diagnosed; CI no longer cancels runs on `main`.
 - **2026-11-04**: Opened the `0.1.0-alpha.1` version-bump PR (Next steps 1). Next: user merges and tags.
+- **2026-11-04**: Added `SqliteStore` (PR `feat/sqlite-store`). Next: key restore in bindings, then store selection in constructors.
