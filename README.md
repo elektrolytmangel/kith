@@ -20,8 +20,9 @@ crates/                    Rust libraries (all logic lives here)
   kith-core/               ids, signed hash-linked change envelope. Pure, no I/O
   kith-protocol/           client ↔ relay wire frames
   kith-crypto/             device keys (Ed25519), MLS group interface
-  kith-store/              Store trait + in-memory backend (SQLite: phase 1)
+  kith-store/              Store trait; in-memory, SQLite, byte codec
   kith-sync/               sans-IO catch-up / reconciliation
+  kith-merge/              Merger trait + Automerge merger (concurrent edits)
   kith-client/             high-level SDK apps embed
   kith-relay/              RAM-only routing table, embeddable
 apps/
@@ -51,7 +52,7 @@ How the pieces depend on each other:
                 └──────┬─────┘             │
                    kith-client ◄───────────┘
         ┌──────────┬───┴──────┬──────────┐
-   kith-store  kith-sync  kith-crypto  kith-protocol ◄── kith-relay ◄── apps/relay-server
+   kith-store  kith-sync  kith-merge  kith-crypto  kith-protocol ◄── kith-relay ◄── apps/relay-server
         └──────────┴────┬─────┘
                     kith-core
 ```

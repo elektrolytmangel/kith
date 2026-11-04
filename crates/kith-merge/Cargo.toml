@@ -1,0 +1,29 @@
+[package]
+name = "kith-merge"
+description = "Deterministic merging of concurrent changes: Merger trait plus Automerge implementation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kith-core.workspace = true
+thiserror.workspace = true
+automerge = { workspace = true, optional = true }
+
+[features]
+default = ["automerge"]
+automerge = ["dep:automerge"]
+
+[dev-dependencies]
+kith-client.workspace = true
+
+# automerge pulls in getrandom 0.4, which needs this feature on wasm32-unknown-unknown
+# (crypto.getRandomValues in browsers and Node). No effect on other targets.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom_wasm = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

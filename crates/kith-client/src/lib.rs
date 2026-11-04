@@ -14,6 +14,9 @@ pub use kith_core::{
     Change, ChangeId, DeviceId, IdError, ObjectId, ObjectType, Signer, UnsignedChange,
 };
 pub use kith_crypto::DeviceKey;
+#[cfg(feature = "automerge")]
+pub use kith_merge::automerge_merger;
+pub use kith_merge::{Materialized, MergeError, Merger};
 pub use kith_store::{MemoryStore, Store, StoreError};
 
 /// Library version (all kith crates are versioned together).
@@ -30,6 +33,9 @@ pub enum ClientError {
     /// Incoming change failed validation.
     #[error("rejected change: {0}")]
     Rejected(#[from] kith_core::ChangeError),
+    /// Merging an object's history failed.
+    #[error(transparent)]
+    Merge(#[from] MergeError),
     /// Object does not exist locally.
     #[error("unknown object {0}")]
     UnknownObject(ObjectId),
@@ -84,6 +90,21 @@ impl<S: Store, K: Signer> Client<S, K> {
         // TODO(phase 6, REQ-PERM-002): check author permissions under the
         // policy as of the change's parents before storing.
         Ok(self.store.put(change)?)
+    }
+
+    /// The merged state of an object: all its changes, including concurrent
+    /// forks, combined by `merger` (REQ-DATA-004). Does not change the store;
+    /// the next `edit` names all current heads as parents, which joins forks.
+    pub fn materialize<M: Merger>(
+        &self,
+        object: &ObjectId,
+        merger: &M,
+    ) -> Result<Materialized<M::State>, ClientError> {
+        let hist = self.store.history(object)?;
+        if hist.is_empty() {
+            return Err(ClientError::UnknownObject(*object));
+        }
+        Ok(merger.materialize(&hist)?)
     }
 
     /// Full change history of an object.
