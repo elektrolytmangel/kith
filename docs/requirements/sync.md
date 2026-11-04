@@ -23,10 +23,15 @@ starting from an empty store.
 
 ### REQ-SYNC-004: Live updates
 
-- **Priority:** must | **Phase:** 2 | **Status:** accepted | **Verify:** test | **Source:** design §Live updates
+- **Priority:** must | **Phase:** 2 | **Status:** partial | **Verify:** test | **Source:** design §Live updates
 
 While online, a client must broadcast each new change; receivers must
 validate before storing.
+
+Done for native Rust: `kith_net::LiveClient` broadcasts via the relay and
+`Client::handle_frame` validates and stores (bad changes are reported as
+`Event::Rejected`). Open: the browser WebSocket client, exposing it in the Swift/Kotlin/JS
+bindings, and encrypting the bodies (phase 4: they are plaintext on the relay today).
 
 ### REQ-SYNC-005: Resumable large syncs
 

@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `kith-net` (native): `RelayConnection` (authenticated WebSocket) and `LiveClient`, which
+  broadcasts each new change and validates received ones (REQ-SYNC-004). `kith-client`:
+  `Client::handle_frame`, `Event`, `announce_frame`, `broadcast_frame`. Optional `tls` feature for `wss://`.
+- `kith-relay-server` is also a library (`app`, `new_state`) so tests can run a relay in-process.
+
+### Fixed
+- Relay: connections are closed with a proper WebSocket close frame instead of being dropped.
+
+### Added
 - Relay: device authentication by challenge/response (REQ-RELAY-004, device-key half). Other frames are
   refused until a device authenticates; connections that don't authenticate within
   `KITH_RELAY_AUTH_TIMEOUT_SECS` (default 10) are closed. `kith_core::verify_signature`,

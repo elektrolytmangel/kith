@@ -50,7 +50,7 @@ Generic code stays in the library. App-specific behaviour plugs in here:
 | Merge strategy for concurrent edits (Automerge, last-writer-wins, ...) | `Merger` trait | `kith-merge` |
 | Storage backend (SQLite, IndexedDB, Core Data...) | `Store` trait | `kith-store` |
 | Key storage (Keychain, Android Keystore, secure enclave) | `Signer` trait | `kith-core` |
-| Transport (relay WebSocket, QUIC, WebRTC, Bluetooth) | `Transport` trait | `kith-client` |
+| Transport (relay WebSocket, QUIC, WebRTC, Bluetooth) | `Transport` trait; `kith-net` is the native WebSocket client | `kith-client`, `kith-net` |
 | Group encryption backend / test double | `GroupCrypto` trait | `kith-crypto` |
 | Relay inside your own server (auth, metrics, hosting) | `RoutingTable` | `kith-relay` |
 | Permission rules per type | policy object (phase 6) | `kith-client` |

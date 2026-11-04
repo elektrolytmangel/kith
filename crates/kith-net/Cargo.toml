@@ -1,0 +1,32 @@
+[package]
+name = "kith-net"
+description = "Native network client: authenticated WebSocket connection to a kith relay and live sync."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# wss:// (TLS) connections, with the webpki root certificates.
+tls = ["tokio-tungstenite/rustls-tls-webpki-roots"]
+
+[dependencies]
+kith-client.workspace = true
+kith-core.workspace = true
+kith-protocol.workspace = true
+kith-store.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+kith-relay-server = { path = "../../apps/relay-server" }
+kith-crypto.workspace = true
+axum.workspace = true

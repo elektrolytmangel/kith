@@ -12,6 +12,10 @@ publish = false
 [lints]
 workspace = true
 
+[lib]
+name = "kith_relay_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kith-relay"
 path = "src/main.rs"
