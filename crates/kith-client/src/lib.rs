@@ -24,8 +24,11 @@ pub use kith_core::{
 pub use kith_crypto::{DeviceKey, GroupError, Groups};
 #[cfg(feature = "automerge")]
 pub use kith_merge::automerge_merger;
+mod files;
 mod org;
 mod sync;
+
+pub use files::{FILE_TYPE, FileInfo, FileRef};
 
 pub use kith_core::membership::{CertChain, Invite, MembershipCert};
 pub use kith_core::policy::{POLICY_TYPE, Policy, PolicyOp, Role, policy_object_id};
@@ -70,6 +73,9 @@ pub enum ClientError {
     /// Not a valid device ID.
     #[error(transparent)]
     Id(#[from] IdError),
+    /// Not all chunks of the file are on this device yet (how many are missing).
+    #[error("file incomplete: {0} chunks missing; fetch it first")]
+    FileIncomplete(usize),
     /// This device belongs to several orgs: say which one (`create_in`).
     #[error("several orgs: choose a scope with create_in")]
     AmbiguousScope,
@@ -302,6 +308,33 @@ pub enum Event {
         /// The peer that will re-add us (hex).
         from: String,
     },
+    /// We sent a peer file chunks it asked for (and told it which we lack).
+    ChunksServed {
+        /// The asking device (hex).
+        to: String,
+        /// Chunks sent.
+        sent: usize,
+        /// Chunks we do not have.
+        missing: usize,
+    },
+    /// File chunks arrived and were verified and stored; `ready` lists files that
+    /// are now complete (`read_file` works).
+    FileChunks {
+        /// The sending device (hex).
+        from: String,
+        /// Chunks stored.
+        stored: usize,
+        /// Files now complete.
+        ready: Vec<ObjectId>,
+    },
+    /// The asked peer lacks some chunks we want; try again later (another peer, or
+    /// once the file's author or the always-on client is online).
+    ChunksMissing {
+        /// The peer (hex).
+        from: String,
+        /// How many it lacks.
+        count: usize,
+    },
     /// We (the subgroup's owner) added `device` to subgroup `org` (`org/name`).
     MemberAdded {
         /// Group key (`org/name`).
@@ -358,6 +391,10 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     kp_asked: std::collections::HashSet<String>,
     /// Announce as an always-on client (REQ-SYNC-006).
     always_on: bool,
+    /// Fetch files' chunks as soon as their `kith.file` arrives.
+    fetch_files: bool,
+    /// Chunks we asked for, per file (RAM).
+    wanted_chunks: std::collections::HashMap<ObjectId, std::collections::HashSet<[u8; 32]>>,
     /// Certificates, root keys, issued invites.
     orgs: org::Orgs,
     /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
@@ -389,6 +426,8 @@ impl<S: Store, K: Signer> Client<S, K> {
             reconciling: Default::default(),
             kp_asked: Default::default(),
             always_on: false,
+            fetch_files: false,
+            wanted_chunks: Default::default(),
             orgs,
             claims: Default::default(),
             policies: Default::default(),
@@ -1810,16 +1849,46 @@ impl<S: Store, K: Signer> Client<S, K> {
                 Ok(rejected("change belongs to another scope".into()))
             }
             Message::Change(change) => match self.receive(change.clone()) {
-                Ok(is_new) => Ok(Handled::event(Event::Received {
-                    org,
-                    from,
-                    change: Box::new(change),
-                    is_new,
-                })),
+                Ok(is_new) => Ok(Handled {
+                    replies: if is_new {
+                        self.eager_fetch(&org, &change)?
+                    } else {
+                        vec![]
+                    },
+                    event: Event::Received {
+                        org,
+                        from,
+                        change: Box::new(change),
+                        is_new,
+                    },
+                }),
                 Err(ClientError::Rejected(e)) => Ok(rejected(e.to_string())),
                 Err(ClientError::Forbidden(e)) => Ok(rejected(e)),
                 Err(e) => Err(e),
             },
+            Message::ChunkWant(ids) => {
+                let (replies, sent, missing) = self.serve_chunks(&org, &scope, &from, &ids)?;
+                Ok(Handled {
+                    replies,
+                    event: Event::ChunksServed {
+                        to: from,
+                        sent,
+                        missing,
+                    },
+                })
+            }
+            Message::Chunks(chunks) => {
+                let (stored, ready) = self.absorb_chunks(&scope, chunks)?;
+                Ok(Handled::event(Event::FileChunks {
+                    from,
+                    stored,
+                    ready,
+                }))
+            }
+            Message::ChunkMissing(ids) => Ok(Handled::event(Event::ChunksMissing {
+                from,
+                count: ids.len(),
+            })),
             Message::Query(query) => {
                 match kith_sync::respond(&self.store.scope_ids(&org_scope(&scope)?)?, &query) {
                     Ok(answer) => Ok(Handled {
@@ -1872,6 +1941,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             }
             Message::Offer { want, changes } => {
                 let (mut stored, mut known, mut rejected_n) = (0, 0, 0);
+                let mut fetches = vec![];
                 for enc in changes {
                     let change = match kith_store::codec::decode_change(&enc) {
                         Ok(c) => c,
@@ -1884,8 +1954,11 @@ impl<S: Store, K: Signer> Client<S, K> {
                         rejected_n += 1;
                         continue;
                     }
-                    match self.receive(change) {
-                        Ok(true) => stored += 1,
+                    match self.receive(change.clone()) {
+                        Ok(true) => {
+                            stored += 1;
+                            fetches.extend(self.eager_fetch(&org, &change)?);
+                        }
                         Ok(false) => known += 1,
                         Err(ClientError::Rejected(_) | ClientError::Forbidden(_)) => {
                             rejected_n += 1
@@ -1894,12 +1967,13 @@ impl<S: Store, K: Signer> Client<S, K> {
                     }
                 }
                 // Reply only if asked, so two offers never ping-pong forever.
-                let replies = if want.is_empty() {
+                let mut replies = if want.is_empty() {
                     vec![]
                 } else {
                     let wanted = self.changes_for(&scope, &want)?;
                     self.offer_frames(&org, &scope, &from, &[], &wanted)?
                 };
+                replies.extend(fetches);
                 Ok(Handled {
                     event: Event::SyncReceived {
                         from,

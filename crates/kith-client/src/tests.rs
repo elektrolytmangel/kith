@@ -1372,3 +1372,154 @@ fn removed_subgroup_members_lose_read_and_write_access() {
             .is_err()
     );
 }
+
+// ---- files (phase 7b) ----
+
+fn big(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i * 31 % 251) as u8).collect()
+}
+
+/// req: REQ-FILE-001
+/// req: REQ-FILE-002
+#[test]
+fn files_arrive_lazily_in_verified_chunks() {
+    let mut net = Net::org(2);
+    let data = big(600 * 1024);
+    let file = net.devs[0]
+        .add_file("video.mp4", "video/mp4", &data)
+        .unwrap();
+    let oid = file.body.object_id;
+    spread(&mut net, 0, &file);
+    // Only the reference travelled: device 1 knows the file but has no chunks yet.
+    let info = net.devs[1].file_info(&oid).unwrap();
+    assert_eq!(
+        (info.name.as_str(), info.size, info.chunks, info.missing),
+        ("video.mp4", data.len() as u64, 3, 3)
+    );
+    assert!(matches!(
+        net.devs[1].read_file(&oid),
+        Err(ClientError::FileIncomplete(3))
+    ));
+    // It asks; a peer serves; the file is complete.
+    let frames = net.devs[1].fetch_file_frames(&ORG, &oid).unwrap();
+    let events = net.send(1, frames);
+    assert!(events.iter().any(
+        |(i, e)| *i == 1 && matches!(e, Event::FileChunks { ready, .. } if ready == &vec![oid])
+    ));
+    assert_eq!(net.devs[1].read_file(&oid).unwrap(), data);
+    assert!(
+        net.devs[1]
+            .fetch_file_frames(&ORG, &oid)
+            .unwrap()
+            .is_empty(),
+        "nothing left to fetch"
+    );
+}
+
+/// req: REQ-FILE-002
+#[test]
+fn eager_devices_fetch_files_as_they_arrive() {
+    let mut net = Net::org(2);
+    net.devs[1].set_fetch_files(true);
+    let data = big(10_000);
+    let file = net.devs[0].add_file("a.txt", "text/plain", &data).unwrap();
+    let events = spread(&mut net, 0, &file);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 1 && matches!(e, Event::FileChunks { stored: 1, .. }))
+    );
+    assert_eq!(net.devs[1].read_file(&file.body.object_id).unwrap(), data);
+}
+
+/// req: REQ-FILE-002
+/// req: REQ-PERM-003
+#[test]
+fn subgroup_files_stay_in_the_subgroup_and_peers_without_chunks_say_so() {
+    let mut net = Net::org(3);
+    with_finance(&mut net, &[1]);
+    let data = big(5_000);
+    let file = net.devs[0]
+        .add_file_in(finance(), "q3.pdf", "application/pdf", &data)
+        .unwrap();
+    let oid = file.body.object_id;
+    spread(&mut net, 0, &file);
+    // Device 2 never sees the reference, and asking for the chunk IDs in the org
+    // scope gets nothing: chunks are served only within their scope.
+    assert!(net.devs[2].file_info(&oid).is_err());
+    let ids = net.devs[1].missing_chunks(&oid).unwrap();
+    let body = net.devs[2]
+        .app_body(&ORG, &sync::chunk_want_bodies(&ids)[0])
+        .unwrap();
+    let from = hex(&net.devs[2]);
+    let h = net.devs[0]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body,
+        })
+        .unwrap();
+    assert!(matches!(
+        h.event,
+        Event::ChunksServed {
+            sent: 0,
+            missing: 1,
+            ..
+        }
+    ));
+    // Member 1 fetches it from the subgroup.
+    let frames = net.devs[1].fetch_file_frames(&ORG, &oid).unwrap();
+    net.send(1, frames);
+    assert_eq!(net.devs[1].read_file(&oid).unwrap(), data);
+    // A peer that lacks the chunks says so: device 0 asks device 1 for a file whose
+    // chunks only device 0 has.
+    let only0 = net.devs[0].add_file("x", "x", &big(10)).unwrap();
+    spread(&mut net, 0, &only0);
+    let wanted = net.devs[1].missing_chunks(&only0.body.object_id).unwrap();
+    let body = net.devs[0]
+        .app_body(&ORG, &sync::chunk_want_bodies(&wanted)[0])
+        .unwrap();
+    let from = hex(&net.devs[0]);
+    let h = net.devs[1]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body,
+        })
+        .unwrap();
+    assert!(matches!(
+        h.event,
+        Event::ChunksServed {
+            sent: 0,
+            missing: 1,
+            ..
+        }
+    ));
+}
+
+/// req: REQ-FILE-001
+#[test]
+fn tampered_chunks_are_not_stored() {
+    let mut net = Net::org(2);
+    let file = net.devs[0].add_file("t", "t", &big(1000)).unwrap();
+    let oid = file.body.object_id;
+    spread(&mut net, 0, &file);
+    net.devs[1].fetch_file_frames(&ORG, &oid).unwrap();
+    let id = net.devs[1].missing_chunks(&oid).unwrap()[0];
+    let body = net.devs[0]
+        .app_body(
+            &ORG,
+            &sync::chunks_bodies(&[(id, b"not the chunk".to_vec())])[0],
+        )
+        .unwrap();
+    let from = hex(&net.devs[0]);
+    let h = net.devs[1]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body,
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::FileChunks { stored: 0, .. }));
+    assert_eq!(net.devs[1].missing_chunks(&oid).unwrap().len(), 1);
+}

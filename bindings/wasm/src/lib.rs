@@ -452,6 +452,85 @@ impl KithClient {
         self.inner.borrow().document_json(&oid).map_err(js_err)
     }
 
+    /// Store a file (encrypted, in chunks) in the default scope; returns its object
+    /// ID. Broadcast to the other online devices when connected; they fetch the
+    /// chunks with `fetchFile`.
+    #[wasm_bindgen(js_name = addFile)]
+    pub fn add_file(&mut self, name: &str, mime: &str, data: &[u8]) -> Result<String, JsError> {
+        let c = self
+            .inner
+            .borrow_mut()
+            .add_file(name, mime, data)
+            .map_err(js_err)?;
+        self.broadcast(&c);
+        Ok(c.body.object_id.to_hex())
+    }
+
+    /// `addFile` in `scope` (an org ID, `org/subgroup`, or `"local"`).
+    #[wasm_bindgen(js_name = addFileIn)]
+    pub fn add_file_in(
+        &mut self,
+        scope: &str,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> Result<String, JsError> {
+        let scope = kith_client::Scope::parse(scope).map_err(js_err)?;
+        let c = self
+            .inner
+            .borrow_mut()
+            .add_file_in(scope, name, mime, data)
+            .map_err(js_err)?;
+        self.broadcast(&c);
+        Ok(c.body.object_id.to_hex())
+    }
+
+    /// `{name, mime, size, chunks, missing}` of a file object.
+    #[wasm_bindgen(js_name = fileInfo)]
+    pub fn file_info(&self, object_id: &str) -> Result<js_sys::Object, JsError> {
+        let oid = ObjectId::from_hex(object_id).map_err(js_err)?;
+        let i = self.inner.borrow().file_info(&oid).map_err(js_err)?;
+        let o = js_sys::Object::new();
+        for (k, v) in [
+            ("name", JsValue::from_str(&i.name)),
+            ("mime", JsValue::from_str(&i.mime)),
+            ("size", JsValue::from_f64(i.size as f64)),
+            ("chunks", JsValue::from_f64(i.chunks as f64)),
+            ("missing", JsValue::from_f64(i.missing as f64)),
+        ] {
+            js_sys::Reflect::set(&o, &k.into(), &v).map_err(|_| JsError::new("object"))?;
+        }
+        Ok(o)
+    }
+
+    /// The contents of a file whose chunks are all here (`fetchFile` first).
+    #[wasm_bindgen(js_name = readFile)]
+    pub fn read_file(&self, object_id: &str) -> Result<Vec<u8>, JsError> {
+        let oid = ObjectId::from_hex(object_id).map_err(js_err)?;
+        self.inner.borrow().read_file(&oid).map_err(js_err)
+    }
+
+    /// Fetch a file's missing chunks from a peer; `fileChunks` events report
+    /// progress (`ready` lists complete files), `chunksMissing` if the peer lacks some.
+    #[wasm_bindgen(js_name = fetchFile)]
+    pub fn fetch_file(&self, object_id: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let oid = ObjectId::from_hex(object_id).map_err(js_err)?;
+        let frames = self
+            .inner
+            .borrow_mut()
+            .fetch_file_frames(live.org(), &oid)
+            .map_err(js_err)?;
+        live.send(&frames);
+        Ok(())
+    }
+
+    /// Fetch every new file's chunks as soon as it arrives (default: only on `fetchFile`).
+    #[wasm_bindgen(js_name = setFetchFiles)]
+    pub fn set_fetch_files(&self, eager: bool) {
+        self.inner.borrow_mut().set_fetch_files(eager);
+    }
+
     /// Number of changes in an object's history.
     #[wasm_bindgen(js_name = historyLength)]
     pub fn history_length(&self, object_id: &str) -> Result<usize, JsError> {

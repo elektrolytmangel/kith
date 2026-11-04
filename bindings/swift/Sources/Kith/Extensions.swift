@@ -137,6 +137,11 @@ public final class RelayConnection {
         send(try session.rotateKey())
     }
 
+    /// Fetch a file's missing chunks from a peer; `.fileChunks` events report progress.
+    public func fetchFile(_ objectId: String) throws {
+        for frame in try session.fetchFile(objectId: objectId) { send(frame) }
+    }
+
     /// Close the connection.
     public func stop() {
         task.cancel(with: .normalClosure, reason: nil)

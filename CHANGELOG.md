@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Encrypted files (REQ-FILE-001/002, ADR 0009): `kith_crypto::files` (XChaCha20-Poly1305 chunks of
+  256 KiB, chunk ID = SHA-256 of the ciphertext), `Store::put_chunk` / `get_chunk` (SQLite table,
+  IndexedDB version 3), `kith.file` objects. `Client::add_file(_in)`, `file_info`, `missing_chunks`,
+  `read_file`, `fetch_file_frames`, `set_fetch_files`; events `ChunksServed`, `FileChunks`,
+  `ChunksMissing`. Web `addFile`, `addFileIn`, `fileInfo`, `readFile`, `fetchFile`, `setFetchFiles`;
+  FFI the same; the always-on client fetches eagerly.
+
+### Added
 - Always-on client (REQ-SYNC-006): `apps/always-on` (`kith-always-on --data DIR [--join LINK]`, crate
   `kith_always_on`): joins by invite, keeps key + SQLite in a data directory, stays connected with
   backoff, catches up periodically, rotates its group key weekly. Released as

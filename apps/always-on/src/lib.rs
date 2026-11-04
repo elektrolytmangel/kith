@@ -146,6 +146,8 @@ pub async fn run(
     let relay = read(dir, "relay")?;
     let mut client = open_client(dir)?;
     client.set_always_on(true);
+    // It holds everything, files included, so others can always fetch from it.
+    client.set_fetch_files(true);
     tracing::info!(device = %client.device_id(), %org, %relay, "always-on client starting");
     tokio::pin!(stop);
     let mut backoff = Duration::from_secs(1);
@@ -168,6 +170,7 @@ pub async fn run(
                 backoff = (backoff * 2).min(options.max_backoff);
                 client = open_client(dir)?;
                 client.set_always_on(true);
+                client.set_fetch_files(true);
                 continue;
             }
         };

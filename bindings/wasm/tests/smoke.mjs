@@ -164,6 +164,15 @@ if (process.env.KITH_RELAY_BIN) {
     await waitFor(evC, (e) => e.type === "receipt" && e.delivered.length === 1, "catch-up receipt");
     assert.throws(() => new kith.KithClient().catchUp(), /not connected/);
 
+    // Files: the reference syncs, chunks are fetched on demand and verified.
+    const bytes = new Uint8Array(300 * 1024).map((_, i) => i % 251);
+    const fileId = a.addFile("photo.raw", "application/octet-stream", bytes);
+    await waitFor(evB, (e) => e.type === "received" && e.objectId === fileId, "b to receive the file reference");
+    assert.equal(b.fileInfo(fileId).missing, 2);
+    b.fetchFile(fileId);
+    await waitFor(evB, (e) => e.type === "fileChunks" && e.ready.includes(fileId), "b to fetch the file");
+    assert.deepEqual(b.readFile(fileId), bytes);
+
     // A read-restricted subgroup: b is in "finance", c is not.
     const fin = `${org}/finance`;
     a.createSubgroup("finance", [b.deviceId()]);

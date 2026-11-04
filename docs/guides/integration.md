@@ -27,6 +27,24 @@ exist on Swift/Kotlin (`createDocument(objectType:json:)`, `updateDocument(objec
 Re-read `documentJson` on `received` / `syncReceived` events. Documents add about
 1.2 MB to the web package (3.2 MB `.wasm` uncompressed).
 
+## Files
+
+Large files are stored encrypted in chunks; only a small reference object syncs
+([ADR 0009](../adr/0009-encrypted-files.md)):
+
+```ts
+const id = client.addFile("photo.jpg", "image/jpeg", bytes); // broadcast like a change
+// On another device, once the reference arrived:
+client.fileInfo(id);          // {name, mime, size, chunks, missing}
+client.fetchFile(id);         // asks a peer (the always-on client first)
+// ... "fileChunks" event with ready: [id], then:
+const back = client.readFile(id);
+```
+
+Devices fetch on demand by default; `setFetchFiles(true)` fetches every new file at
+once (the always-on client does). Files in a subgroup (`addFileIn("<org>/finance",
+...)`) are only served to its members. On the web, chunks are kept in memory.
+
 ## Organizations and encryption
 
 Everything a device sends through the relay is end-to-end encrypted for the

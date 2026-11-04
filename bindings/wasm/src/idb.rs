@@ -11,7 +11,7 @@
 //! second object store, `meta`, and are written through the same way.
 
 use js_sys::{Promise, Reflect, Uint8Array};
-use kith_client::{Change, ChangeId, MemoryStore, ObjectId, Store, StoreError};
+use kith_client::{Change, ChangeId, MemoryStore, ObjectId, Scope, Store, StoreError};
 use kith_store::codec;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -23,8 +23,10 @@ use web_sys::{
 
 const STORE: &str = "changes";
 const META: &str = "meta";
-/// 2: `meta` object store.
-const DB_VERSION: u32 = 2;
+const CHUNKS: &str = "chunks";
+/// 2: `meta` object store. 3: `chunks` (file chunks; key = hex chunk ID, value =
+/// scope + data).
+const DB_VERSION: u32 = 3;
 
 pub struct IdbStore {
     mem: MemoryStore,
@@ -85,6 +87,7 @@ impl IdbStore {
                 // Each fails harmlessly if the store exists (upgrade from version 1).
                 let _ = db.create_object_store_with_optional_parameters(STORE, &params);
                 let _ = db.create_object_store(META);
+                let _ = db.create_object_store(CHUNKS);
             }
         });
         open_req.set_onupgradeneeded(Some(upgrade.unchecked_ref()));
@@ -113,6 +116,21 @@ impl IdbStore {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 
+        let tx = db.transaction_with_str(CHUNKS)?;
+        let store = tx.object_store(CHUNKS)?;
+        let keys = js_sys::Array::from(&request_future(&store.get_all_keys()?).await?);
+        let values = js_sys::Array::from(&request_future(&store.get_all()?).await?);
+        for (k, v) in keys.iter().zip(values.iter()) {
+            let id = k
+                .as_string()
+                .and_then(|h| hex_id(&h))
+                .ok_or("chunk key is not a hex ID")?;
+            let bytes = Uint8Array::new(&v).to_vec();
+            let (scope, data) = split_chunk(&bytes).ok_or("corrupt chunk record")?;
+            mem.put_chunk(&id, &scope, data)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+
         let on_write_error = Closure::<dyn FnMut(Event)>::new(|_: Event| {
             web_sys::console::error_1(&"kith: writing a change to IndexedDB failed".into());
         });
@@ -138,6 +156,23 @@ impl IdbStore {
             .add(&Uint8Array::from(codec::encode_change(change).as_slice()))?;
         Ok(())
     }
+}
+
+fn hex_id(h: &str) -> Option<[u8; 32]> {
+    if h.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(h.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn split_chunk(b: &[u8]) -> Option<(Scope, &[u8])> {
+    let n = u16::from_be_bytes(b.get(..2)?.try_into().ok()?) as usize;
+    let scope = Scope::parse(std::str::from_utf8(b.get(2..2 + n)?).ok()?).ok()?;
+    Some((scope, &b[2 + n..]))
 }
 
 impl Store for IdbStore {
@@ -169,6 +204,29 @@ impl Store for IdbStore {
 
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         self.mem.get_meta(key)
+    }
+
+    /// Chunks are kept in memory too (the `Store` API is synchronous), so very large
+    /// files cost RAM on the web.
+    fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError> {
+        let mut record = Vec::with_capacity(2 + scope.as_str().len() + data.len());
+        record.extend_from_slice(&(scope.as_str().len() as u16).to_be_bytes());
+        record.extend_from_slice(scope.as_str().as_bytes());
+        record.extend_from_slice(data);
+        let key: String = id.iter().map(|b| format!("{b:02x}")).collect();
+        self.write_tx(CHUNKS)
+            .and_then(|s| {
+                s.put_with_key(
+                    &Uint8Array::from(record.as_slice()),
+                    &JsValue::from_str(&key),
+                )
+            })
+            .map_err(|e| StoreError::Backend(js_message(&e)))?;
+        self.mem.put_chunk(id, scope, data)
+    }
+
+    fn get_chunk(&self, id: &[u8; 32]) -> Result<Option<(Scope, Vec<u8>)>, StoreError> {
+        self.mem.get_chunk(id)
     }
 
     /// Queued like change writes: durable once the browser commits the transaction.
