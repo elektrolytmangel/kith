@@ -63,3 +63,5 @@ from this template:
 Follow SemVer. While below 1.0, a minor bump may break the API. Changes to the
 wire protocol or the change envelope always need an ADR and a minor bump,
 plus a `PROTOCOL_VERSION` bump when old and new clients can't talk to each other.
+Every persisted or exchanged format carries a version marker and a golden test; see
+[ADR 0012](../adr/0012-format-stability.md). Breaks are listed under *Breaking* in the changelog.

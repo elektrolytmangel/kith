@@ -155,4 +155,32 @@ mod tests {
         wrong_version[0] = 1; // before scopes
         assert!(decode_change(&wrong_version).is_err());
     }
+
+    /// Format guard: bytes of a fixed encoded change. If this fails, data already
+    /// stored (IndexedDB, files) can no longer be read. Don't update the expected
+    /// value: bump `VERSION`, add a migration and see docs/adr/0012.
+    ///
+    /// req: REQ-STORE-002
+    #[test]
+    fn encoding_v2_is_frozen() {
+        let c = Change::sign(
+            UnsignedChange {
+                scope: Scope::local(),
+                object_id: ObjectId([7; 16]),
+                object_type: ObjectType::new("acme.note"),
+                parents: vec![ChangeId([9; 32])],
+                timestamp_ms: 1_700_000_000_123,
+                payload: b"hello".to_vec(),
+            },
+            &DeviceKey::from_secret_bytes(&[1; 32]),
+        );
+        let hex: String = encode_change(&c)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "02b08afcb3d80e0b8d2559e60b6a06faa22c71e5aaf5063489dd0aab1336f3a705070707070707070707070707070707078a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c0000018bcfe5687bbd76235601f77e2297a1ded88a2d93e37d0478dfa962e79594a5ca673cf6887463f5e70c94f08abba1679688535fd89c2690dfb3dbd3adbecc6a3e786de765040000000961636d652e6e6f7465000000056c6f63616c0000000109090909090909090909090909090909090909090909090909090909090909090000000568656c6c6f"
+        );
+    }
 }

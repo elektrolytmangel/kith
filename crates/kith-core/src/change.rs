@@ -214,4 +214,37 @@ mod tests {
         b.object_type = ObjectType::new("app/custom-binary");
         assert_eq!(Change::sign(b, &key(3)).verify(), Ok(()));
     }
+
+    /// Format guard: ID and signature of a fixed change. If this fails, the signed
+    /// encoding changed and every stored and synced change breaks. Don't update the
+    /// expected values: bump the domain tag, write an ADR and see docs/adr/0012.
+    ///
+    /// req: REQ-DATA-001
+    #[test]
+    fn change_v2_format_is_frozen() {
+        let c = Change::sign(
+            UnsignedChange {
+                scope: Scope::parse(&format!("{}/notes", "ab".repeat(32))).unwrap(),
+                object_id: ObjectId([7; 16]),
+                object_type: ObjectType::new("note"),
+                parents: vec![ChangeId([9; 32])],
+                timestamp_ms: 1_700_000_000_000,
+                payload: b"hello".to_vec(),
+            },
+            &key(1),
+        );
+        assert_eq!(
+            hex_of(c.change_id.as_bytes()),
+            "68b618224ceb84265487bfa52aee63b945f8a005a7a691272cd6d9b3f3795587"
+        );
+        assert_eq!(
+            hex_of(&c.signature),
+            "5eb7492bc1a5d9a631096cf6227dab1a2e464e56995f28498f43ae6ce74dfd0977d7f09dbd4cac06cb52462f024dcb010034a8374d7cb7b6c824ef8fd50aee06"
+        );
+        c.verify().unwrap();
+    }
+
+    fn hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
 }
