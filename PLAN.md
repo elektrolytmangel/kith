@@ -4,9 +4,11 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (phase 4 in progress)
-- **Version:** `v0.1.0-alpha.1` released as a pre-release. `main` has moved on (see Log) and is **not released**; the next tag is the user's call.
-- **State of `main` (51e0b8b):** CI green on all 11 jobs; also re-checked locally after the rusqlite 0.41 bump (fmt, clippy, tests, wasm32 per crate, MSRV 1.90).
+- **Last updated:** 2026-11-04 (end of session; phases 1-7 and 8a/8b merged)
+- **Version:** `v0.1.0-alpha.1` released. `0.1.0-alpha.2` is prepared in **PR #42** (version bump + changelog),
+  waiting for the **user to merge and tag** (`git tag v0.1.0-alpha.2 && git push origin v0.1.0-alpha.2`).
+- **State of `main` (e68a21b, #41 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
+  workspace tests, wasm32 per crate, MSRV 1.91, npm smoke test against the real relay.
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
 
 ## Where things stand
@@ -15,14 +17,14 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 | Area | State |
 | --- | --- |
-| Repository structure | Rust workspace (`crates/`), relay server (`apps/relay-server`), bindings (UniFFI → Swift/Kotlin, wasm-bindgen → npm), docs, requirements, ADRs. See [README](README.md). |
-| Requirements as code | 41 requirements in `docs/requirements/`, traced to tests by `scripts/reqs.py` ([TRACEABILITY.md](docs/requirements/TRACEABILITY.md)). |
-| CI (`ci.yml`) | fmt, clippy, tests on Linux/macOS/Windows, MSRV 1.90, wasm32 per crate, npm build + Node smoke test, UniFFI generation, Swift package + `swift test`, Android AAR, relay image + `/healthz`, requirements check. |
-| Release (`release.yml`) | Tag `vX.Y.Z` → GitHub Release with relay binaries, npm tarball, Swift package + XCFramework, Android AAR, `SHA256SUMS`. GitHub Releases is the only publish target. Dry run verified 2026-11-03 ([run](https://github.com/elektrolytmangel/kith/actions/runs/41680667767)): every package built. |
-| Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41 (#20), automerge 0.12, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
+| Repository structure | Rust workspace (`crates/`), relay server (`apps/relay-server`), always-on client (`apps/always-on`), bindings (UniFFI → Swift/Kotlin, wasm-bindgen → npm), docs, requirements, ADRs. See [README](README.md). |
+| Requirements as code | 43 requirements in `docs/requirements/`, traced to tests by `scripts/reqs.py` ([TRACEABILITY.md](docs/requirements/TRACEABILITY.md)). |
+| CI (`ci.yml`) | fmt, clippy, tests on Linux/macOS/Windows, MSRV 1.91, wasm32 per crate, npm build + Node smoke test, UniFFI generation, Swift package + `swift test`, Android AAR, relay image + `/healthz`, requirements check. |
+| Release (`release.yml`) | Tag `vX.Y.Z` → GitHub Release with relay + always-on binaries, npm tarball, Swift package + XCFramework, Android AAR, `SHA256SUMS`. GitHub Releases is the only publish target. Dry run verified 2026-11-03 ([run](https://github.com/elektrolytmangel/kith/actions/runs/41680667767)): every package built. |
+| Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41, automerge 0.12, openmls 0.9, negentropy 0.5, chacha20poly1305 0.10, argon2 0.6, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
-### What the library can do today (alpha, phases 1-7 done)
+### What the library can do today (alpha, phases 1-7 and 8a/8b done)
 
 Requirements: 31 implemented, 8 partial, 4 accepted/proposed, 1 rejected.
 
@@ -35,8 +37,9 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - invitations: `createOrg`, one-time invite links with short codes, admins, relay-checked certificates;
 - write permissions: roles (viewer/editor/admin), per-type write rules, revocation; enforced on every device;
 - scopes (one store, several orgs) and read-restricted subgroups with their own encryption;
-- encrypted files in verifiable chunks, fetched from any peer; the always-on client `kith-always-on`;
-- end-to-end encryption (MLS, one group per org): create group, join request + admit, remove, key rotation,
+- encrypted files in verifiable chunks, fetched from any peer (falls back to the author); the always-on client `kith-always-on`;
+- relay abuse limits (rate limits, size and connection caps); passphrase-encrypted backups with re-add on restore;
+- end-to-end encryption (MLS, one group per org): admission by invite, remove, key rotation,
   automatic commit catch-up, re-add and fork resolution; the relay sees only routing metadata;
 - merging concurrent edits: JSON documents on Automerge on every platform (`createDocument`, `updateDocument`,
   `documentJson`); pluggable `Merger` in Rust.
@@ -45,13 +48,16 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 
 | Gap | Effect | Requirement |
 | --- | --- | --- |
-| A device added by the losing side of an MLS fork must be admitted again | Rare (two admins at once); app sees `JoinRequested` | ADR 0004 |
+| A device added by the losing side of an MLS fork needs a new invite | Rare (two admins at once) | ADR 0004 |
+| Roles are per device; a user's second device is a separate member | Decided, not built | REQ-ID-002 |
+| Restoring a backup while the original device still runs makes them re-add each other | Restore only when the original is gone | ADR 0010 |
 | A removed device keeps a valid certificate for the relay (connects, sees metadata; cannot decrypt; its writes are revoked) | Relay-level revocation open | REQ-INV-004 |
 | Subgroup membership changes need the subgroup's owner device online; ownership cannot move | ADR 0008 | REQ-PERM-003 |
 | Sync needs another member online | Run the always-on client (`kith-always-on`) | REQ-SYNC-006 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
 
-Fine for: building and testing an integration. Not fine for: any real user data.
+Fine for: building and testing an integration, and trials with users who accept alpha risk. No security review
+yet, and formats may still break between alphas.
 
 ## Plan
 
@@ -60,7 +66,23 @@ Work top to bottom; check items off here as they land.
 
 ### Next steps (in order)
 
-Phases 1-3 and the repository setup are done; the checked items are in the Log and `git log`. What is left:
+1. **User:** merge release PR **#42** and push the tag `v0.1.0-alpha.2`. The agent does not merge this PR.
+2. **REQ-ID-002, users with several devices** (decided 2026-11-04, see *Decisions*): the policy maps devices to
+   users and roles are per user. Any member may invite and admit **its own** additional device: it is linked to
+   the same user with the same role, and can never become admin this way. Admitting other people stays
+   admin-only. Needs: a policy op (e.g. `LinkDevice`), an "own device" invite kind checked on claim, a relay
+   certificate for the new device (today only the root and admins sign certificates, ADR 0005), bindings,
+   ADR 0011. Ask the user first who signs that certificate (see *Open questions*).
+3. **Later (user deferred):** history compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review,
+   resumable large syncs (REQ-SYNC-005), moving subgroup ownership, relay-level certificate revocation.
+4. **Small items:** run the Swift/Kotlin live-sync glue against a real relay on a device or emulator
+   (REQ-SYNC-004 partial); the remaining `partial` platform requirements (REQ-PLAT-002..005, REQ-RELAY-001);
+   mark the repository as a template (owner only).
+
+### Completed phases (reference)
+
+Details are in the ADRs, the Log and `git log`. PRs: #28-#30 MLS, #31 documents, #32 Negentropy, #33-#34
+invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and files, #40 abuse limits, #41 backups.
 
 1. **Phase 4, Encryption (MLS / OpenMLS)**: REQ-ENC-001..004. **Required before any real user data.**
    Design decided ([ADR 0004](docs/adr/0004-mls-openmls-rustcrypto.md)).
@@ -122,15 +144,12 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
      state (certs, root key), **not** the MLS state (restoring old ratchets would reuse encryption keys);
      Argon2id + XChaCha20-Poly1305. `import_backup` restores into a new store; on the next presence the device
      asks an online member to re-add it (existing re-add path). Only when the original device is gone.
-   - [ ] Release PR `v0.1.0-alpha.2` (version bump + changelog) after #39; the user tags.
+   - [x] Release PR `v0.1.0-alpha.2` (#42, version bump + changelog); **the user merges and tags**.
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
-8. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
-   against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
-   many changes (persistence, merge, relay auth, live and catch-up sync) and the relay body format changed.
-
 ### Open questions for the user
 
-- Release a `v0.1.0-alpha.2` now? Encryption, documents and range-based catch-up are on `main` (tags stay the user's).
+- REQ-ID-002: who signs the relay certificate of a member's own new device? Either the member itself, which
+  needs a chain-rule change in ADR 0005, or an admin or the root through the policy. Ask before building.
 
 ### Open issues
 
@@ -146,8 +165,9 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Users with several devices (REQ-ID-002): any member may admit its own extra device (same user, same role, never admin this way); admitting others stays admin-only | User choice (2026-11-04) | Next steps 2 |
 | Phase 8 scope: relay abuse limits first, then encrypted backups; compaction and push wake-ups later | User choice (2026-11-04) | Phase 8 |
-| Prepare a `v0.1.0-alpha.2` release PR (version bump + changelog); the user merges and tags | User choice (2026-11-04) | Release |
+| Prepare a `v0.1.0-alpha.2` release PR (version bump + changelog); **the user merges and tags** | User choice (2026-11-04) | PR #42 |
 | Every signed change names its scope (org or org/subgroup); sync, encryption, permissions per scope | User choice (2026-11-04); also lifts "one org per store" | Phase 6b |
 | Subgroups are managed by org admins through policy ops; one MLS group per subgroup | User choice (2026-11-04) | Phase 6b |
 | After 6b: phase 7 (always-on client, then files) before phase 8 hardening | User choice (2026-11-04) | Plan order |
@@ -196,7 +216,20 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **Don't pipe downloaded installers into `sh`**: the permission classifier blocks it. Use apt, `cargo install --locked` or official images.
 - **OpenMLS on wasm32** needs `openmls/js` (getrandom 0.4 `wasm_js` + web-time); set per target in `kith-crypto/Cargo.toml`.
 - **OpenMLS refuses a Welcome for an existing group** (`GroupAlreadyExists`): `Groups::join` uses `build_from_welcome(..).replace_old_group()`.
-- **Relay bodies:** the first byte of a body is the kind (1 change, 2 have, 3 offer); a client from `v0.1.0-alpha.1` can't talk to current `main`.
+- **Wire formats:** relay bodies are `[outer kind][MLS message]` (0x10-0x18), with inner kinds 1 and 3-8. Changes are
+  signed with `kith/change/v2` (the scope is included). SQLite schema 3 and IndexedDB v3 refuse older data.
+  alpha.1 clients and databases don't work with `main`.
+- **GitHub API flakes** (502s, missed `pull_request` events, "merge already in progress"): retry the merge via REST
+  (`gh api -X PUT repos/.../pulls/N/merge -f merge_method=merge`, poll `.merged`), and delete the branch with
+  `gh api -X DELETE repos/.../git/refs/heads/<branch>`. If a PR shows no checks, close and reopen it.
+- **Stacked PRs:** after the lower PR merges, rebase the next branch onto `main` before pushing. Tests appended at
+  the end of `crates/kith-client/src/tests.rs` conflict, and resolving the conflict can drop a closing brace.
+- **Timing-sensitive tests:** the rate-limit tests accept small ranges. Smoke-test `waitFor` predicates must match
+  the specific object, because events from earlier steps are still in the list.
+- **The relay routes `direct` messages to a device's current connection**, so late answers from a previous session
+  can arrive after a reconnect. Wait for the state you need, not for the first matching event.
+- **Argon2 cost:** crates that depend on `kith-client` build it without `cfg(test)`, so their tests use the real
+  64 MiB cost (about 6 s in debug).
 
 ## Working agreements
 
@@ -246,3 +279,7 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: #38 merged. Encrypted files (PR `feat/files`, ADR 0009); smoke test fetches a file through the relay. Next: phase 8 hardening (needs priorities from the user).
 - **2026-11-04**: User set phase 8 order (abuse limits, then backups) and asked for an alpha.2 release PR. Relay abuse limits + quarantine cap (PR `feat/abuse-limits`). Next: release PR, then 8b backups.
 - **2026-11-04**: Encrypted backups (PR `feat/backups`, ADR 0010); the always-on client exports/restores. Next: alpha.2 release PR.
+- **2026-11-04**: #39-#41 merged (files, with an author fallback added after a CI flake; abuse limits; backups).
+  Release PR #42 opened for the user. The user decided REQ-ID-002 (members admit their own devices). **Stopped
+  on the user's request**; PLAN updated (PR `docs/plan-state`). Next: user merges #42 and tags alpha.2, then
+  REQ-ID-002 (open question first).
