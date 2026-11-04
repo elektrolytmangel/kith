@@ -332,6 +332,12 @@ docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 80
 | --- | --- | --- |
 | `KITH_RELAY_ADDR` | `0.0.0.0:8080` | listen address |
 | `KITH_RELAY_AUTH_TIMEOUT_SECS` | `10` | time a new connection has to authenticate |
+| `KITH_RELAY_DEVICE_FRAMES_PER_SEC` / `_DEVICE_BURST` | `100` / `200` | frames per connection (excess: `rate-limited`, dropped) |
+| `KITH_RELAY_DEVICE_BYTES_PER_SEC` | `4194304` | bytes per connection |
+| `KITH_RELAY_ORG_FRAMES_PER_SEC` | `1000` | routed frames per org, all devices together |
+| `KITH_RELAY_MAX_CONNECTIONS` | `10000` | more are refused with HTTP 503 |
+| `KITH_RELAY_MAX_MESSAGE_BYTES` | `4194304` | larger WebSocket messages close the connection |
+| `KITH_RELAY_MAX_REFUSED` | `200` | refused frames in a row before the relay closes the connection |
 | `RUST_LOG` | `info` | log filter |
 
 Devices authenticate by signing a challenge with their key (`hello` → `challenge` →
@@ -342,4 +348,4 @@ device without a certificate is *pending*: it may only send invite claims (the r
 passes them to the org's online admins) and receive direct messages. A removed device
 keeps a valid certificate until revocation lands (phase 6) but cannot decrypt
 anything. Message bodies are end-to-end encrypted, so the operator sees only
-metadata. There are no rate limits yet (phase 8).
+metadata.

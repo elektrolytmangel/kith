@@ -45,10 +45,15 @@ Rejected (user, 2026-11-04): the relay keeps "stores nothing"; the always-on cli
 
 ### REQ-RELAY-006: Abuse limits
 
-- **Priority:** must | **Phase:** 8 | **Status:** partial | **Verify:** test | **Source:** design §Abuse limits
+- **Priority:** must | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** design §Abuse limits
 
 The relay must enforce a maximum frame size and rate limits per device and per
 organization.
+
+`kith_relay_server::Limits` (env `KITH_RELAY_*`): WebSocket message cap, token buckets
+per connection (frames, bytes) and per org (routed frames), a connection cap, and
+disconnecting persistent abusers. Clients cap quarantined changes per author
+(`MAX_QUARANTINE`).
 
 ### REQ-RELAY-007: Wake-up pushes
 

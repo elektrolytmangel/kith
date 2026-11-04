@@ -1572,3 +1572,33 @@ fn a_peer_without_the_chunks_makes_the_client_ask_the_author() {
     ));
     assert_eq!(net.devs[1].read_file(&oid).unwrap(), data);
 }
+
+// ---- abuse limits (phase 8a) ----
+
+/// req: REQ-RELAY-006
+#[test]
+fn a_misbehaving_member_cannot_fill_our_storage() {
+    let mut net = Net::org(2);
+    let d1 = hex(&net.devs[1]);
+    let demote = net.devs[0].set_role(&ORG, &d1, Role::Viewer).unwrap();
+    spread(&mut net, 0, &demote);
+    let before = net.devs[0].store().all_ids().unwrap().len();
+    for _ in 0..MAX_QUARANTINE + 10 {
+        let c = forged(&net, 1, "note", vec![], ObjectId::random());
+        let _ = net.devs[0].receive(c);
+    }
+    let after = net.devs[0].store().all_ids().unwrap().len();
+    assert_eq!(
+        after - before,
+        MAX_QUARANTINE,
+        "kept up to the cap, then dropped"
+    );
+    // The cap survives a restart (counts are rebuilt from the store).
+    let old = std::mem::replace(&mut net.devs[0], client());
+    let key = DeviceKey::from_secret_bytes(&old.signer().secret_bytes());
+    let Client { store, .. } = old;
+    net.devs[0] = Client::new(key, store).unwrap();
+    let c = forged(&net, 1, "note", vec![], ObjectId::random());
+    let _ = net.devs[0].receive(c.clone());
+    assert!(!net.devs[0].store().contains(&c.change_id).unwrap());
+}

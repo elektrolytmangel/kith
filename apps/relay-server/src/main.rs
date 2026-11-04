@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use kith_relay_server::{app, new_state};
+use kith_relay_server::{Limits, app, new_state_with};
 
 #[tokio::main]
 async fn main() {
@@ -19,10 +19,13 @@ async fn main() {
         .map_or(Duration::from_secs(10), Duration::from_secs);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     tracing::info!(%addr, version = kith_protocol::PROTOCOL_VERSION, "kith relay listening");
-    axum::serve(listener, app(new_state(auth_timeout)))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .expect("server");
+    axum::serve(
+        listener,
+        app(new_state_with(auth_timeout, Limits::from_env())),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .expect("server");
 }

@@ -41,6 +41,11 @@ use kith_crypto::CommitOutcome;
 use kith_protocol::Frame;
 use sync::Outer;
 
+/// Most rejected changes kept (quarantined) per author; beyond that they are
+/// dropped. Honest devices stay far below; it bounds what a misbehaving member can
+/// make others store.
+pub const MAX_QUARANTINE: usize = if cfg!(test) { 20 } else { 1000 };
+
 /// Key under which the MLS state is kept in the [`Store`] (`Store::put_meta`).
 pub const MLS_STATE_KEY: &str = "mls";
 
@@ -406,6 +411,8 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     policies: std::collections::BTreeMap<String, Policy>,
     /// Stored changes the policy does not allow (hidden from history, merge, sync).
     invalid: std::collections::HashSet<ChangeId>,
+    /// Quarantined changes per author (capped at [`MAX_QUARANTINE`]).
+    quarantined: std::collections::HashMap<DeviceId, usize>,
 }
 
 impl<S: Store, K: Signer> Client<S, K> {
@@ -435,6 +442,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             claims: Default::default(),
             policies: Default::default(),
             invalid: Default::default(),
+            quarantined: Default::default(),
         }
         .with_policies()
     }
@@ -556,18 +564,36 @@ impl<S: Store, K: Signer> Client<S, K> {
                 "object belongs to another scope".into(),
             ));
         }
-        let new = self.store.put(change.clone())?;
+        let full = self.quarantined.get(&change.author).copied().unwrap_or(0) >= MAX_QUARANTINE;
         if change.body.object_type.as_str() == POLICY_TYPE {
+            // Policy changes by non-admins never count; past the cap they are not even kept.
+            let admin = change
+                .body
+                .scope
+                .org_id()
+                .and_then(|o| self.policies.get(&o.to_hex()))
+                .is_some_and(|p| p.role_of(&change.author) == Some(Role::Admin));
+            if full && !admin {
+                return Err(ClientError::Forbidden(
+                    "too many rejected changes from this device".into(),
+                ));
+            }
+            let new = self.store.put(change)?;
             if new {
                 self.refresh_policies()?;
             }
             return Ok(new);
         }
         if let Err(e) = self.check_allowed(&change) {
+            // Kept (quarantined) so every device decides the same, up to a cap per
+            // author so a misbehaving member cannot fill our storage (REQ-RELAY-006).
+            if !full && self.store.put(change.clone())? {
+                *self.quarantined.entry(change.author).or_default() += 1;
+            }
             self.invalid.insert(change.change_id);
             return Err(e);
         }
-        Ok(new)
+        Ok(self.store.put(change)?)
     }
 
     fn check_allowed(&self, change: &Change) -> Result<(), ClientError> {
@@ -612,6 +638,7 @@ impl<S: Store, K: Signer> Client<S, K> {
         }
         self.policies = policies;
         self.invalid.clear();
+        self.quarantined.clear();
         if self.policies.is_empty() {
             return Ok(());
         }
@@ -635,6 +662,17 @@ impl<S: Store, K: Signer> Client<S, K> {
                     self.invalid.insert(c.change_id);
                     changed = true;
                 }
+            }
+        }
+        // Quarantine counts per author: rejected changes and policy changes that did not count.
+        for c in &all {
+            let rejected_policy = c.body.object_type.as_str() == POLICY_TYPE
+                && !self
+                    .policies
+                    .values()
+                    .any(|p| p.accepted.contains(&c.change_id));
+            if self.invalid.contains(&c.change_id) || rejected_policy {
+                *self.quarantined.entry(c.author).or_default() += 1;
             }
         }
         Ok(())
