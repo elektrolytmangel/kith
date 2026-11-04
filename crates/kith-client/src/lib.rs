@@ -24,6 +24,7 @@ pub use kith_core::{
 pub use kith_crypto::{DeviceKey, GroupError, Groups};
 #[cfg(feature = "automerge")]
 pub use kith_merge::automerge_merger;
+mod backup;
 mod files;
 mod org;
 mod sync;
@@ -78,6 +79,9 @@ pub enum ClientError {
     /// Not a valid device ID.
     #[error(transparent)]
     Id(#[from] IdError),
+    /// A backup could not be read (wrong passphrase, damaged, not a backup).
+    #[error("backup: {0}")]
+    InvalidBackup(String),
     /// Not all chunks of the file are on this device yet (how many are missing).
     #[error("file incomplete: {0} chunks missing; fetch it first")]
     FileIncomplete(usize),
@@ -394,6 +398,8 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     reconciling: std::collections::HashMap<String, kith_sync::Reconciliation>,
     /// Subgroups we sent our KeyPackage to the owner for (RAM; `sync_request_frames` retries).
     kp_asked: std::collections::HashSet<String>,
+    /// Orgs we asked a peer to re-add us to after a restore (RAM).
+    rejoin_asked: std::collections::HashSet<String>,
     /// Announce as an always-on client (REQ-SYNC-006).
     always_on: bool,
     /// Fetch files' chunks as soon as their `kith.file` arrives.
@@ -434,6 +440,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             readd_asked: Default::default(),
             reconciling: Default::default(),
             kp_asked: Default::default(),
+            rejoin_asked: Default::default(),
             always_on: false,
             fetch_files: false,
             wanted_chunks: Default::default(),
@@ -1168,6 +1175,27 @@ impl<S: Store, K: Signer> Client<S, K> {
             .collect())
     }
 
+    /// A certified member without MLS state for `org` (restored from a backup) asks
+    /// an online peer to re-add it, once.
+    fn rejoin_if_needed(
+        &mut self,
+        org: &str,
+        online: &[String],
+    ) -> Result<Vec<Frame>, ClientError> {
+        let me = self.device_id().to_hex();
+        if self.groups.has_group(org)
+            || self.chain(org).is_none()
+            || self.rejoin_asked.contains(org)
+        {
+            return Ok(vec![]);
+        }
+        let Some(peer) = online.iter().find(|d| **d != me) else {
+            return Ok(vec![]);
+        };
+        self.rejoin_asked.insert(org.into());
+        Ok(vec![self.readd_request_frame(org, org, peer)?])
+    }
+
     /// Ask the member `to` to re-add this device (after a fork or falling too far
     /// behind, REQ-ENC-004): sends a fresh KeyPackage.
     fn readd_request_frame(
@@ -1461,7 +1489,13 @@ impl<S: Store, K: Signer> Client<S, K> {
                 h.replies.extend(self.subgroup_tasks()?);
                 h
             }
-            Frame::Presence { org, online } => Handled::event(Event::Presence { org, online }),
+            Frame::Presence { org, online } => {
+                let replies = self.rejoin_if_needed(&org, &online)?;
+                Handled {
+                    replies,
+                    event: Event::Presence { org, online },
+                }
+            }
             Frame::Receipt { delivered } => Handled::event(Event::Receipt { delivered }),
             Frame::Error { code, message } => Handled::event(Event::RelayError { code, message }),
             _ => return Ok(Handled::event(Event::Ignored)),

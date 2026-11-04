@@ -173,6 +173,28 @@ impl KithClient {
         Ok(self.inner.lock().unwrap().group_members(&org)?)
     }
 
+    /// Restore a device from a backup made with `exportBackup` into a new SQLite
+    /// database at `db_path`. Same identity and data; it rejoins its groups (fresh
+    /// keys) once a member is online. Only when the original device is gone.
+    #[uniffi::constructor]
+    pub fn restore(
+        db_path: String,
+        backup: Vec<u8>,
+        passphrase: String,
+    ) -> Result<Self, KithError> {
+        let store = SqliteStore::open(db_path)?;
+        let c = Client::import_backup(&backup, &passphrase, Box::new(store) as DynStore)?;
+        Ok(Self {
+            inner: Mutex::new(c),
+        })
+    }
+
+    /// A passphrase-encrypted backup of this device (identity, data, files,
+    /// memberships). Anyone with it and the passphrase can act as this device.
+    pub fn export_backup(&self, passphrase: String) -> Result<Vec<u8>, KithError> {
+        Ok(self.inner.lock().unwrap().export_backup(&passphrase)?)
+    }
+
     /// The 32-byte secret key of this device. Store it only in the platform's
     /// secure storage (Keychain, Android Keystore); anyone who has it can
     /// sign as this device.
@@ -859,6 +881,22 @@ mod tests {
         let second = KithClient::open(path, key).unwrap();
         assert_eq!(second.device_id(), device);
         assert_eq!(second.history(created.object_id).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// req: REQ-DATA-006
+    #[test]
+    fn backups_restore_into_a_new_database() {
+        let a = KithClient::new();
+        let note = a.create("note".into(), b"keep me".to_vec()).unwrap();
+        let backup = a.export_backup("pw".into()).unwrap();
+        let dir = std::env::temp_dir().join(format!("kith-ffi-restore-{}", note.change_id));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kith.db").to_string_lossy().into_owned();
+        assert!(KithClient::restore(path.clone(), backup.clone(), "nope".into()).is_err());
+        let b = KithClient::restore(path, backup, "pw".into()).unwrap();
+        assert_eq!(b.device_id(), a.device_id());
+        assert_eq!(b.history(note.object_id).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

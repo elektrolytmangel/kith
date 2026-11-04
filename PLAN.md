@@ -24,7 +24,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 ### What the library can do today (alpha, phases 1-7 done)
 
-Requirements: 30 implemented, 8 partial, 4 accepted/proposed, 1 rejected.
+Requirements: 31 implemented, 8 partial, 4 accepted/proposed, 1 rejected.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -118,7 +118,10 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
    - [x] 8a Relay abuse limits (REQ-RELAY-006, PR `feat/abuse-limits`): WebSocket message/frame caps; token buckets per
      device (frames/s, bytes/s) and per org (frames/s) via env vars; excess → `rate-limited` error and drop, far
      over → disconnect; max connections; client caps quarantined invalid changes per author.
-   - [ ] 8b Encrypted backups: export/import a device's full state (data, MLS state, keys) under a passphrase.
+   - [x] 8b Encrypted backups (PR `feat/backups`, ADR 0010): `export_backup(passphrase)` = device key, changes, chunks, org
+     state (certs, root key), **not** the MLS state (restoring old ratchets would reuse encryption keys);
+     Argon2id + XChaCha20-Poly1305. `import_backup` restores into a new store; on the next presence the device
+     asks an online member to re-add it (existing re-add path). Only when the original device is gone.
    - [ ] Release PR `v0.1.0-alpha.2` (version bump + changelog) after #39; the user tags.
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 8. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
@@ -242,3 +245,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: #37 merged. Always-on client `kith-always-on` + `Membership.always_on` (PR `feat/always-on`), e2e test through the relay. Next: 7b files.
 - **2026-11-04**: #38 merged. Encrypted files (PR `feat/files`, ADR 0009); smoke test fetches a file through the relay. Next: phase 8 hardening (needs priorities from the user).
 - **2026-11-04**: User set phase 8 order (abuse limits, then backups) and asked for an alpha.2 release PR. Relay abuse limits + quarantine cap (PR `feat/abuse-limits`). Next: release PR, then 8b backups.
+- **2026-11-04**: Encrypted backups (PR `feat/backups`, ADR 0010); the always-on client exports/restores. Next: alpha.2 release PR.

@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Encrypted backups (REQ-DATA-006, ADR 0010): `Client::export_backup(passphrase)` /
+  `Client::import_backup(bytes, passphrase, store)` (Argon2id + XChaCha20-Poly1305; device key,
+  changes, file chunks, org state; no MLS state: a restored device asks an online member to re-add
+  it). Web `exportBackup`, `KithClient.restoreBackup`; FFI `exportBackup`, `KithClient.restore`;
+  always-on `--export-backup` / `--restore-backup`.
+
+### Added
 - Relay abuse limits (REQ-RELAY-006): `Limits` (env `KITH_RELAY_DEVICE_FRAMES_PER_SEC`, `_DEVICE_BURST`,
   `_DEVICE_BYTES_PER_SEC`, `_ORG_FRAMES_PER_SEC`, `_MAX_CONNECTIONS`, `_MAX_MESSAGE_BYTES`,
   `_MAX_REFUSED`), `new_state_with`. Excess frames get `rate-limited` and are dropped; persistent

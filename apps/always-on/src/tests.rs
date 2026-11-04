@@ -164,3 +164,29 @@ async fn running_without_joining_is_a_clear_error() {
     assert!(err.to_string().contains("join first"), "{err}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// req: REQ-DATA-006
+#[test]
+fn backups_restore_a_data_directory() {
+    let dir = temp_dir("bk");
+    let mut c = open_client(&dir).unwrap();
+    let org = c.create_org().unwrap();
+    let note = c.create(ObjectType::new("note"), b"kept".to_vec()).unwrap();
+    drop(c);
+    let backup = export_backup(&dir, "pw").unwrap();
+    let other = temp_dir("restored");
+    assert!(restore_backup(&other, &backup, "wrong", "ws://r").is_err());
+    assert_eq!(
+        restore_backup(&other, &backup, "pw", "ws://r").unwrap(),
+        org
+    );
+    assert!(
+        restore_backup(&other, &backup, "pw", "ws://r").is_err(),
+        "not over an existing device"
+    );
+    let restored = open_client(&other).unwrap();
+    assert!(restored.store().contains(&note.change_id).unwrap());
+    assert_eq!(device_id(&other).unwrap(), device_id(&dir).unwrap());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(other);
+}

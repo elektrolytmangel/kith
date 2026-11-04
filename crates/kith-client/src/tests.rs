@@ -1602,3 +1602,55 @@ fn a_misbehaving_member_cannot_fill_our_storage() {
     let _ = net.devs[0].receive(c.clone());
     assert!(!net.devs[0].store().contains(&c.change_id).unwrap());
 }
+
+// ---- backups (phase 8b) ----
+
+/// req: REQ-DATA-006
+#[test]
+fn a_device_restored_from_a_backup_rejoins_and_catches_up() {
+    let mut net = Net::org(2);
+    let note = net.create(1, b"mine");
+    let file = net.devs[1].add_file("f", "f", &big(2000)).unwrap();
+    spread(&mut net, 1, &file);
+    let backup = net.devs[1].export_backup("correct horse").unwrap();
+    assert!(!backup.windows(4).any(|w| w == b"mine"), "encrypted");
+    assert!(matches!(
+        Client::import_backup(&backup, "wrong", MemoryStore::new()),
+        Err(ClientError::InvalidBackup(_))
+    ));
+    // Device 1 is lost; the org goes on without it.
+    net.offline.insert(1);
+    let later = net.create(0, b"while it was gone");
+    // Restored on new hardware: same identity and data, but no MLS keys yet.
+    net.devs[1] = Client::import_backup(&backup, "correct horse", MemoryStore::new()).unwrap();
+    net.offline.clear();
+    let d = &net.devs[1];
+    assert!(d.store().contains(&note.change_id).unwrap());
+    assert_eq!(d.read_file(&file.body.object_id).unwrap(), big(2000));
+    assert!(!d.is_member(&ORG));
+    assert!(!d.membership_proof(&ORG).is_empty(), "still certified");
+    // Seeing a peer online, it asks to be re-added, rejoins and catches up.
+    let online = vec![hex(&net.devs[0]), hex(&net.devs[1])];
+    let h = net.devs[1]
+        .handle_frame(Frame::Presence {
+            org: ORG.clone(),
+            online,
+        })
+        .unwrap();
+    assert_eq!(h.replies.len(), 1);
+    let events = net.send(1, h.replies);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 0 && matches!(e, Event::MemberReAdded { .. }))
+    );
+    assert!(net.devs[1].is_member(&ORG));
+    assert!(net.devs[1].store().contains(&later.change_id).unwrap());
+    // And it works normally again.
+    let c = net.devs[1]
+        .create(ObjectType::new("note"), b"back".to_vec())
+        .unwrap();
+    let events = spread(&mut net, 1, &c);
+    assert_eq!(received_by(&events, 0), 1);
+    assert!(Client::import_backup(b"garbage", "x", MemoryStore::new()).is_err());
+}

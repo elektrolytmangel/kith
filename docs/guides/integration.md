@@ -295,6 +295,19 @@ let frame = client.broadcast_frame("my-org", &change)?; // encrypted; send it to
 
 The always-on client (phase 7) is a headless Rust binary built this way.
 
+## Backups
+
+```ts
+const bytes = client.exportBackup(passphrase);              // identity, data, files, memberships
+const restored = await KithClient.restoreBackup("new-db", bytes, passphrase);
+```
+
+Swift/Kotlin: `client.exportBackup(passphrase:)`, `KithClient.restore(dbPath:backup:passphrase:)`.
+A restored device keeps its identity and data and rejoins its groups with fresh keys
+once a member is online ([ADR 0010](../adr/0010-encrypted-backups.md)). Restore only when
+the original device is gone. The backup is as sensitive as the device: it contains the
+device key (and, for the org's creator, the root key).
+
 ## Always-on client
 
 Devices sync only with peers that are online at the same time. Run one headless
@@ -312,8 +325,10 @@ It keeps its device key and all data in `--data`, announces itself as always-on 
 relay hands it catch-up requests first, reconnects on its own, catches up every 10
 minutes (`--catch-up-secs`) and rotates its group key weekly (`--rotate-days`). It
 holds everything the org can read, so protect the data directory like the device key.
+Back it up with `KITH_BACKUP_PASSPHRASE=... kith-always-on --data DIR --export-backup FILE`
+and restore with `--restore-backup FILE --relay URL` into an empty directory.
 Binaries are release assets (`kith-always-on-<target>.tar.gz`); in Rust, use the
-`kith_always_on` crate (`join`, `run`).
+`kith_always_on` crate (`join`, `run`, `export_backup`, `restore_backup`).
 
 ## Relay
 

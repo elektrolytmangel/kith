@@ -42,6 +42,8 @@ hex = "0.4"
 # File chunk encryption (XChaCha20-Poly1305, REQ-FILE-001); same version OpenMLS uses. Keys and
 # nonces come from kith_core, so no RNG features.
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# Passphrase key derivation for backups (Argon2id); pure Rust, builds for wasm32.
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # Range-based set reconciliation for catch-up (REQ-SYNC-002); sans-IO, no dependencies.
 negentropy = "0.5"
 # Keys are created from getrandom bytes (kith_core::random_bytes), so no RNG trait
