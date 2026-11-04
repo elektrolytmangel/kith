@@ -2,10 +2,26 @@
 # see docs/guides/development.md ("Run CI locally").
 name: CI
 
+# Docs-only changes (Markdown, requirements, ADRs, PLAN.md, issue/PR templates)
+# do not start a run. Nothing in the build reads those files. Consequence: a
+# requirements-only change is not checked here; run `python3 scripts/reqs.py`
+# before pushing one.
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/pull_request_template.md"
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/pull_request_template.md"
   workflow_dispatch:
 
 concurrency:
