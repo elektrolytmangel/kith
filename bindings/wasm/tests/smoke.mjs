@@ -51,13 +51,18 @@ const other = await kith.KithClient.open("other-db", key);
 assert.equal(other.historyLength(oid), 0); // separate database, no data
 
 // The MLS group state is persisted in the same database.
-assert.equal(second.isMember("org-p"), false);
-second.createGroup("org-p");
+const orgP = second.createOrg();
+assert.match(orgP, /^[0-9a-f]{64}$/);
 second.free();
 await new Promise((r) => setTimeout(r, 50));
 const third = await kith.KithClient.open("smoke-db", key);
-assert.equal(third.isMember("org-p"), true);
-assert.deepEqual(third.groupMembers("org-p"), [device]);
+assert.equal(third.isMember(orgP), true);
+assert.equal(third.isAdmin(orgP), true);
+assert.deepEqual(third.groupMembers(orgP), [device]);
+const link = third.createInvite(orgP, "wss://relay.example/v1/ws", 3600);
+const info = kith.KithClient.parseInvite(link);
+assert.equal(info.org, orgP);
+assert.equal(info.relay, "wss://relay.example/v1/ws");
 
 
 // Live sync through a real relay. Needs the relay binary:
@@ -96,18 +101,24 @@ if (process.env.KITH_RELAY_BIN) {
 
     const evA = listen(), evB = listen();
     const a = new kith.KithClient(), b = new kith.KithClient();
-    a.createGroup("org");
-    // a admits every device that asks (an app would ask the user first).
-    a.connect(url, "org", (e) => {
-      if (e.type === "joinRequested") a.addMember(e.keyPackage);
+    const org = a.createOrg();
+    const codes = {};
+    // a admits every valid claim (an app would compare the codes first).
+    a.connect(url, org, (e) => {
+      if (e.type === "inviteClaimed") { codes[e.from] = e.code; a.acceptClaim(e.from); }
       evA.push(e);
     });
-    b.connect(url, "org", (e) => evB.push(e));
-    await waitFor(evA, (e) => e.type === "presence" && e.online.length === 2, "both devices online");
-    b.requestJoin(a.deviceId());
-    await waitFor(evB, (e) => e.type === "joined", "b to join a's group");
-    assert.equal(b.isMember("org"), true);
-    assert.equal(a.groupMembers("org").length, 2);
+    await waitFor(evA, (e) => e.type === "presence" && e.online.length === 1, "a online");
+    const invite = a.createInvite(org, url, 600);
+    // The new device connects as pending (no certificate yet) and claims.
+    b.connect(url, kith.KithClient.parseInvite(invite).org, (e) => evB.push(e));
+    // Sent right after the handshake (the client queues it until then).
+    const codeB = b.claimInvite(invite);
+    await waitFor(evB, (e) => e.type === "joined", "b to join a's org");
+    assert.equal(codes[b.deviceId()], codeB, "both screens show the same code");
+    assert.equal(b.isMember(org), true);
+    assert.equal(a.groupMembers(org).length, 2);
+    await waitFor(evA, (e) => e.type === "presence" && e.online.length === 2, "b online with its certificate");
 
     const objectId = a.create("acme.note", new TextEncoder().encode("from a"));
     const got = await waitFor(evB, (e) => e.type === "received", "b to receive a's change");
@@ -135,9 +146,8 @@ if (process.env.KITH_RELAY_BIN) {
     // requests it on its own); later catchUp calls work the same way.
     const evC = listen();
     const c = new kith.KithClient();
-    c.connect(url, "org", (e) => evC.push(e));
-    await waitFor(evC, (e) => e.type === "presence" && e.online.length === 3, "c online");
-    c.requestJoin(a.deviceId());
+    c.connect(url, org, (e) => evC.push(e));
+    c.claimInvite(a.createInvite(org, url, 600));
     await waitFor(evC, (e) => e.type === "syncReceived" && e.stored > 0, "c to join and catch up");
     assert.equal(c.historyLength(objectId), 2);
     c.catchUp();

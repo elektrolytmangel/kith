@@ -93,8 +93,8 @@ Current state, decisions and next steps: [PLAN.md](PLAN.md).
 Alpha. Working today on Rust, web, Swift and Kotlin: signed change history, SQLite /
 IndexedDB persistence, JSON documents that merge (Automerge), live sync and catch-up
 (range-based reconciliation) through an authenticated relay, and end-to-end
-encryption with one MLS group per organization. Not yet: invitations, permissions,
-files, offline relay buffering. See the
+encryption with one MLS group per organization, and invitations with membership
+certificates the relay checks. Not yet: permissions, files, an always-on client. See the
 [traceability matrix](docs/requirements/TRACEABILITY.md) for per-requirement status.
 
 ## License

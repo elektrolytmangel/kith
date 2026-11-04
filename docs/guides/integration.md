@@ -32,14 +32,24 @@ Re-read `documentJson` on `received` / `syncReceived` events. Documents add abou
 Everything a device sends through the relay is end-to-end encrypted for the
 organization's MLS group ([ADR 0004](../adr/0004-mls-openmls-rustcrypto.md)); the
 relay sees only routing data, sizes and timing. A device must be in the group to send
-or read:
+or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-certificates-invites.md)):
 
-1. The device that creates the organization calls `createGroup(org)` once.
-2. A new device connects and sends a join request to an online member
-   (`requestJoin(memberDeviceId)`, using an ID from a `presence` event).
-3. The member gets a `joinRequested` event with a `keyPackage`; the app decides
-   (for example after the user confirms the device) and calls `addMember(keyPackage)`.
-4. The new device gets `joined` and downloads the history from a peer on its own.
+1. The first device calls `createOrg()`. It returns the **org ID**, the public key of a
+   new org root key that this device keeps. The device is the first admin. Keep a
+   display name for the org in your own data; the ID is 64 hex characters.
+2. An admin calls `createInvite(org, relayUrl, ttlSeconds)` and shares the link (QR
+   code, message). It works once and expires. Treat it like a password.
+3. The new device reads the link (`parseInvite(link)` gives `org` and `relay`), connects
+   to that relay and org, and calls `claimInvite(link)`, which returns a 6-digit code to
+   show. Until it is admitted the relay treats it as *pending*: it can only claim.
+4. The admin that issued the invite gets `inviteClaimed { from, code }`. The app can
+   ask the user to compare the codes on both screens, then calls `acceptClaim(from)` (or
+   `rejectClaim(from)`). Only that admin can accept, and it must be online.
+5. The new device gets `joined` with its membership certificate, announces itself
+   to the relay with it, and downloads the history from a peer on its own.
+
+The creator can make another member an admin with `grantAdmin(deviceId)`; that device
+gets `certificateUpdated { admin: true }` and can then invite too.
 
 Devices that missed group changes while offline catch up automatically
 (`epochBehind`, `commitsApplied` events); one that missed more than the last 256
@@ -47,10 +57,10 @@ changes is re-added automatically by an online member (`reAddRequested`,
 `memberReAdded`). If two devices change the group at the same moment, the group
 forks briefly; kith picks the same winner on every device and re-adds the others
 (`fork` event), with no app action needed. A device that the losing change had
-just added shows up as a new `joinRequested` and needs approval again. Call `rotateKey()` now and then (for example weekly) and
-`removeMember(deviceId)` to revoke a device. The group state contains secrets and is
-saved with the data (`KithClient.open`), so keep the database in app-private storage.
-Until phase 5 (invitations) both devices must be online to add a device.
+just added needs a new invite. Call `rotateKey()` now and then (for example weekly) and
+`removeMember(deviceId)` to revoke a device. The group state, the org root key and open
+invites contain secrets and are saved with the data (`KithClient.open`), so keep the
+database in app-private storage.
 
 Every package is a GitHub Release asset:
 `https://github.com/elektrolytmangel/kith/releases/download/vX.Y.Z/<asset>`. The repository
@@ -86,15 +96,19 @@ Changes are kept in memory and written through to IndexedDB (database `my-app`).
 Live sync with other devices through a relay (see [Relay](#relay) below):
 
 ```ts
-client.createGroup("my-org"); // first device only (see "Organizations and encryption")
-client.connect("wss://relay.example.com/v1/ws", "my-org", (e) => {
-  // e.type: "received" | "rejected" | "presence" | "receipt" | "joinRequested" | "joined" | ...
+const org = client.createOrg(); // first device only (see "Organizations and encryption")
+client.connect("wss://relay.example.com/v1/ws", org, (e) => {
+  // e.type: "received" | "rejected" | "presence" | "receipt" | "inviteClaimed" | "joined" | ...
   if (e.type === "received") render(e.objectId); // the change is already decrypted, validated and stored
-  if (e.type === "joinRequested" && userApproves(e.from)) client.addMember(e.keyPackage);
+  if (e.type === "inviteClaimed" && userConfirmsCode(e.code)) client.acceptClaim(e.from);
 });
 client.create("acme.note", bytes); // now also broadcast (encrypted) to the other online devices
+const link = client.createInvite(org, "wss://relay.example.com/v1/ws", 24 * 3600);
 
-// On a new device: client.connect(...), then client.requestJoin(memberId) and wait for "joined".
+// On the new device:
+const { org: o, relay } = KithClient.parseInvite(link);
+newClient.connect(relay, o, onEvent);
+showCode(newClient.claimInvite(link)); // then wait for "joined"
 ```
 
 Catch up on changes made while this device was offline (and download the history on a
@@ -131,14 +145,16 @@ Live sync with other devices (`RelayConnection` wraps `URLSessionWebSocketTask`;
 protocol logic is in Rust):
 
 ```swift
-try client.createGroup(org: "my-org")   // first device only
+let org = try client.createOrg()   // first device only
 let conn = RelayConnection(client: client, url: URL(string: "wss://relay.example.com/v1/ws")!,
-                           org: "my-org", onEvent: { event in
+                           org: org, onEvent: { event in
     if case .received(_, _, let objectId, _, _) = event { /* decrypted, validated, stored */ }
-    if case .joinRequested(_, _, let keyPackage) = event { try? conn.addMember(keyPackage: keyPackage) }
+    if case .inviteClaimed(_, let from, let code) = event, userConfirms(code) { try? conn.acceptClaim(from) }
 })
 conn.start()
-// On a new device: conn.requestJoin(to: memberId), then wait for `.joined`.
+let link = try client.createInvite(org: org, relay: "wss://relay.example.com/v1/ws", ttlSeconds: 86400)
+// On the new device: let info = try parseInvite(link: link); connect to info.relay / info.org,
+// then `let code = try conn.claim(link)` and wait for `.joined`.
 let change = try client.create(type: "acme.note", text: "hi")
 conn.broadcast(change)   // to the other online devices
 ```
@@ -174,16 +190,16 @@ Live sync with other devices: you own the WebSocket (here OkHttp), `RelaySession
 (Rust) does the protocol:
 
 ```kotlin
-client.createGroup("my-org")            // first device only
-val session = client.relaySession("my-org")
+val org = client.createOrg()           // first device only
+val session = client.relaySession(org)
 val ws = okHttp.newWebSocket(Request.Builder().url("wss://relay.example.com/v1/ws").build(),
     object : WebSocketListener() {
         override fun onOpen(ws: WebSocket, r: Response) { ws.send(session.hello().toByteString()) }
         override fun onMessage(ws: WebSocket, bytes: ByteString) {
             val out = session.receive(bytes.toByteArray())
             out.replies.forEach { ws.send(it.toByteString()) }
-            out.event?.let { /* RelayEvent.Received, .JoinRequested, .Joined, ... */ }
-            // JoinRequested: session.addMember(keyPackage).forEach { ws.send(it.toByteString()) }
+            out.event?.let { /* RelayEvent.Received, .InviteClaimed, .Joined, ... */ }
+            // InviteClaimed: session.acceptClaim(from).forEach { ws.send(it.toByteString()) }
         }
     })
 // after create/edit:
@@ -192,8 +208,8 @@ ws.send(session.broadcast(change.changeId).toByteString())
 
 Catch up with `ws.send(session.catchUp().toByteString())` once a `RelayEvent.Presence` shows
 another device (answers come back through `receive` as `RelayEvent.SyncReceived`). A new
-device sends `session.joinRequest(memberId)` and waits for `RelayEvent.Joined`. Live updates
-only reach online devices.
+device opens the session for `parseInvite(link).org`, sends `session.claim(link).frame` after
+the handshake and waits for `RelayEvent.Joined`. Live updates only reach online devices.
 
 Keep the device key in the Android Keystore: save `client.secretKey()` (encrypted with a
 Keystore key) and restore with `KithClient.withSecretKey(bytes)`.
@@ -239,9 +255,11 @@ docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 80
 | `RUST_LOG` | `info` | log filter |
 
 Devices authenticate by signing a challenge with their key (`hello` → `challenge` →
-`auth`; Rust clients use `kith_client::hello_frame` and `auth_frame`). The relay
-does not check organization membership proofs yet (REQ-RELAY-004, needs the org
-root of trust from phase 5): any device with a valid key can join any org id.
-Message bodies are end-to-end encrypted, so a relay operator cannot read data, but
-without membership proofs anyone can connect to an org id and see its metadata or
-flood it. Don't expose the relay publicly until then.
+`auth`; Rust clients use `kith_client::hello_frame` and `auth_frame`). Then they
+announce orgs with a membership certificate chain, which the relay checks against
+the org ID (the org root public key) without storing anything (REQ-RELAY-004). A
+device without a certificate is *pending*: it may only send invite claims (the relay
+passes them to the org's online admins) and receive direct messages. A removed device
+keeps a valid certificate until revocation lands (phase 6) but cannot decrypt
+anything. Message bodies are end-to-end encrypted, so the operator sees only
+metadata. There are no rate limits yet (phase 8).

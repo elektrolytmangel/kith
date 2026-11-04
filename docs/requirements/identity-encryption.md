@@ -17,7 +17,7 @@ user can have several devices.
 
 ### REQ-ID-003: Organization root of trust
 
-- **Priority:** must | **Phase:** 5 | **Status:** partial | **Verify:** test | **Source:** design §Identity
+- **Priority:** must | **Phase:** 5 | **Status:** implemented | **Verify:** test | **Source:** design §Identity
 
 Creating an organization must create its root key, held by the creator's device;
 the root public key is the org ID, and the creator's device is the first admin

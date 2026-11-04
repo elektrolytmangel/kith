@@ -273,6 +273,12 @@ impl Groups {
             .map_err(backend)
     }
 
+    /// The device a KeyPackage belongs to, after checking its signature and that
+    /// its credential is that device (the kith identity rule).
+    pub fn key_package_device(&self, key_package: &[u8]) -> Result<DeviceId, GroupError> {
+        Ok(self.validate_key_package(key_package)?.1)
+    }
+
     /// Create the group for `org` with this device as the only member (the
     /// creator; it becomes the first admin in phase 5).
     pub fn create_group(&mut self, signer: &dyn Signer, org: &str) -> Result<(), GroupError> {

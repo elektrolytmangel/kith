@@ -4,7 +4,13 @@ use kith_protocol::Frame;
 
 use super::*;
 
-const ORG: &str = "org";
+/// Every test org uses this root key, so its ID is a constant.
+const ROOT_SECRET: [u8; 32] = [7; 32];
+static ORG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    DeviceKey::from_secret_bytes(&ROOT_SECRET)
+        .device_id()
+        .to_hex()
+});
 
 type C = Client<MemoryStore>;
 
@@ -64,12 +70,17 @@ impl Net {
                         .collect(),
                     body,
                 ),
+                // The relay sends claims to the org's admins; here: everyone else.
+                Frame::InviteClaim { body, .. } => (
+                    (0..self.devs.len()).filter(|&i| online(i, self)).collect(),
+                    body,
+                ),
                 _ => continue,
             };
             for t in targets {
                 let handled = self.devs[t]
                     .handle_frame(Frame::Deliver {
-                        org: ORG.into(),
+                        org: ORG.clone(),
                         from: from_hex.clone(),
                         body: body.clone(),
                     })
@@ -81,42 +92,51 @@ impl Net {
         self.events.drain(start..).collect()
     }
 
-    /// Device 0 creates the group, the others ask it to join and it admits them.
+    /// Device 0 creates the org; it invites the others and admits them.
     fn org(n: usize) -> Self {
         let mut net = Self::new(n);
-        net.devs[0].create_group(ORG).unwrap();
+        assert_eq!(
+            net.devs[0].create_org_with_root_key(&ROOT_SECRET).unwrap(),
+            *ORG
+        );
         for i in 1..n {
             net.admit(0, i);
         }
         net
     }
 
+    /// `admin` invites `new`, which claims; `admin` checks the code and accepts.
     fn admit(&mut self, admin: usize, new: usize) {
-        let to = hex(&self.devs[admin]);
-        let req = self.devs[new].join_request_frame(ORG, &to).unwrap();
-        let events = self.send(new, vec![req]);
-        let kp = events
+        let link = self.devs[admin]
+            .create_invite(&ORG, "ws://relay/v1/ws", 60_000)
+            .unwrap();
+        let claim = self.devs[new].claim_invite(&link).unwrap();
+        assert_eq!(claim.org, *ORG);
+        let events = self.send(new, vec![claim.frame]);
+        let code = events
             .into_iter()
             .find_map(|(i, e)| match e {
-                Event::JoinRequested { key_package, .. } if i == admin => Some(key_package),
+                Event::InviteClaimed { code, .. } if i == admin => Some(code),
                 _ => None,
             })
-            .expect("join request reaches the admin");
-        let frames = self.devs[admin].add_member(ORG, &kp).unwrap();
+            .expect("the claim reaches the admin");
+        assert_eq!(code, claim.code, "both screens show the same code");
+        let new_hex = hex(&self.devs[new]);
+        let frames = self.devs[admin].accept_claim(&ORG, &new_hex).unwrap();
         let events = self.send(admin, frames);
         assert!(
             events
                 .iter()
                 .any(|(i, e)| *i == new && matches!(e, Event::Joined { .. }))
         );
-        assert!(self.devs[new].is_member(ORG));
+        assert!(self.devs[new].is_member(&ORG));
     }
 
     fn create(&mut self, who: usize, payload: &[u8]) -> Change {
         let c = self.devs[who]
             .create(ObjectType::new("note"), payload.to_vec())
             .unwrap();
-        let f = self.devs[who].broadcast_frame(ORG, &c).unwrap();
+        let f = self.devs[who].broadcast_frame(&ORG, &c).unwrap();
         self.send(who, vec![f]);
         c
     }
@@ -188,7 +208,7 @@ fn broadcasts_are_encrypted_and_reach_members() {
     let c = net.devs[1]
         .create(ObjectType::new("note"), b"top secret".to_vec())
         .unwrap();
-    let frame = net.devs[1].broadcast_frame(ORG, &c).unwrap();
+    let frame = net.devs[1].broadcast_frame(&ORG, &c).unwrap();
     let Frame::Broadcast { body, .. } = &frame else {
         panic!("broadcast expected")
     };
@@ -212,12 +232,12 @@ fn plaintext_and_outsiders_are_refused() {
         .unwrap();
     // No group: an outsider cannot even produce a broadcast.
     assert!(matches!(
-        outsider.broadcast_frame(ORG, &c),
+        outsider.broadcast_frame(&ORG, &c),
         Err(ClientError::Group(_))
     ));
     // The pre-MLS plaintext body is refused.
     let plain = Frame::Deliver {
-        org: ORG.into(),
+        org: ORG.clone(),
         from: hex(&outsider),
         body: sync::change_body(&c),
     };
@@ -225,14 +245,14 @@ fn plaintext_and_outsiders_are_refused() {
     assert!(matches!(h.event, Event::Rejected { .. }));
     assert!(!net.devs[0].store().contains(&c.change_id).unwrap());
     // An outsider with its own group of the same name cannot write into ours.
-    outsider.create_group(ORG).unwrap();
-    let frame = outsider.broadcast_frame(ORG, &c).unwrap();
+    outsider.create_group(&ORG).unwrap();
+    let frame = outsider.broadcast_frame(&ORG, &c).unwrap();
     let Frame::Broadcast { body, .. } = frame else {
         panic!()
     };
     let h = net.devs[0]
         .handle_frame(Frame::Deliver {
-            org: ORG.into(),
+            org: ORG.clone(),
             from: hex(&outsider),
             body,
         })
@@ -248,11 +268,11 @@ fn relay_cannot_attribute_a_message_to_another_device() {
     let c = net.devs[1]
         .create(ObjectType::new("note"), b"x".to_vec())
         .unwrap();
-    let Frame::Broadcast { body, .. } = net.devs[1].broadcast_frame(ORG, &c).unwrap() else {
+    let Frame::Broadcast { body, .. } = net.devs[1].broadcast_frame(&ORG, &c).unwrap() else {
         panic!()
     };
     let spoofed = Frame::Deliver {
-        org: ORG.into(),
+        org: ORG.clone(),
         from: hex(&net.devs[2]),
         body,
     };
@@ -265,24 +285,24 @@ fn relay_cannot_attribute_a_message_to_another_device() {
 fn removed_device_gets_nothing_new() {
     let mut net = Net::org(3);
     let removed = hex(&net.devs[2]);
-    let f = net.devs[0].remove_member(ORG, &removed).unwrap();
+    let f = net.devs[0].remove_member(&ORG, &removed).unwrap();
     let events = net.send(0, vec![f]);
     assert!(
         events
             .iter()
             .any(|(i, e)| *i == 2 && matches!(e, Event::GroupChanged { removed: true, .. }))
     );
-    assert!(!net.devs[2].is_member(ORG));
+    assert!(!net.devs[2].is_member(&ORG));
     let events = {
         let c = net.devs[0]
             .create(ObjectType::new("note"), b"after".to_vec())
             .unwrap();
-        let f = net.devs[0].broadcast_frame(ORG, &c).unwrap();
+        let f = net.devs[0].broadcast_frame(&ORG, &c).unwrap();
         net.send(0, vec![f])
     };
     assert_eq!(received_by(&events, 1), 1);
     assert_eq!(received_by(&events, 2), 0);
-    assert_eq!(net.devs[1].group_members(ORG).unwrap().len(), 2);
+    assert_eq!(net.devs[1].group_members(&ORG).unwrap().len(), 2);
 }
 
 /// req: REQ-ENC-002
@@ -292,19 +312,19 @@ fn device_that_missed_commits_catches_up_and_gets_the_data() {
     let mut net = Net::org(3);
     net.offline.insert(2);
     for who in [0, 1] {
-        let f = net.devs[who].rotate_key(ORG).unwrap();
+        let f = net.devs[who].rotate_key(&ORG).unwrap();
         net.send(who, vec![f]);
     }
     let missed = net.create(1, b"while you were away");
     net.offline.clear();
-    assert!(net.devs[2].group_epoch(ORG).unwrap() < net.devs[0].group_epoch(ORG).unwrap());
+    assert!(net.devs[2].group_epoch(&ORG).unwrap() < net.devs[0].group_epoch(&ORG).unwrap());
 
     // The next broadcast is from an epoch device 2 has not reached.
     let events = {
         let c = net.devs[0]
             .create(ObjectType::new("note"), b"now".to_vec())
             .unwrap();
-        let f = net.devs[0].broadcast_frame(ORG, &c).unwrap();
+        let f = net.devs[0].broadcast_frame(&ORG, &c).unwrap();
         net.send(0, vec![f])
     };
     assert!(
@@ -318,8 +338,8 @@ fn device_that_missed_commits_catches_up_and_gets_the_data() {
             .any(|(i, e)| *i == 2 && matches!(e, Event::CommitsApplied { applied: 2, .. }))
     );
     assert_eq!(
-        net.devs[2].group_epoch(ORG).unwrap(),
-        net.devs[0].group_epoch(ORG).unwrap()
+        net.devs[2].group_epoch(&ORG).unwrap(),
+        net.devs[0].group_epoch(&ORG).unwrap()
     );
     // The resync after the commits brought both missed changes.
     assert!(net.devs[2].store().contains(&missed.change_id).unwrap());
@@ -331,7 +351,7 @@ fn device_that_missed_commits_catches_up_and_gets_the_data() {
 fn lagging_sender_is_sent_the_commits_it_missed() {
     let mut net = Net::org(2);
     net.offline.insert(1);
-    let f = net.devs[0].rotate_key(ORG).unwrap();
+    let f = net.devs[0].rotate_key(&ORG).unwrap();
     net.send(0, vec![f]);
     net.offline.clear();
     // Device 1 broadcasts from its old epoch; device 0 still reads it (past epoch
@@ -339,7 +359,7 @@ fn lagging_sender_is_sent_the_commits_it_missed() {
     let c = net.devs[1]
         .create(ObjectType::new("note"), b"old epoch".to_vec())
         .unwrap();
-    let f = net.devs[1].broadcast_frame(ORG, &c).unwrap();
+    let f = net.devs[1].broadcast_frame(&ORG, &c).unwrap();
     let events = net.send(1, vec![f]);
     assert_eq!(received_by(&events, 0), 1);
     assert!(
@@ -348,8 +368,8 @@ fn lagging_sender_is_sent_the_commits_it_missed() {
             .any(|(i, e)| *i == 1 && matches!(e, Event::CommitsApplied { applied: 1, .. }))
     );
     assert_eq!(
-        net.devs[1].group_epoch(ORG).unwrap(),
-        net.devs[0].group_epoch(ORG).unwrap()
+        net.devs[1].group_epoch(&ORG).unwrap(),
+        net.devs[0].group_epoch(&ORG).unwrap()
     );
 }
 
@@ -359,12 +379,12 @@ fn device_beyond_the_commit_log_is_readded_automatically() {
     let mut net = Net::org(3);
     net.offline.insert(2);
     for _ in 0..kith_crypto::group::COMMIT_LOG_LEN + 1 {
-        let f = net.devs[0].rotate_key(ORG).unwrap();
+        let f = net.devs[0].rotate_key(&ORG).unwrap();
         net.send(0, vec![f]);
     }
     let missed = net.create(0, b"far away");
     net.offline.clear();
-    let f = net.devs[2].sync_request_frame(ORG).unwrap();
+    let f = net.devs[2].sync_request_frame(&ORG).unwrap();
     let events = net.send(2, vec![f]);
     assert!(events.iter().any(|(i, e)| *i == 0
         && matches!(
@@ -390,13 +410,13 @@ fn device_beyond_the_commit_log_is_readded_automatically() {
             .any(|(i, e)| *i == 2 && matches!(e, Event::Joined { .. }))
     );
     assert!(net.devs[2].store().contains(&missed.change_id).unwrap());
-    assert_eq!(net.devs[1].group_members(ORG).unwrap().len(), 3);
+    assert_eq!(net.devs[1].group_members(&ORG).unwrap().len(), 3);
     // And it can talk again.
     let events = {
         let c = net.devs[2]
             .create(ObjectType::new("note"), b"back".to_vec())
             .unwrap();
-        let f = net.devs[2].broadcast_frame(ORG, &c).unwrap();
+        let f = net.devs[2].broadcast_frame(&ORG, &c).unwrap();
         net.send(2, vec![f])
     };
     assert_eq!(received_by(&events, 0), 1);
@@ -413,12 +433,12 @@ fn group_state_survives_a_restart() {
     let key = DeviceKey::from_secret_bytes(&old.signer().secret_bytes());
     let Client { store, .. } = old;
     net.devs[1] = Client::new(key, store).unwrap();
-    assert!(net.devs[1].is_member(ORG));
+    assert!(net.devs[1].is_member(&ORG));
     let events = {
         let c = net.devs[1]
             .create(ObjectType::new("note"), b"after".to_vec())
             .unwrap();
-        let f = net.devs[1].broadcast_frame(ORG, &c).unwrap();
+        let f = net.devs[1].broadcast_frame(&ORG, &c).unwrap();
         net.send(1, vec![f])
     };
     assert_eq!(received_by(&events, 0), 1);
@@ -434,7 +454,7 @@ fn group_state_survives_a_restart() {
 #[test]
 fn new_member_gets_the_full_history_on_join() {
     let mut net = Net::new(2);
-    net.devs[0].create_group(ORG).unwrap();
+    net.devs[0].create_org_with_root_key(&ROOT_SECRET).unwrap();
     let n1 = net.devs[0]
         .create(ObjectType::new("note"), b"1".to_vec())
         .unwrap();
@@ -462,7 +482,7 @@ fn both_sides_receive_only_what_they_lack() {
     net.create(1, b"only 1");
     net.offline.clear();
 
-    let f = net.devs[1].sync_request_frame(ORG).unwrap();
+    let f = net.devs[1].sync_request_frame(&ORG).unwrap();
     let events: Vec<Event> = net.send(1, vec![f]).into_iter().map(|(_, e)| e).collect();
     assert_eq!(net.ids(0), net.ids(1));
     assert_eq!(net.ids(0).len(), 3);
@@ -502,7 +522,7 @@ fn both_sides_receive_only_what_they_lack() {
 fn nothing_is_transferred_when_already_in_sync() {
     let mut net = Net::org(2);
     net.create(0, b"v");
-    let f = net.devs[1].sync_request_frame(ORG).unwrap();
+    let f = net.devs[1].sync_request_frame(&ORG).unwrap();
     let events: Vec<Event> = net.send(1, vec![f]).into_iter().map(|(_, e)| e).collect();
     assert!(matches!(events[0], Event::SyncServed { .. }));
     assert!(matches!(
@@ -534,18 +554,18 @@ fn large_histories_are_split_into_several_offers() {
         .map(|id| net.devs[0].store().get(id).unwrap().unwrap())
         .collect();
     assert!(sync::offer_bodies(&[], &changes).len() >= 2);
-    let f = net.devs[1].sync_request_frame(ORG).unwrap();
+    let f = net.devs[1].sync_request_frame(&ORG).unwrap();
     net.send(1, vec![f]);
     assert_eq!(net.ids(1), net.ids(0));
 }
 
 /// Deliver an inner message from `from` to `to`, encrypted like a real peer would.
 fn deliver_inner(net: &mut Net, from: usize, to: usize, inner: &[u8]) -> Handled {
-    let body = net.devs[from].app_body(ORG, inner).unwrap();
+    let body = net.devs[from].app_body(&ORG, inner).unwrap();
     let from_hex = hex(&net.devs[from]);
     net.devs[to]
         .handle_frame(Frame::Deliver {
-            org: ORG.into(),
+            org: ORG.clone(),
             from: from_hex,
             body,
         })
@@ -599,7 +619,7 @@ fn malformed_bodies_are_rejected_not_fatal() {
     ] {
         let h = net.devs[1]
             .handle_frame(Frame::Deliver {
-                org: ORG.into(),
+                org: ORG.clone(),
                 from: "x".into(),
                 body,
             })
@@ -624,16 +644,16 @@ fn by_id(net: &Net) -> (usize, usize) {
 /// Every device in `who` is at the same epoch, sees all of `who` as members, and
 /// reaches all the others with a broadcast.
 fn assert_converged(net: &mut Net, who: &[usize]) {
-    let epoch = net.devs[who[0]].group_epoch(ORG).unwrap();
+    let epoch = net.devs[who[0]].group_epoch(&ORG).unwrap();
     for &i in who {
-        assert_eq!(net.devs[i].group_epoch(ORG).unwrap(), epoch, "device {i}");
-        assert_eq!(net.devs[i].group_members(ORG).unwrap().len(), who.len());
+        assert_eq!(net.devs[i].group_epoch(&ORG).unwrap(), epoch, "device {i}");
+        assert_eq!(net.devs[i].group_members(&ORG).unwrap().len(), who.len());
     }
     for &i in who {
         let c = net.devs[i]
             .create(ObjectType::new("note"), format!("from {i}").into_bytes())
             .unwrap();
-        let f = net.devs[i].broadcast_frame(ORG, &c).unwrap();
+        let f = net.devs[i].broadcast_frame(&ORG, &c).unwrap();
         let events = net.send(i, vec![f]);
         for &j in who.iter().filter(|&&j| j != i) {
             assert_eq!(received_by(&events, j), 1, "{i} -> {j}");
@@ -644,8 +664,8 @@ fn assert_converged(net: &mut Net, who: &[usize]) {
 fn concurrent_rotations(winner_sends_first: bool) {
     let mut net = Net::org(3);
     let (lo, hi) = by_id(&net);
-    let f_lo = net.devs[lo].rotate_key(ORG).unwrap();
-    let f_hi = net.devs[hi].rotate_key(ORG).unwrap();
+    let f_lo = net.devs[lo].rotate_key(&ORG).unwrap();
+    let f_hi = net.devs[hi].rotate_key(&ORG).unwrap();
     let (first, second) = if winner_sends_first {
         ((lo, f_lo), (hi, f_hi))
     } else {
@@ -684,8 +704,8 @@ fn concurrent_commits_converge_when_the_loser_is_heard_first() {
 fn a_device_that_missed_the_winning_commit_finds_the_fork_later() {
     let mut net = Net::org(3);
     let (lo, hi) = by_id(&net);
-    let f_lo = net.devs[lo].rotate_key(ORG).unwrap();
-    let f_hi = net.devs[hi].rotate_key(ORG).unwrap();
+    let f_lo = net.devs[lo].rotate_key(&ORG).unwrap();
+    let f_hi = net.devs[hi].rotate_key(&ORG).unwrap();
     // Device 2 follows the losing commit and is offline for the winning one.
     net.send(hi, vec![f_hi]);
     net.offline.insert(2);
@@ -696,7 +716,7 @@ fn a_device_that_missed_the_winning_commit_finds_the_fork_later() {
     let c = net.devs[lo]
         .create(ObjectType::new("note"), b"after the fork".to_vec())
         .unwrap();
-    let f = net.devs[lo].broadcast_frame(ORG, &c).unwrap();
+    let f = net.devs[lo].broadcast_frame(&ORG, &c).unwrap();
     let events = net.send(lo, vec![f]);
     assert!(
         events
@@ -725,7 +745,7 @@ mod documents {
             .create_document(ObjectType::new("acme.todo"), r#"{"title":"draft","n":1}"#)
             .unwrap();
         let oid = created.body.object_id;
-        let f = net.devs[0].broadcast_frame(ORG, &created).unwrap();
+        let f = net.devs[0].broadcast_frame(&ORG, &created).unwrap();
         net.send(0, vec![f]);
         // Both edit while apart, then sync.
         net.offline.insert(1);
@@ -733,14 +753,14 @@ mod documents {
             .update_document(oid, r#"{"owner":"ann","n":2}"#)
             .unwrap()
             .unwrap();
-        let f = net.devs[0].broadcast_frame(ORG, &a).unwrap();
+        let f = net.devs[0].broadcast_frame(&ORG, &a).unwrap();
         net.send(0, vec![f]);
         net.offline.clear();
         net.devs[1]
             .update_document(oid, r#"{"done":true,"title":null}"#)
             .unwrap()
             .unwrap();
-        let f = net.devs[1].sync_request_frame(ORG).unwrap();
+        let f = net.devs[1].sync_request_frame(&ORG).unwrap();
         net.send(1, vec![f]);
 
         let want = serde_json::json!({"owner": "ann", "n": 2, "done": true});
@@ -771,4 +791,166 @@ mod documents {
             Err(ClientError::UnknownObject(_))
         ));
     }
+}
+
+// ---- invitations (phase 5, ADR 0005) ----
+
+fn claimed_by(events: &[(usize, Event)], who: usize) -> Option<String> {
+    events.iter().find_map(|(i, e)| match e {
+        Event::InviteClaimed { code, .. } if *i == who => Some(code.clone()),
+        _ => None,
+    })
+}
+
+/// req: REQ-INV-001
+/// req: REQ-INV-002
+/// req: REQ-ID-003
+#[test]
+fn invited_devices_get_a_certificate_the_relay_accepts() {
+    let net = Net::org(3);
+    let org = DeviceId::from_hex(&ORG).unwrap();
+    // The creator is the first admin, certified by the root key.
+    assert!(net.devs[0].is_admin(&ORG));
+    for (i, d) in net.devs.iter().enumerate() {
+        let chain = CertChain::from_hex(&d.membership_proof(&ORG)).unwrap();
+        let proven = chain.verify(&org, &d.device_id()).unwrap();
+        assert_eq!(proven.admin, i == 0);
+        assert!(
+            matches!(d.announce_frame(&ORG), Frame::Announce { orgs } if !orgs[0].proof.is_empty())
+        );
+    }
+    assert_eq!(net.devs[2].group_members(&ORG).unwrap().len(), 3);
+}
+
+/// req: REQ-INV-001
+/// req: REQ-INV-002
+#[test]
+fn invites_are_single_use_expiring_and_need_the_secret() {
+    let mut net = Net::org(2);
+    net.devs.push(client());
+    net.devs.push(client());
+    // Only admins invite.
+    assert!(matches!(
+        net.devs[1].create_invite(&ORG, "ws://r", 60_000),
+        Err(ClientError::NotAdmin(_))
+    ));
+    // Expired links are refused on the claiming side.
+    let stale = net.devs[0].create_invite(&ORG, "ws://r", 0).unwrap();
+    assert!(matches!(
+        net.devs[2].claim_invite(&stale),
+        Err(ClientError::InvalidInvite(_))
+    ));
+    assert!(net.devs[2].claim_invite("https://not-an-invite").is_err());
+    // A claim with a guessed secret is rejected.
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    let mut forged = Invite::parse(&link).unwrap();
+    forged.secret = [0; 32];
+    let claim = net.devs[2].claim_invite(&forged.to_link()).unwrap();
+    let events = net.send(2, vec![claim.frame]);
+    assert!(claimed_by(&events, 0).is_none());
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 0 && matches!(e, Event::Rejected { .. }))
+    );
+    // The real one works once.
+    let claim = net.devs[2].claim_invite(&link).unwrap();
+    let events = net.send(2, vec![claim.frame]);
+    assert_eq!(claimed_by(&events, 0), Some(claim.code));
+    let d2 = hex(&net.devs[2]);
+    let frames = net.devs[0].accept_claim(&ORG, &d2).unwrap();
+    net.send(0, frames);
+    assert!(net.devs[2].is_member(&ORG));
+    let again = net.devs[3].claim_invite(&link).unwrap();
+    let events = net.send(3, vec![again.frame]);
+    assert!(claimed_by(&events, 0).is_none(), "the invite is used up");
+    // No claim pending: nothing to accept.
+    let d3 = hex(&net.devs[3]);
+    assert!(net.devs[0].accept_claim(&ORG, &d3).is_err());
+}
+
+/// req: REQ-INV-003
+#[test]
+fn a_rejected_claim_admits_nobody_and_the_invite_stays_valid() {
+    let mut net = Net::org(1);
+    net.devs.push(client());
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    let events = net.send(1, vec![claim.frame]);
+    assert_eq!(claimed_by(&events, 0), Some(claim.code));
+    let d1 = hex(&net.devs[1]);
+    net.devs[0].reject_claim(&ORG, &d1);
+    assert!(net.devs[0].accept_claim(&ORG, &d1).is_err());
+    assert!(!net.devs[1].is_member(&ORG));
+    // Claim again (e.g. after comparing codes properly) and get in.
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    net.send(1, vec![claim.frame]);
+    let frames = net.devs[0].accept_claim(&ORG, &d1).unwrap();
+    net.send(0, frames);
+    assert!(net.devs[1].is_member(&ORG));
+}
+
+/// req: REQ-INV-002
+#[test]
+fn the_root_makes_admins_who_can_admit_others() {
+    let mut net = Net::org(2);
+    let d1 = hex(&net.devs[1]);
+    let f = net.devs[0].grant_admin(&ORG, &d1).unwrap();
+    let events = net.send(0, vec![f]);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 1 && matches!(e, Event::CertificateUpdated { admin: true, .. }))
+    );
+    assert!(net.devs[1].is_admin(&ORG));
+    // Only the root holder grants admin rights.
+    let d0 = hex(&net.devs[0]);
+    assert!(matches!(
+        net.devs[1].grant_admin(&ORG, &d0),
+        Err(ClientError::NotAdmin(_))
+    ));
+    // The new admin admits a third device: its chain is root -> admin -> device.
+    net.devs.push(client());
+    net.admit(1, 2);
+    let chain = CertChain::from_hex(&net.devs[2].membership_proof(&ORG)).unwrap();
+    assert_eq!(chain.0.len(), 2);
+    assert!(
+        chain
+            .verify(&DeviceId::from_hex(&ORG).unwrap(), &net.devs[2].device_id())
+            .is_ok()
+    );
+    assert_converged(&mut net, &[0, 1, 2]);
+}
+
+/// req: REQ-INV-002
+#[test]
+fn strangers_cannot_join_without_an_invite() {
+    let mut net = Net::org(1);
+    net.devs.push(client());
+    let to = hex(&net.devs[0]);
+    let f = net.devs[1].readd_request_frame(&ORG, &to).unwrap();
+    let events = net.send(1, vec![f]);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 0 && matches!(e, Event::Rejected { .. }))
+    );
+    assert_eq!(net.devs[0].group_members(&ORG).unwrap().len(), 1);
+}
+
+/// req: REQ-ID-003
+#[test]
+fn org_state_survives_a_restart() {
+    let mut net = Net::org(1);
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    let old = std::mem::replace(&mut net.devs[0], client());
+    let key = DeviceKey::from_secret_bytes(&old.signer().secret_bytes());
+    let Client { store, .. } = old;
+    net.devs[0] = Client::new(key, store).unwrap();
+    assert!(net.devs[0].is_admin(&ORG));
+    // The invite issued before the restart still works.
+    net.devs.push(client());
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    let events = net.send(1, vec![claim.frame]);
+    assert!(claimed_by(&events, 0).is_some());
 }

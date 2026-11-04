@@ -5,9 +5,11 @@
 //! bindings in `bindings/` (Swift, Kotlin, JavaScript/WASM).
 //!
 //! Every relay body is end-to-end encrypted with the organization's MLS group
-//! (REQ-ENC-001, ADR 0004): create the group with [`Client::create_group`] on the
-//! first device, then admit devices with [`Client::join_request_frame`] (new
-//! device) and [`Client::add_member`] (member). Plaintext bodies are refused.
+//! (REQ-ENC-001, ADR 0004). [`Client::create_org`] creates an organization (its
+//! root key, ID and group); an admin issues invites ([`Client::create_invite`]),
+//! a new device claims one ([`Client::claim_invite`]) and the admin admits it
+//! ([`Event::InviteClaimed`] → [`Client::accept_claim`]), see ADR 0005.
+//! Plaintext bodies are refused.
 //!
 //! Extension points (see `docs/guides/adapting.md`):
 //! - [`Store`]: bring your own storage backend.
@@ -21,7 +23,11 @@ pub use kith_core::{
 pub use kith_crypto::{DeviceKey, GroupError, Groups};
 #[cfg(feature = "automerge")]
 pub use kith_merge::automerge_merger;
+mod org;
 mod sync;
+
+pub use kith_core::membership::{CertChain, Invite, MembershipCert};
+pub use org::ORGS_KEY;
 
 pub use kith_merge::{Materialized, MergeError, Merger};
 pub use kith_store::{MemoryStore, Store, StoreError};
@@ -62,6 +68,13 @@ pub enum ClientError {
     /// Not a valid device ID.
     #[error(transparent)]
     Id(#[from] IdError),
+    /// This device is not an admin of the org (or lacks the root key, for
+    /// `grant_admin`).
+    #[error("not an admin of {0}")]
+    NotAdmin(String),
+    /// An invite link or claim is invalid, expired or unknown.
+    #[error("invite: {0}")]
+    InvalidInvite(String),
     /// A document's JSON or merge patch is invalid (not JSON, or not an object).
     #[error("invalid document: {0}")]
     InvalidDocument(String),
@@ -91,20 +104,8 @@ pub fn auth_frame(signer: &dyn Signer, nonce: &str) -> Frame {
     }
 }
 
-/// The frames to send in answer to a relay's `challenge`: the signature that proves
-/// device ownership, then the organization announcement. `None` for any other frame.
-pub fn handshake_reply(signer: &dyn Signer, org: &str, frame: &Frame) -> Option<Vec<Frame>> {
-    match frame {
-        Frame::Challenge { nonce } => {
-            // Pipelined: a failed auth makes the relay send an error and close.
-            Some(vec![auth_frame(signer, nonce), announce_frame(org, "")])
-        }
-        _ => None,
-    }
-}
-
-/// Frame announcing membership of `org` after authenticating.
-/// The relay does not check `proof` yet (REQ-RELAY-004, phase 5).
+/// Frame announcing `org` with a membership `proof` (`CertChain::to_hex`, or empty
+/// while joining) after authenticating. Usually [`Client::announce_frame`].
 pub fn announce_frame(org: &str, proof: &str) -> Frame {
     Frame::Announce {
         orgs: vec![kith_protocol::Membership {
@@ -112,6 +113,19 @@ pub fn announce_frame(org: &str, proof: &str) -> Frame {
             proof: proof.into(),
         }],
     }
+}
+
+/// What [`Client::claim_invite`] returns.
+#[derive(Debug)]
+pub struct Claim {
+    /// The org the invite is for: connect to `relay` and announce it first.
+    pub org: String,
+    /// The relay URL from the invite.
+    pub relay: String,
+    /// The claim to send (an `invite-claim` frame).
+    pub frame: Frame,
+    /// The short code to show; the admin sees the same in [`Event::InviteClaimed`].
+    pub code: String,
 }
 
 /// Result of [`Client::handle_frame`].
@@ -205,15 +219,25 @@ pub enum Event {
         /// Changes the peer asked us to send back (we replied with them).
         requested: usize,
     },
-    /// A device asks to join `org`. To admit it, pass `key_package` to
-    /// [`Client::add_member`] and send the frames it returns. Ignore it to refuse.
-    JoinRequested {
+    /// A device claimed one of our invites with a valid proof (REQ-INV-002). To
+    /// admit it call [`Client::accept_claim`] (after comparing `code` with the new
+    /// device's screen, if the app wants that, REQ-INV-003); otherwise
+    /// [`Client::reject_claim`].
+    InviteClaimed {
         /// Organization.
         org: String,
-        /// The device asking (hex).
+        /// The claiming device (hex).
         from: String,
-        /// Its MLS KeyPackage.
-        key_package: Vec<u8>,
+        /// The short code its screen shows.
+        code: String,
+    },
+    /// We received a new membership certificate (for example admin rights) and
+    /// re-announced with it.
+    CertificateUpdated {
+        /// Organization.
+        org: String,
+        /// True if we are now an admin.
+        admin: bool,
     },
     /// This device joined `org`'s group from a Welcome; the reply asks a peer
     /// for the history (catch-up).
@@ -314,6 +338,11 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     readd_asked: std::collections::HashMap<String, u64>,
     /// Per org: our running catch-up reconciliation (one at a time).
     reconciling: std::collections::HashMap<String, kith_sync::Reconciliation>,
+    /// Certificates, root keys, issued invites.
+    orgs: org::Orgs,
+    /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
+    /// (KeyPackage, invite token). RAM only: after a restart the device claims again.
+    claims: std::collections::HashMap<(String, String), (Vec<u8>, [u8; 16])>,
 }
 
 impl<S: Store, K: Signer> Client<S, K> {
@@ -324,12 +353,18 @@ impl<S: Store, K: Signer> Client<S, K> {
             Some(bytes) => Groups::from_bytes(&bytes)?,
             None => Groups::new(),
         };
+        let orgs = match store.get_meta(ORGS_KEY)? {
+            Some(bytes) => org::Orgs::from_bytes(&bytes).map_err(GroupError::Corrupt)?,
+            None => org::Orgs::default(),
+        };
         Ok(Self {
             key,
             store,
             groups,
             readd_asked: Default::default(),
             reconciling: Default::default(),
+            orgs,
+            claims: Default::default(),
         })
     }
 
@@ -365,11 +400,230 @@ impl<S: Store, K: Signer> Client<S, K> {
         Ok(self.store.put(change)?)
     }
 
+    // ---- organizations and invitations (phase 5, ADR 0005) ----
+
+    /// Create an organization: a new root key, whose public key is the org ID
+    /// (returned, hex), its MLS group with this device as the only member, and a
+    /// root-signed admin certificate for this device. The root key is kept in the
+    /// store; only this device can make other admins ([`Self::grant_admin`]).
+    pub fn create_org(&mut self) -> Result<String, ClientError> {
+        self.create_org_with_root_key(&DeviceKey::generate().secret_bytes())
+    }
+
+    /// [`Self::create_org`] with a given root key secret, for apps that keep the
+    /// root key elsewhere (e.g. a recovery backup). Fails if the org exists here.
+    pub fn create_org_with_root_key(
+        &mut self,
+        root_secret: &[u8; 32],
+    ) -> Result<String, ClientError> {
+        let root = DeviceKey::from_secret_bytes(root_secret);
+        let org_id = root.device_id();
+        let org = org_id.to_hex();
+        self.groups.create_group(&self.key, &org)?;
+        let cert = MembershipCert::issue(&root, org_id, self.device_id(), true, now_ms());
+        self.orgs.0.insert(
+            org.clone(),
+            org::OrgState {
+                chain: Some(CertChain(vec![cert])),
+                root: Some(*root_secret),
+                invites: vec![],
+            },
+        );
+        self.save_groups()?;
+        self.save_orgs()?;
+        Ok(org)
+    }
+
+    /// This device's membership proof for `org` (hex), empty if it has none yet.
+    pub fn membership_proof(&self, org: &str) -> String {
+        self.chain(org).map(CertChain::to_hex).unwrap_or_default()
+    }
+
+    /// True if this device may invite and admit devices to `org`.
+    pub fn is_admin(&self, org: &str) -> bool {
+        self.chain(org)
+            .and_then(CertChain::leaf)
+            .is_some_and(|c| c.admin)
+    }
+
+    fn chain(&self, org: &str) -> Option<&CertChain> {
+        self.orgs.0.get(org).and_then(|s| s.chain.as_ref())
+    }
+
+    /// Frame announcing `org` to the relay with this device's membership proof.
+    /// Without a proof (joining) the relay treats the device as pending.
+    pub fn announce_frame(&self, org: &str) -> Frame {
+        announce_frame(org, &self.membership_proof(org))
+    }
+
+    /// The frames to send in answer to a relay's `challenge`: the signature that
+    /// proves device ownership, then the announcement of `org`. `None` for any
+    /// other frame.
+    pub fn handshake_reply(&self, org: &str, frame: &Frame) -> Option<Vec<Frame>> {
+        match frame {
+            // Pipelined: a failed auth makes the relay send an error and close.
+            Frame::Challenge { nonce } => {
+                Some(vec![auth_frame(&self.key, nonce), self.announce_frame(org)])
+            }
+            _ => None,
+        }
+    }
+
+    /// A one-time invite to `org`, valid for `ttl_ms` (REQ-INV-001). Returns the
+    /// link to share (QR code, message). Only admins can invite; only this device
+    /// can admit the claimer, so keep it online until then.
+    pub fn create_invite(
+        &mut self,
+        org: &str,
+        relay: &str,
+        ttl_ms: u64,
+    ) -> Result<String, ClientError> {
+        if !self.is_admin(org) {
+            return Err(ClientError::NotAdmin(org.into()));
+        }
+        let org_id = DeviceId::from_hex(org)?;
+        let invite = Invite::new(org_id, relay, now_ms().saturating_add(ttl_ms));
+        let link = invite.to_link();
+        self.orgs
+            .0
+            .entry(org.into())
+            .or_default()
+            .invites
+            .push(invite);
+        self.save_orgs()?;
+        Ok(link)
+    }
+
+    /// Claim an invite link (on the new device). Connect to `Claim::relay` and
+    /// announce `Claim::org` (the client has no proof yet, so it is pending), then
+    /// send `Claim::frame` and show `Claim::code`. [`Event::Joined`] follows once
+    /// the admin accepts.
+    pub fn claim_invite(&mut self, link: &str) -> Result<Claim, ClientError> {
+        let invite = Invite::parse(link).map_err(|e| ClientError::InvalidInvite(e.to_string()))?;
+        if invite.is_expired(now_ms()) {
+            return Err(ClientError::InvalidInvite("expired".into()));
+        }
+        let key_package = self.groups.key_package(&self.key)?;
+        // The KeyPackage's private part must be stored before it leaves.
+        self.save_groups()?;
+        let org = invite.org.to_hex();
+        let body = sync::outer_body(&Outer::Claim {
+            token: invite.token,
+            proof: invite.claim_proof(&key_package),
+            key_package: key_package.clone(),
+        });
+        Ok(Claim {
+            frame: Frame::InviteClaim {
+                org: org.clone(),
+                token: hex_encode(&invite.token),
+                body,
+            },
+            code: invite.short_code(&key_package),
+            relay: invite.relay,
+            org,
+        })
+    }
+
+    /// Admit the device of an [`Event::InviteClaimed`]: adds it to the MLS group,
+    /// issues its membership certificate and uses up the invite. Send the frames
+    /// (commit to the group, Welcome to the device).
+    pub fn accept_claim(&mut self, org: &str, device: &str) -> Result<Vec<Frame>, ClientError> {
+        let (kp, token) = self
+            .claims
+            .remove(&(org.to_string(), device.to_string()))
+            .ok_or_else(|| {
+                ClientError::InvalidInvite("no pending claim from that device".into())
+            })?;
+        if !self.is_admin(org) {
+            return Err(ClientError::NotAdmin(org.into()));
+        }
+        let added = self.groups.add_member(&self.key, org, &kp)?;
+        self.save_groups()?;
+        if added.member.to_hex() != device {
+            return Err(ClientError::InvalidInvite(
+                "KeyPackage of another device".into(),
+            ));
+        }
+        // An admin's chain is its root-issued admin certificate, which vouches for
+        // the one we issue now: root -> us -> new device.
+        let org_id = DeviceId::from_hex(org)?;
+        let mut chain = self.chain(org).cloned().map(|c| c.0).unwrap_or_default();
+        chain.push(MembershipCert::issue(
+            &self.key,
+            org_id,
+            added.member,
+            false,
+            now_ms(),
+        ));
+        if let Some(st) = self.orgs.0.get_mut(org) {
+            st.invites.retain(|i| i.token != token);
+        }
+        self.save_orgs()?;
+        Ok(vec![
+            Frame::Broadcast {
+                org: org.into(),
+                body: sync::outer_body(&Outer::Commit(added.commit)),
+            },
+            direct(
+                org,
+                device,
+                sync::outer_body(&Outer::Welcome {
+                    welcome: added.welcome,
+                    chain: CertChain(chain).to_hex(),
+                }),
+            ),
+        ])
+    }
+
+    /// Refuse a pending claim (for example: the short codes did not match). The
+    /// invite stays valid until it is used or expires.
+    pub fn reject_claim(&mut self, org: &str, device: &str) {
+        self.claims.remove(&(org.to_string(), device.to_string()));
+    }
+
+    /// Make `device` (hex, a member) an admin of `org`. Only the device holding the
+    /// org root key can. Send the returned frame; the device re-announces itself.
+    pub fn grant_admin(&mut self, org: &str, device: &str) -> Result<Frame, ClientError> {
+        let root = self
+            .orgs
+            .0
+            .get(org)
+            .and_then(|s| s.root)
+            .ok_or_else(|| ClientError::NotAdmin(org.into()))?;
+        let root = DeviceKey::from_secret_bytes(&root);
+        let cert = MembershipCert::issue(
+            &root,
+            root.device_id(),
+            DeviceId::from_hex(device)?,
+            true,
+            now_ms(),
+        );
+        Ok(direct(
+            org,
+            device,
+            sync::outer_body(&Outer::Cert(CertChain(vec![cert]).to_hex())),
+        ))
+    }
+
+    fn save_orgs(&mut self) -> Result<(), ClientError> {
+        Ok(self.store.put_meta(ORGS_KEY, &self.orgs.to_bytes())?)
+    }
+
+    /// Store `chain` as our proof for `org` if it proves exactly that.
+    fn adopt_chain(&mut self, org: &str, chain: &str) -> Result<bool, String> {
+        let org_id = DeviceId::from_hex(org).map_err(|e| e.to_string())?;
+        let chain = CertChain::from_hex(chain).map_err(|e| e.to_string())?;
+        let proven = chain
+            .verify(&org_id, &self.device_id())
+            .map_err(|e| e.to_string())?;
+        self.orgs.0.entry(org.into()).or_default().chain = Some(chain);
+        Ok(proven.admin)
+    }
+
     // ---- MLS group (REQ-ENC-001..004) ----
 
-    /// Create `org`'s MLS group with this device as the only member. Call it once,
-    /// on the device that creates the organization.
-    pub fn create_group(&mut self, org: &str) -> Result<(), ClientError> {
+    #[cfg(test)]
+    fn create_group(&mut self, org: &str) -> Result<(), ClientError> {
         self.groups.create_group(&self.key, org)?;
         self.save_groups()
     }
@@ -394,26 +648,16 @@ impl<S: Store, K: Signer> Client<S, K> {
             .collect())
     }
 
-    /// Ask the member `to` (a device ID in hex, e.g. from `Presence`) to add this
-    /// device to `org`: sends a fresh KeyPackage. The member sees
-    /// [`Event::JoinRequested`]; if it admits us we get [`Event::Joined`].
-    pub fn join_request_frame(&mut self, org: &str, to: &str) -> Result<Frame, ClientError> {
+    /// Ask the member `to` to re-add this device (after a fork or falling too far
+    /// behind, REQ-ENC-004): sends a fresh KeyPackage.
+    fn readd_request_frame(&mut self, org: &str, to: &str) -> Result<Frame, ClientError> {
         let kp = self.groups.key_package(&self.key)?;
         // The private part must be stored before the KeyPackage leaves.
         self.save_groups()?;
         Ok(direct(org, to, sync::outer_body(&Outer::KeyPackage(kp))))
     }
 
-    /// Add the device whose KeyPackage came with [`Event::JoinRequested`] to
-    /// `org`'s group. Send the returned frames: the commit to the group, then the
-    /// Welcome to the new device.
-    pub fn add_member(&mut self, org: &str, key_package: &[u8]) -> Result<Vec<Frame>, ClientError> {
-        let added = self.groups.add_member(&self.key, org, key_package)?;
-        self.save_groups()?;
-        Ok(self.added_frames(org, added))
-    }
-
-    fn added_frames(&self, org: &str, added: kith_crypto::Added) -> Vec<Frame> {
+    fn readded_frames(&self, org: &str, added: kith_crypto::Added) -> Vec<Frame> {
         vec![
             Frame::Broadcast {
                 org: org.into(),
@@ -422,7 +666,11 @@ impl<S: Store, K: Signer> Client<S, K> {
             direct(
                 org,
                 &added.member.to_hex(),
-                sync::outer_body(&Outer::Welcome(added.welcome)),
+                // A re-added device keeps its certificate.
+                sync::outer_body(&Outer::Welcome {
+                    welcome: added.welcome,
+                    chain: String::new(),
+                }),
             ),
         ]
     }
@@ -560,37 +808,83 @@ impl<S: Store, K: Signer> Client<S, K> {
                     Err(e) => Ok(rejected(e.to_string())),
                 }
             }
-            Outer::Welcome(welcome) => {
+            Outer::Welcome { welcome, chain } => {
                 let joined = match self.groups.join(&welcome) {
                     Ok(o) => o,
                     Err(e) => return Ok(rejected(e.to_string())),
                 };
                 self.readd_asked.remove(&joined);
-                // Start from whatever we have (usually nothing): ask a peer for history.
+                if !chain.is_empty() {
+                    if let Err(e) = self.adopt_chain(&joined, &chain) {
+                        return Ok(rejected(format!("membership certificate: {e}")));
+                    }
+                    self.save_orgs()?;
+                }
+                // Announce with the certificate (we were pending), then ask a peer
+                // for the history.
                 let body = self.start_reconcile(&joined)?;
                 Ok(Handled {
                     event: Event::Joined {
                         org: joined.clone(),
                     },
-                    replies: vec![Frame::SyncRequest { org: joined, body }],
+                    replies: vec![
+                        self.announce_frame(&joined),
+                        Frame::SyncRequest { org: joined, body },
+                    ],
                 })
             }
+            Outer::Claim {
+                token,
+                proof,
+                key_package,
+            } => {
+                let Some(invite) = self
+                    .orgs
+                    .0
+                    .get(&org)
+                    .and_then(|s| s.invites.iter().find(|i| i.token == token))
+                    .cloned()
+                else {
+                    // Every admin of the org gets the claim; only the issuer knows it.
+                    return Ok(Handled::event(Event::Ignored));
+                };
+                if invite.is_expired(now_ms()) {
+                    return Ok(rejected("invite expired".into()));
+                }
+                if !invite.verify_claim(&key_package, &proof) {
+                    return Ok(rejected("invite proof does not match".into()));
+                }
+                match self.groups.key_package_device(&key_package) {
+                    Ok(d) if d.to_hex() == from => {}
+                    _ => return Ok(rejected("KeyPackage is not the sender's".into())),
+                }
+                let code = invite.short_code(&key_package);
+                self.claims
+                    .insert((org.clone(), from.clone()), (key_package, token));
+                Ok(Handled::event(Event::InviteClaimed { org, from, code }))
+            }
+            Outer::Cert(chain) => match self.adopt_chain(&org, &chain) {
+                Ok(admin) => {
+                    self.save_orgs()?;
+                    Ok(Handled {
+                        replies: vec![self.announce_frame(&org)],
+                        event: Event::CertificateUpdated { org, admin },
+                    })
+                }
+                Err(e) => Ok(rejected(format!("membership certificate: {e}"))),
+            },
             Outer::KeyPackage(kp) => {
                 let known = self
                     .groups
                     .members(&org)
                     .is_ok_and(|m| m.iter().any(|d| d.to_hex() == from));
                 if !known {
-                    return Ok(Handled::event(Event::JoinRequested {
-                        org,
-                        from,
-                        key_package: kp,
-                    }));
+                    return Ok(rejected("not a member: join with an invite".into()));
                 }
                 // A member that lost the group (REQ-ENC-004). Only for its own key.
                 match self.groups.readd_member(&self.key, &org, &kp) {
                     Ok(added) if added.member.to_hex() == from => Ok(Handled {
-                        replies: self.added_frames(&org, added),
+                        replies: self.readded_frames(&org, added),
                         event: Event::MemberReAdded { org, device: from },
                     }),
                     Ok(_) => Err(ClientError::Group(GroupError::Invalid(
@@ -635,7 +929,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 if self.groups.epoch(&org).is_err() {
                     return Ok(rejected("not in this group".into()));
                 }
-                let frame = self.join_request_frame(&org, &from)?;
+                let frame = self.readd_request_frame(&org, &from)?;
                 Ok(Handled {
                     event: Event::ReAddRequested { org, from },
                     replies: vec![frame],
@@ -660,7 +954,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             let epoch = self.groups.epoch(&org)?;
             if self.readd_asked.get(&org) != Some(&epoch) {
                 self.readd_asked.insert(org.clone(), epoch);
-                replies.push(self.join_request_frame(&org, &peer)?);
+                replies.push(self.readd_request_frame(&org, &peer)?);
             }
         }
         Ok(Handled {

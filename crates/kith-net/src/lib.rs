@@ -9,14 +9,14 @@
 //!
 //! Live updates only reach devices that are online; [`LiveClient::catch_up`]
 //! fetches what was missed (REQ-SYNC-001..003). Every body is encrypted for the
-//! org's MLS group (REQ-ENC-001): the client must be a member (see
-//! [`Client::create_group`], [`Client::join_request_frame`], [`Client::add_member`];
-//! send the frames those return with [`LiveClient::send`]).
+//! org's MLS group (REQ-ENC-001): the client must be a member. Create an org with
+//! [`Client::create_org`]; join one with an invite ([`LiveClient::claim`], admitted
+//! by an admin's [`LiveClient::accept_claim`]).
 
 use futures_util::{SinkExt, StreamExt};
 use kith_client::{
-    Change, Client, ClientError, DeviceKey, Event, ObjectId, ObjectType, Signer, Store,
-    announce_frame, auth_frame, hello_frame,
+    Change, Client, ClientError, DeviceKey, Event, ObjectId, ObjectType, Signer, Store, auth_frame,
+    hello_frame,
 };
 use kith_protocol::{Frame, decode, encode};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite};
@@ -122,8 +122,8 @@ impl<S: Store> LiveClient<S> {
         client: Client<S, DeviceKey>,
     ) -> Result<Self, NetError> {
         let mut conn = RelayConnection::connect(url, client.signer()).await?;
-        // TODO(REQ-RELAY-004, phase 5): a real membership proof.
-        conn.send(&announce_frame(org, "")).await?;
+        // With our certificate, or none while joining (the relay then treats us as pending).
+        conn.send(&client.announce_frame(org)).await?;
         Ok(Self {
             client,
             conn,
@@ -155,16 +155,24 @@ impl<S: Store> LiveClient<S> {
         Ok(())
     }
 
-    /// Ask the member `to` (hex device ID, e.g. from `Event::Presence`) to add
-    /// this device to the org. Wait for `Event::Joined`.
-    pub async fn request_join(&mut self, to: &str) -> Result<(), NetError> {
-        let frame = self.client.join_request_frame(&self.org, to)?;
-        self.conn.send(&frame).await
+    /// Claim an invite link for this connection's org (connect with the link's
+    /// relay and org first). Returns the short code to show; wait for
+    /// `Event::Joined`.
+    pub async fn claim(&mut self, link: &str) -> Result<String, NetError> {
+        let claim = self.client.claim_invite(link)?;
+        if claim.org != self.org {
+            return Err(NetError::Protocol(format!(
+                "invite is for org {}, connected to {}",
+                claim.org, self.org
+            )));
+        }
+        self.conn.send(&claim.frame).await?;
+        Ok(claim.code)
     }
 
-    /// Admit the device of an `Event::JoinRequested` (sends commit and Welcome).
-    pub async fn add_member(&mut self, key_package: &[u8]) -> Result<(), NetError> {
-        let frames = self.client.add_member(&self.org, key_package)?;
+    /// Admit the device of an `Event::InviteClaimed` (sends commit and Welcome).
+    pub async fn accept_claim(&mut self, device: &str) -> Result<(), NetError> {
+        let frames = self.client.accept_claim(&self.org, device)?;
         self.send(&frames).await
     }
 
@@ -229,13 +237,11 @@ fn is_fatal(code: &str) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use kith_client::MemoryStore;
+    use kith_client::{CertChain, MembershipCert, MemoryStore};
     use kith_relay_server::{app, new_state};
     use tokio::time::timeout;
 
     use super::*;
-
-    const ORG: &str = "org";
 
     async fn relay() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -252,11 +258,15 @@ mod tests {
         Client::new(DeviceKey::generate(), MemoryStore::new()).unwrap()
     }
 
-    /// A client that created the org's group.
-    fn founder() -> Client<MemoryStore, DeviceKey> {
+    /// A client that created an org with `root`, and the org ID.
+    fn founder_with(root: &DeviceKey) -> (Client<MemoryStore, DeviceKey>, String) {
         let mut c = new_client();
-        c.create_group(ORG).unwrap();
-        c
+        let org = c.create_org_with_root_key(&root.secret_bytes()).unwrap();
+        (c, org)
+    }
+
+    fn founder() -> (Client<MemoryStore, DeviceKey>, String) {
+        founder_with(&DeviceKey::generate())
     }
 
     /// Wait for the next event matching `pick`, skipping others.
@@ -284,44 +294,43 @@ mod tests {
         .await;
     }
 
-    /// Keep `admin` answering in the background, admitting every device that asks.
+    /// Keep `admin` answering in the background, admitting every valid claim.
     fn serve(
         mut admin: LiveClient<MemoryStore>,
     ) -> tokio::task::JoinHandle<LiveClient<MemoryStore>> {
         tokio::spawn(async move {
             while let Ok(Some(ev)) = admin.next_event().await {
-                if let Event::JoinRequested { key_package, .. } = ev {
-                    admin.add_member(&key_package).await.unwrap();
+                if let Event::InviteClaimed { from, .. } = ev {
+                    admin.accept_claim(&from).await.unwrap();
                 }
             }
             admin
         })
     }
 
-    /// `new` asks `admin_hex` to join and waits until it is in.
-    async fn join(new: &mut LiveClient<MemoryStore>, admin_hex: &str) {
-        new.request_join(admin_hex).await.unwrap();
-        until(new, |e| matches!(e, Event::Joined { .. }).then_some(())).await;
-        assert!(new.client().is_member(ORG));
-    }
-
     /// req: REQ-SYNC-004
     /// req: REQ-ENC-001
+    /// req: REQ-INV-002
     #[tokio::test]
-    async fn changes_reach_the_other_online_device_and_back() {
+    async fn an_invited_device_joins_and_changes_flow_both_ways() {
         let url = relay().await;
-        let mut a = LiveClient::connect(&url, ORG, founder()).await.unwrap();
-        let mut b = LiveClient::connect(&url, ORG, new_client()).await.unwrap();
-        online(&mut a, 2).await;
-        let a_hex = a.client().device_id().to_hex();
-        b.request_join(&a_hex).await.unwrap();
-        let kp = until(&mut a, |e| match e {
-            Event::JoinRequested { key_package, .. } => Some(key_package),
+        let (seed, org) = founder();
+        let mut a = LiveClient::connect(&url, &org, seed).await.unwrap();
+        online(&mut a, 1).await;
+        let link = a.client_mut().create_invite(&org, &url, 60_000).unwrap();
+        // The new device connects as pending (not in presence) and claims.
+        let mut b = LiveClient::connect(&url, &org, new_client()).await.unwrap();
+        let code = b.claim(&link).await.unwrap();
+        let (from, shown) = until(&mut a, |e| match e {
+            Event::InviteClaimed { from, code, .. } => Some((from, code)),
             _ => None,
         })
         .await;
-        a.add_member(&kp).await.unwrap();
+        assert_eq!(shown, code, "both screens show the same code");
+        a.accept_claim(&from).await.unwrap();
         until(&mut b, |e| matches!(e, Event::Joined { .. }).then_some(())).await;
+        // With its certificate b re-announced and is now in presence.
+        online(&mut a, 2).await;
 
         let created = a
             .create(ObjectType::new("note"), b"v1".to_vec())
@@ -353,20 +362,19 @@ mod tests {
     async fn a_new_device_joins_and_catches_up_from_an_online_peer() {
         let url = relay().await;
         // `a` has history from before it went online.
-        let mut seed = founder();
+        let (mut seed, org) = founder();
         let created = seed
             .create(ObjectType::new("note"), b"v1".to_vec())
             .unwrap();
         let oid = created.body.object_id;
         seed.edit(oid, b"v2".to_vec()).unwrap();
-        let a = LiveClient::connect(&url, ORG, seed).await.unwrap();
-        let a_hex = a.client().device_id().to_hex();
-        let a_task = serve(a);
+        let link = seed.create_invite(&org, &url, 60_000).unwrap();
+        let a_task = serve(LiveClient::connect(&url, &org, seed).await.unwrap());
 
-        let mut b = LiveClient::connect(&url, ORG, new_client()).await.unwrap();
-        online(&mut b, 2).await;
+        let mut b = LiveClient::connect(&url, &org, new_client()).await.unwrap();
+        b.claim(&link).await.unwrap();
         // Joining requests the history by itself.
-        join(&mut b, &a_hex).await;
+        until(&mut b, |e| matches!(e, Event::Joined { .. }).then_some(())).await;
         let stored = until(&mut b, |e| match e {
             Event::SyncReceived { stored, .. } => Some(stored),
             _ => None,
@@ -381,7 +389,8 @@ mod tests {
     #[tokio::test]
     async fn catch_up_with_nobody_online_is_reported_not_an_error() {
         let url = relay().await;
-        let mut only = LiveClient::connect(&url, ORG, founder()).await.unwrap();
+        let (seed, org) = founder();
+        let mut only = LiveClient::connect(&url, &org, seed).await.unwrap();
         online(&mut only, 1).await;
         only.catch_up().await.unwrap();
         let delivered = until(&mut only, |e| match e {
@@ -392,18 +401,47 @@ mod tests {
         assert!(delivered.is_empty());
     }
 
+    /// req: REQ-RELAY-004
     /// req: REQ-ENC-001
     #[tokio::test]
-    async fn plaintext_from_a_non_member_is_rejected_and_not_stored() {
+    async fn outsiders_are_stopped_by_the_relay_and_plaintext_by_the_client() {
         let url = relay().await;
-        let mut honest = LiveClient::connect(&url, ORG, founder()).await.unwrap();
-        // A raw connection plays a device outside the group sending an unencrypted
-        // change (the pre-MLS body format: kind 1 + encoded change).
-        let evil_key = DeviceKey::generate();
-        let mut evil = RelayConnection::connect(&url, &evil_key).await.unwrap();
-        evil.send(&announce_frame(ORG, "")).await.unwrap();
-        online(&mut honest, 2).await;
+        let root = DeviceKey::generate();
+        let (seed, org) = founder_with(&root);
+        let mut honest = LiveClient::connect(&url, &org, seed).await.unwrap();
+        online(&mut honest, 1).await;
 
+        // A device without a certificate is pending: the relay refuses its broadcast.
+        let stranger_key = DeviceKey::generate();
+        let mut stranger = RelayConnection::connect(&url, &stranger_key).await.unwrap();
+        stranger
+            .send(&kith_client::announce_frame(&org, ""))
+            .await
+            .unwrap();
+        stranger
+            .send(&Frame::Broadcast {
+                org: org.clone(),
+                body: vec![1, 2, 3],
+            })
+            .await
+            .unwrap();
+        match stranger.recv().await {
+            Err(NetError::Refused(m)) => assert!(m.contains("not-a-member"), "{m}"),
+            Ok(Some(Frame::Error { code, .. })) => assert_eq!(code, "not-a-member"),
+            other => panic!("expected not-a-member, got {other:?}"),
+        }
+
+        // A certified member sending the pre-MLS plaintext body: the client refuses it.
+        let evil_key = DeviceKey::generate();
+        let cert = MembershipCert::issue(&root, root.device_id(), evil_key.device_id(), false, 1);
+        let mut evil = RelayConnection::connect(&url, &evil_key).await.unwrap();
+        evil.send(&kith_client::announce_frame(
+            &org,
+            &CertChain(vec![cert]).to_hex(),
+        ))
+        .await
+        .unwrap();
+        online(&mut honest, 2).await;
         let mut source = Client::new(evil_key, MemoryStore::new()).unwrap();
         let change = source
             .create(ObjectType::new("note"), b"ok".to_vec())
@@ -411,12 +449,11 @@ mod tests {
         let mut body = vec![1];
         body.extend_from_slice(&kith_store::codec::encode_change(&change));
         evil.send(&Frame::Broadcast {
-            org: ORG.into(),
+            org: org.clone(),
             body,
         })
         .await
         .unwrap();
-
         until(&mut honest, |e| {
             matches!(e, Event::Rejected { .. }).then_some(())
         })

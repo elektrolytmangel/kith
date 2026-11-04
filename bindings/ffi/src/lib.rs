@@ -135,11 +135,32 @@ impl KithClient {
         })
     }
 
-    /// Create `org`'s encrypted group with this device as its only member. Call it
-    /// once, on the device that creates the organization; other devices join with
-    /// `RelaySession.joinRequest`.
-    pub fn create_group(&self, org: String) -> Result<(), KithError> {
-        Ok(self.inner.lock().unwrap().create_group(&org)?)
+    /// Create an organization; returns its ID (the org root public key, hex). This
+    /// device becomes its first admin and keeps the root key. Others join with an
+    /// invite (`createInvite`, then `RelaySession.claim` on the new device).
+    pub fn create_org(&self) -> Result<String, KithError> {
+        Ok(self.inner.lock().unwrap().create_org()?)
+    }
+
+    /// True if this device may invite and admit devices to `org`.
+    pub fn is_admin(&self, org: String) -> bool {
+        self.inner.lock().unwrap().is_admin(&org)
+    }
+
+    /// A one-time invite link to `org`, valid for `ttl_seconds`, telling the new
+    /// device to connect to `relay`. Admins only; keep this device online until the
+    /// claim arrives (`InviteClaimed`).
+    pub fn create_invite(
+        &self,
+        org: String,
+        relay: String,
+        ttl_seconds: u64,
+    ) -> Result<String, KithError> {
+        Ok(self.inner.lock().unwrap().create_invite(
+            &org,
+            &relay,
+            ttl_seconds.saturating_mul(1000),
+        )?)
     }
 
     /// True if this device is a member of `org`'s group (it can send and read).
@@ -265,13 +286,16 @@ pub enum RelayEvent {
     Receipt { delivered: Vec<String> },
     /// The relay refused something (for example `auth-failed`, after which it closes).
     RelayError { code: String, message: String },
-    /// A device asks to join `org`. To admit it, call `RelaySession.addMember(keyPackage)`
-    /// and send the frames; ignore the event to refuse.
-    JoinRequested {
+    /// A device claimed one of our invites with a valid proof. Compare `code` with
+    /// the new device's screen if you want, then `RelaySession.acceptClaim(from)` (or
+    /// `rejectClaim`).
+    InviteClaimed {
         org: String,
         from: String,
-        key_package: Vec<u8>,
+        code: String,
     },
+    /// We got a new membership certificate (for example admin rights).
+    CertificateUpdated { org: String, admin: bool },
     /// This device joined `org`; the history is requested by the replies.
     Joined { org: String },
     /// A commit changed `org`'s group. `removed`: this device was removed.
@@ -307,6 +331,38 @@ pub enum RelayEvent {
         peer: String,
         we_win: bool,
     },
+}
+
+/// Result of [`RelaySession::claim`].
+#[derive(uniffi::Record)]
+pub struct ClaimOutput {
+    /// The claim frame to send.
+    pub frame: Vec<u8>,
+    /// The short code to show; the admin sees the same in `InviteClaimed`.
+    pub code: String,
+}
+
+/// What an invite link points to.
+#[derive(uniffi::Record)]
+pub struct InviteInfo {
+    /// The org ID: open the `RelaySession` for it.
+    pub org: String,
+    /// The relay to connect to.
+    pub relay: String,
+    /// Expiry, milliseconds since the Unix epoch.
+    pub expires_ms: u64,
+}
+
+/// Read an invite link without claiming it, to know which relay and org to connect to.
+#[uniffi::export]
+pub fn parse_invite(link: String) -> Result<InviteInfo, KithError> {
+    let inv =
+        kith_client::Invite::parse(&link).map_err(|e| KithError::Failed { msg: e.to_string() })?;
+    Ok(InviteInfo {
+        org: inv.org.to_hex(),
+        relay: inv.relay,
+        expires_ms: inv.expires_ms,
+    })
 }
 
 /// Result of [`RelaySession::receive`].
@@ -358,7 +414,7 @@ impl RelaySession {
         let frame =
             kith_protocol::decode(&frame).map_err(|e| KithError::Failed { msg: e.to_string() })?;
         let mut c = self.client.inner.lock().unwrap();
-        if let Some(replies) = kith_client::handshake_reply(c.signer(), &self.org, &frame) {
+        if let Some(replies) = c.handshake_reply(&self.org, &frame) {
             return Ok(SessionOutput {
                 replies: replies.iter().map(encode_frame).collect::<Result<_, _>>()?,
                 event: None,
@@ -385,20 +441,47 @@ impl RelaySession {
         encode_frame(&c.sync_request_frame(&self.org)?)
     }
 
-    /// The frame that asks the member `to` (hex device ID, e.g. from a `Presence`
-    /// event) to add this device to the org. Wait for `Joined`.
-    pub fn join_request(&self, to: String) -> Result<Vec<u8>, KithError> {
+    /// Claim an invite link (on the new device; open this session for the link's
+    /// org, see `parseInvite`). Send `frame`, show `code`, wait for `Joined`.
+    pub fn claim(&self, link: String) -> Result<ClaimOutput, KithError> {
         let mut c = self.client.inner.lock().unwrap();
-        encode_frame(&c.join_request_frame(&self.org, &to)?)
+        let claim = c.claim_invite(&link)?;
+        if claim.org != self.org {
+            return Err(KithError::Failed {
+                msg: format!(
+                    "invite is for org {}, session is for {}",
+                    claim.org, self.org
+                ),
+            });
+        }
+        Ok(ClaimOutput {
+            frame: encode_frame(&claim.frame)?,
+            code: claim.code,
+        })
     }
 
-    /// Admit the device of a `JoinRequested` event. Send all returned frames, in order.
-    pub fn add_member(&self, key_package: Vec<u8>) -> Result<Vec<Vec<u8>>, KithError> {
+    /// Admit the device of an `InviteClaimed` event. Send all returned frames, in order.
+    pub fn accept_claim(&self, device: String) -> Result<Vec<Vec<u8>>, KithError> {
         let mut c = self.client.inner.lock().unwrap();
-        c.add_member(&self.org, &key_package)?
+        c.accept_claim(&self.org, &device)?
             .iter()
             .map(encode_frame)
             .collect()
+    }
+
+    /// Refuse the claim of an `InviteClaimed` event; the invite stays valid.
+    pub fn reject_claim(&self, device: String) {
+        self.client
+            .inner
+            .lock()
+            .unwrap()
+            .reject_claim(&self.org, &device);
+    }
+
+    /// Make a member an admin (only the org's creator can). Send the returned frame.
+    pub fn grant_admin(&self, device: String) -> Result<Vec<u8>, KithError> {
+        let mut c = self.client.inner.lock().unwrap();
+        encode_frame(&c.grant_admin(&self.org, &device)?)
     }
 
     /// Remove `device` (hex) from the org's group. Send the returned frame.
@@ -472,15 +555,8 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
         Event::Presence { org, online } => RelayEvent::Presence { org, online },
         Event::Receipt { delivered } => RelayEvent::Receipt { delivered },
         Event::RelayError { code, message } => RelayEvent::RelayError { code, message },
-        Event::JoinRequested {
-            org,
-            from,
-            key_package,
-        } => RelayEvent::JoinRequested {
-            org,
-            from,
-            key_package,
-        },
+        Event::InviteClaimed { org, from, code } => RelayEvent::InviteClaimed { org, from, code },
+        Event::CertificateUpdated { org, admin } => RelayEvent::CertificateUpdated { org, admin },
         Event::Joined { org } => RelayEvent::Joined { org },
         Event::GroupChanged {
             org,
@@ -582,7 +658,8 @@ mod tests {
         use kith_protocol::Frame;
         let (Frame::SyncRequest { org, body }
         | Frame::Broadcast { org, body }
-        | Frame::Direct { org, body, .. }) = kith_protocol::decode(frame).unwrap()
+        | Frame::Direct { org, body, .. }
+        | Frame::InviteClaim { org, body, .. }) = kith_protocol::decode(frame).unwrap()
         else {
             panic!("frame with a body expected")
         };
@@ -595,31 +672,46 @@ mod tests {
             .unwrap()
     }
 
-    /// `a` creates the group, `b` asks to join and `a` admits it. Returns the
-    /// replies `b` sent after joining (its catch-up request).
+    /// `a` invites `b`, `b` claims, `a` accepts. Returns the replies `b` sent after
+    /// joining (its announcement with the certificate, then its catch-up request).
     fn join(
         a: &Arc<KithClient>,
         sa: &RelaySession,
         b: &Arc<KithClient>,
         sb: &RelaySession,
     ) -> Vec<Vec<u8>> {
-        a.create_group("org".into()).unwrap();
-        let req = sb.join_request(a.device_id()).unwrap();
-        let out = relay_to(b, sa, &req);
-        let Some(RelayEvent::JoinRequested { key_package, .. }) = out.event else {
-            panic!("join request expected")
+        let org = sa.org.clone();
+        let link = a
+            .create_invite(org.clone(), "ws://relay/v1/ws".into(), 60)
+            .unwrap();
+        let info = parse_invite(link.clone()).unwrap();
+        assert_eq!(
+            (info.org.as_str(), info.relay.as_str()),
+            (org.as_str(), "ws://relay/v1/ws")
+        );
+        let claim = sb.claim(link).unwrap();
+        let out = relay_to(b, sa, &claim.frame);
+        let Some(RelayEvent::InviteClaimed { from, code, .. }) = out.event else {
+            panic!("claim expected")
         };
-        let frames = sa.add_member(key_package).unwrap();
+        assert_eq!(code, claim.code);
+        let frames = sa.accept_claim(from).unwrap();
         assert_eq!(frames.len(), 2, "commit + welcome");
         // The commit reaches b before it is a member; the Welcome then adds it.
         let _ = relay_to(a, sb, &frames[0]);
         let out = relay_to(a, sb, &frames[1]);
         assert!(matches!(out.event, Some(RelayEvent::Joined { .. })));
-        assert!(b.is_member("org".into()));
-        assert_eq!(a.group_members("org".into()).unwrap().len(), 2);
-        out.replies
+        assert!(b.is_member(org.clone()));
+        assert_eq!(a.group_members(org).unwrap().len(), 2);
+        assert_eq!(out.replies.len(), 2);
+        assert!(matches!(
+            kith_protocol::decode(&out.replies[0]).unwrap(),
+            kith_protocol::Frame::Announce { orgs } if !orgs[0].proof.is_empty()
+        ));
+        out.replies[1..].to_vec()
     }
 
+    /// `a` created an org; sessions for it on `a` and `b` (not a member yet).
     fn pair() -> (
         Arc<KithClient>,
         Arc<RelaySession>,
@@ -628,8 +720,10 @@ mod tests {
     ) {
         let a = Arc::new(KithClient::new());
         let b = Arc::new(KithClient::new());
-        let sa = a.clone().relay_session("org".into());
-        let sb = b.clone().relay_session("org".into());
+        let org = a.create_org().unwrap();
+        assert!(a.is_admin(org.clone()));
+        let sa = a.clone().relay_session(org.clone());
+        let sb = b.clone().relay_session(org);
         (a, sa, b, sb)
     }
 
@@ -655,8 +749,8 @@ mod tests {
         assert!(matches!(frames[1], kith_protocol::Frame::Announce { .. }));
 
         // Not a member yet: nothing can be sent.
-        let early = a.create("note".into(), b"early".to_vec()).unwrap();
-        assert!(sa.broadcast(early.change_id).is_err());
+        let early = b.create("note".into(), b"early".to_vec()).unwrap();
+        assert!(sb.broadcast(early.change_id).is_err());
         join(&a, &sa, &b, &sb);
 
         // A change made on a reaches b.
@@ -774,12 +868,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("kith.db").to_string_lossy().into_owned();
         let key = generate_secret_key();
-        {
+        let org = {
             let c = KithClient::open(path.clone(), key.clone()).unwrap();
-            c.create_group("org".into()).unwrap();
-        }
+            c.create_org().unwrap()
+        };
         let c = KithClient::open(path, key).unwrap();
-        assert!(c.is_member("org".into()));
+        assert!(c.is_member(org.clone()));
+        assert!(c.is_admin(org));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -36,6 +36,8 @@ const OUTER_KEY_PACKAGE: u8 = 0x13;
 const OUTER_COMMIT_REQUEST: u8 = 0x14;
 const OUTER_COMMITS: u8 = 0x15;
 const OUTER_READD_NEEDED: u8 = 0x16;
+const OUTER_CLAIM: u8 = 0x17;
+const OUTER_CERT: u8 = 0x18;
 
 /// A parsed relay body (outer layer).
 #[derive(Debug, PartialEq, Eq)]
@@ -44,8 +46,25 @@ pub(crate) enum Outer {
     App(Vec<u8>),
     /// MLS commit, broadcast to the group.
     Commit(Vec<u8>),
-    /// MLS Welcome, direct to a new member.
-    Welcome(Vec<u8>),
+    /// MLS Welcome, direct to a new member, with its membership certificate chain
+    /// (hex; empty for a re-add, which keeps the old one).
+    Welcome {
+        /// The MLS Welcome.
+        welcome: Vec<u8>,
+        /// `CertChain::to_hex`, or empty.
+        chain: String,
+    },
+    /// An invite claim (REQ-INV-002): token, proof of the secret, KeyPackage.
+    Claim {
+        /// The invite's token.
+        token: [u8; 16],
+        /// `Invite::claim_proof` over the KeyPackage.
+        proof: [u8; 32],
+        /// The claimer's MLS KeyPackage.
+        key_package: Vec<u8>,
+    },
+    /// A new membership certificate chain for the receiver (hex), e.g. admin rights.
+    Cert(String),
     /// KeyPackage of a device that wants to be added (or re-added), direct to a member.
     KeyPackage(Vec<u8>),
     /// "I am at this epoch, send me the commits since."
@@ -61,7 +80,25 @@ pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
     let (kind, payload): (u8, &[u8]) = match msg {
         Outer::App(b) => (OUTER_APP, b),
         Outer::Commit(b) => (OUTER_COMMIT, b),
-        Outer::Welcome(b) => (OUTER_WELCOME, b),
+        Outer::Welcome { welcome, chain } => {
+            let mut out = vec![OUTER_WELCOME];
+            out.extend_from_slice(&(welcome.len() as u32).to_be_bytes());
+            out.extend_from_slice(welcome);
+            out.extend_from_slice(chain.as_bytes());
+            return out;
+        }
+        Outer::Claim {
+            token,
+            proof,
+            key_package,
+        } => {
+            let mut out = vec![OUTER_CLAIM];
+            out.extend_from_slice(token);
+            out.extend_from_slice(proof);
+            out.extend_from_slice(key_package);
+            return out;
+        }
+        Outer::Cert(chain) => (OUTER_CERT, chain.as_bytes()),
         Outer::KeyPackage(b) => (OUTER_KEY_PACKAGE, b),
         Outer::CommitRequest(e) => {
             let mut out = vec![OUTER_COMMIT_REQUEST];
@@ -111,7 +148,32 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
     let msg = match kind {
         OUTER_APP => Outer::App(rest.to_vec()),
         OUTER_COMMIT => Outer::Commit(rest.to_vec()),
-        OUTER_WELCOME => Outer::Welcome(rest.to_vec()),
+        OUTER_WELCOME => {
+            let n = r.u32()? as usize;
+            let welcome = r.take(n)?.to_vec();
+            let chain = String::from_utf8(std::mem::take(&mut r.0).to_vec())
+                .map_err(|_| "certificate chain is not text")?;
+            if welcome.is_empty() {
+                return Err("empty welcome".into());
+            }
+            Outer::Welcome { welcome, chain }
+        }
+        OUTER_CLAIM => {
+            let token = r.take(16)?.try_into().expect("16 bytes");
+            let proof = r.take(32)?.try_into().expect("32 bytes");
+            let key_package = std::mem::take(&mut r.0).to_vec();
+            if key_package.is_empty() {
+                return Err("empty key package".into());
+            }
+            Outer::Claim {
+                token,
+                proof,
+                key_package,
+            }
+        }
+        OUTER_CERT => Outer::Cert(
+            String::from_utf8(rest.to_vec()).map_err(|_| "certificate chain is not text")?,
+        ),
         OUTER_KEY_PACKAGE => Outer::KeyPackage(rest.to_vec()),
         OUTER_COMMIT_REQUEST => {
             Outer::CommitRequest(u64::from_be_bytes(r.take(8)?.try_into().expect("8 bytes")))
@@ -136,7 +198,7 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
     };
     let fixed = matches!(
         kind,
-        OUTER_COMMIT_REQUEST | OUTER_COMMITS | OUTER_READD_NEEDED
+        OUTER_COMMIT_REQUEST | OUTER_COMMITS | OUTER_READD_NEEDED | OUTER_WELCOME | OUTER_CLAIM
     );
     if fixed && !r.0.is_empty() {
         return Err("trailing bytes".into());
@@ -344,7 +406,20 @@ mod tests {
         for msg in [
             Outer::App(vec![1, 2]),
             Outer::Commit(vec![3]),
-            Outer::Welcome(vec![4]),
+            Outer::Welcome {
+                welcome: vec![4],
+                chain: "ab".into(),
+            },
+            Outer::Welcome {
+                welcome: vec![4, 5],
+                chain: String::new(),
+            },
+            Outer::Claim {
+                token: [1; 16],
+                proof: [2; 32],
+                key_package: vec![3],
+            },
+            Outer::Cert("cd".into()),
             Outer::KeyPackage(vec![5]),
             Outer::CommitRequest(7),
             Outer::Commits(vec![

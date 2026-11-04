@@ -15,8 +15,9 @@ public extension KithClient {
 /// binary messages between the socket and the session. Only devices online at the
 /// same time are reached; `catchUp()` fetches the rest. Every message is
 /// encrypted for the org's MLS group, so the device must be a member:
-/// `client.createGroup(org:)` on the first device, `requestJoin(to:)` on others
-/// (a member admits them with `addMember(keyPackage:)` on `.joinRequested`).
+/// `client.createOrg()` on the first device; others join with an invite
+/// (`client.createInvite(...)` on an admin, `claim(link)` on the new device, and
+/// `acceptClaim(device)` on the admin's `.inviteClaimed`).
 ///
 ///     let conn = RelayConnection(client: client, url: relayURL, org: "my-org",
 ///                                onEvent: { event in ... })
@@ -28,6 +29,9 @@ public final class RelayConnection {
     private let task: URLSessionWebSocketTask
     private let onEvent: (RelayEvent) -> Void
     private let onClose: (Error?) -> Void
+    /// Frames sent before the relay's challenge was answered; nil once it was.
+    private var outbox: [Data]? = []
+    private let lock = NSLock()
 
     /// - Parameters:
     ///   - url: the relay's WebSocket endpoint, e.g. `wss://relay.example.com/v1/ws`.
@@ -50,7 +54,7 @@ public final class RelayConnection {
     public func start() {
         task.resume()
         do {
-            send(try session.hello())
+            sendNow(try session.hello())
         } catch {
             onClose(error)
             return
@@ -78,19 +82,27 @@ public final class RelayConnection {
         }
     }
 
-    /// Ask the member `deviceId` (e.g. from a `.presence` event) to add this device to
-    /// the org. A `.joined` event follows if it does.
-    public func requestJoin(to deviceId: String) {
-        do {
-            send(try session.joinRequest(to: deviceId))
-        } catch {
-            onClose(error)
-        }
+    /// Claim an invite link (connect to its relay and org first, see `parseInvite`).
+    /// Returns the short code to show; `.joined` follows once the admin accepts.
+    public func claim(_ link: String) throws -> String {
+        let out = try session.claim(link: link)
+        send(out.frame)
+        return out.code
     }
 
-    /// Admit the device of a `.joinRequested` event.
-    public func addMember(keyPackage: Data) throws {
-        for frame in try session.addMember(keyPackage: keyPackage) { send(frame) }
+    /// Admit the device of an `.inviteClaimed` event.
+    public func acceptClaim(_ deviceId: String) throws {
+        for frame in try session.acceptClaim(device: deviceId) { send(frame) }
+    }
+
+    /// Refuse the claim of an `.inviteClaimed` event; the invite stays valid.
+    public func rejectClaim(_ deviceId: String) {
+        session.rejectClaim(device: deviceId)
+    }
+
+    /// Make a member an admin (only the org's creator can).
+    public func grantAdmin(_ deviceId: String) throws {
+        send(try session.grantAdmin(device: deviceId))
     }
 
     /// Remove a device from the org's group.
@@ -108,7 +120,19 @@ public final class RelayConnection {
         task.cancel(with: .normalClosure, reason: nil)
     }
 
+    /// Queue until the handshake is done: the relay refuses frames before `auth`.
     private func send(_ data: Data) {
+        lock.lock()
+        if outbox != nil {
+            outbox!.append(data)
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        sendNow(data)
+    }
+
+    private func sendNow(_ data: Data) {
         task.send(.data(data)) { [weak self] error in
             if let error = error { self?.onClose(error) }
         }
@@ -130,7 +154,14 @@ public final class RelayConnection {
                 if let frame = frame {
                     do {
                         let output = try self.session.receive(frame: frame)
-                        for reply in output.replies { self.send(reply) }
+                        // The first message is the challenge: its replies (auth +
+                        // announce) go first, then anything queued meanwhile.
+                        self.lock.lock()
+                        let queued = self.outbox
+                        self.outbox = nil
+                        self.lock.unlock()
+                        for reply in output.replies { self.sendNow(reply) }
+                        for data in queued ?? [] { self.sendNow(data) }
                         if let event = output.event { self.onEvent(event) }
                     } catch {
                         self.onClose(error)
