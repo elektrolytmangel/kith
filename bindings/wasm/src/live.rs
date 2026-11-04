@@ -8,9 +8,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
-use kith_client::{
-    Change, Client, Event, Store, announce_frame, auth_frame, broadcast_frame, hello_frame,
-};
+use kith_client::{Change, Client, Event, Store, broadcast_frame, handshake_reply, hello_frame};
 use kith_protocol::{Frame, decode, encode};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -144,11 +142,10 @@ impl Live {
                     });
                     return;
                 };
-                if let Frame::Challenge { nonce } = &frame {
-                    let c = client.borrow();
-                    send_frame(&ws, &auth_frame(c.signer(), nonce));
-                    // Pipelined: a failed auth makes the relay send an error and close.
-                    send_frame(&ws, &announce_frame(&org, ""));
+                if let Some(replies) = handshake_reply(client.borrow().signer(), &org, &frame) {
+                    for reply in &replies {
+                        send_frame(&ws, reply);
+                    }
                     return;
                 }
                 // Release the borrow before calling into JS, which may call back into the client.

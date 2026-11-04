@@ -65,6 +65,22 @@ pub fn auth_frame(signer: &dyn Signer, nonce: &str) -> kith_protocol::Frame {
     }
 }
 
+/// The frames to send in answer to a relay's `challenge`: the signature that proves
+/// device ownership, then the organization announcement. `None` for any other frame.
+pub fn handshake_reply(
+    signer: &dyn Signer,
+    org: &str,
+    frame: &kith_protocol::Frame,
+) -> Option<Vec<kith_protocol::Frame>> {
+    match frame {
+        kith_protocol::Frame::Challenge { nonce } => {
+            // Pipelined: a failed auth makes the relay send an error and close.
+            Some(vec![auth_frame(signer, nonce), announce_frame(org, "")])
+        }
+        _ => None,
+    }
+}
+
 /// Frame announcing membership of `org` after authenticating.
 /// The relay does not check `proof` yet (REQ-RELAY-004, phase 5).
 pub fn announce_frame(org: &str, proof: &str) -> kith_protocol::Frame {
