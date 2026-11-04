@@ -104,6 +104,19 @@ pub enum PolicyOp {
         /// Minimum write role.
         write: Role,
     },
+    /// Create subgroup `name` (scope `<org>/<name>`, read-restricted, REQ-PERM-003)
+    /// or replace its member list. The author of the first `SetSubgroup` for a
+    /// name is the subgroup's owner: the device that adds and removes members in
+    /// its MLS group. Changes in the subgroup by removed members stay valid only if
+    /// listed in `keep`.
+    SetSubgroup {
+        /// Subgroup name (`a-z 0-9 - _ .`, 1-64).
+        name: String,
+        /// The devices that may read and write it.
+        members: Vec<DeviceId>,
+        /// Changes in the subgroup by removed members that stay valid.
+        keep: Vec<ChangeId>,
+    },
     /// Revoke (`role: None`) or demote `device`. Its changes in `keep` (the ones the
     /// admin had seen) stay valid; all others are judged by the new role.
     Restrict {
@@ -155,6 +168,22 @@ impl PolicyOp {
                 w.push(2);
                 w.push(write.code());
                 w.extend_from_slice(object_type.as_bytes());
+            }
+            PolicyOp::SetSubgroup {
+                name,
+                members,
+                keep,
+            } => {
+                w.push(4);
+                w.push(name.len() as u8);
+                w.extend_from_slice(name.as_bytes());
+                w.extend_from_slice(&(members.len() as u32).to_be_bytes());
+                for m in members {
+                    w.extend_from_slice(&m.0);
+                }
+                for id in keep {
+                    w.extend_from_slice(&id.0);
+                }
             }
             PolicyOp::Restrict { device, role, keep } => {
                 w.push(3);
@@ -239,6 +268,44 @@ impl PolicyOp {
                         .collect(),
                 }
             }
+            4 => {
+                let (&n, rest) = rest.split_first().ok_or(PolicyError("name"))?;
+                let n = n as usize;
+                let name = std::str::from_utf8(rest.get(..n).ok_or(PolicyError("name"))?)
+                    .map_err(|_| PolicyError("name"))?
+                    .to_string();
+                let valid = !name.is_empty()
+                    && name.len() <= 64
+                    && name.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b)
+                    });
+                if !valid {
+                    return Err(PolicyError("name"));
+                }
+                let rest = &rest[n..];
+                let count = u32::from_be_bytes(
+                    rest.get(..4)
+                        .ok_or(PolicyError("members"))?
+                        .try_into()
+                        .expect("4"),
+                ) as usize;
+                let rest = &rest[4..];
+                if rest.len() < count * 32 || !(rest.len() - count * 32).is_multiple_of(32) {
+                    return Err(PolicyError("members"));
+                }
+                let (m, k) = rest.split_at(count * 32);
+                PolicyOp::SetSubgroup {
+                    name,
+                    members: m
+                        .chunks(32)
+                        .map(|c| DeviceId(c.try_into().expect("32")))
+                        .collect(),
+                    keep: k
+                        .chunks(32)
+                        .map(|c| ChangeId(c.try_into().expect("32")))
+                        .collect(),
+                }
+            }
             _ => return Err(PolicyError("unknown kind")),
         })
     }
@@ -259,6 +326,12 @@ pub struct Policy {
     pub kept: BTreeMap<DeviceId, HashSet<ChangeId>>,
     /// Admins in the order they became admins (seniority; creator first).
     pub admin_order: Vec<DeviceId>,
+    /// Subgroups: name → members.
+    pub subgroups: BTreeMap<String, BTreeSet<DeviceId>>,
+    /// Subgroup owners (author of the first `SetSubgroup` for the name).
+    pub subgroup_owners: BTreeMap<String, DeviceId>,
+    /// Changes in subgroups kept valid after their authors were removed.
+    pub subgroup_kept: HashSet<ChangeId>,
     /// The policy changes that counted.
     pub accepted: BTreeSet<ChangeId>,
 }
@@ -291,8 +364,20 @@ impl Policy {
         {
             return true;
         }
+        // A subgroup's data: only its members (or kept changes of former members).
+        if let Some(name) = change.body.scope.subgroup_name() {
+            let member = self.subgroups.get(name).is_some_and(|m| m.contains(author));
+            if !member {
+                return self.subgroup_kept.contains(&change.change_id);
+            }
+        }
         self.role_of(author)
             .is_some_and(|r| r >= self.write_rule(change.body.object_type.as_str()))
+    }
+
+    /// The members of subgroup `name`, if it exists.
+    pub fn subgroup(&self, name: &str) -> Option<&BTreeSet<DeviceId>> {
+        self.subgroups.get(name)
     }
 
     fn seniority(&self, device: &DeviceId) -> usize {
@@ -393,6 +478,16 @@ impl Policy {
             }
             PolicyOp::SetRule { object_type, write } => {
                 self.rules.insert(object_type, write);
+                true
+            }
+            PolicyOp::SetSubgroup {
+                name,
+                members,
+                keep,
+            } => {
+                self.subgroup_owners.entry(name.clone()).or_insert(author);
+                self.subgroups.insert(name, members.into_iter().collect());
+                self.subgroup_kept.extend(keep);
                 true
             }
             PolicyOp::Restrict { device, role, keep } => {
@@ -712,6 +807,60 @@ mod tests {
                 .accepted
                 .contains(&bad.change_id)
         );
+    }
+
+    /// req: REQ-PERM-003
+    #[test]
+    fn subgroups_limit_writes_to_their_members() {
+        let org = Org::new();
+        let (creator, alice, bob) = (key(), key(), key());
+        let g = org.op(
+            &creator,
+            vec![],
+            PolicyOp::Genesis {
+                admin: org.admin_cert(&creator),
+            },
+        );
+        let make = PolicyOp::SetSubgroup {
+            name: "finance".into(),
+            members: vec![creator.device_id(), alice.device_id()],
+            keep: vec![],
+        };
+        assert_eq!(PolicyOp::decode(&make.encode()).unwrap(), make);
+        let sg = org.op(&creator, vec![g.change_id], make);
+        let in_sub = |by: &K| {
+            Change::sign(
+                UnsignedChange {
+                    scope: crate::Scope::subgroup(&org.id, "finance").unwrap(),
+                    object_id: ObjectId::random(),
+                    object_type: ObjectType::new("ledger"),
+                    parents: vec![],
+                    timestamp_ms: 1,
+                    payload: vec![],
+                },
+                by,
+            )
+        };
+        let p = Policy::fold(&org.id, &[g.clone(), sg.clone()]);
+        assert_eq!(p.subgroup_owners.get("finance"), Some(&creator.device_id()));
+        let by_alice = in_sub(&alice);
+        assert!(p.allows(&by_alice));
+        assert!(!p.allows(&in_sub(&bob)), "not a member");
+        // Alice is removed; her change the admin had seen stays.
+        let rm = org.op(
+            &creator,
+            vec![sg.change_id],
+            PolicyOp::SetSubgroup {
+                name: "finance".into(),
+                members: vec![creator.device_id()],
+                keep: vec![by_alice.change_id],
+            },
+        );
+        let p = Policy::fold(&org.id, &[g, sg, rm]);
+        assert!(p.allows(&by_alice));
+        assert!(!p.allows(&in_sub(&alice)));
+        assert_eq!(p.subgroup("finance").map(|m| m.len()), Some(1));
+        assert!(PolicyOp::decode(&[1, 4, 3, b'B', b'a', b'd', 0, 0, 0, 0]).is_err());
     }
 
     #[test]

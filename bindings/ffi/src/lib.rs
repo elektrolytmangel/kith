@@ -342,6 +342,8 @@ pub enum RelayEvent {
     ReAddRequested { org: String, from: String },
     /// We re-added `device`, which had fallen too far behind.
     MemberReAdded { org: String, device: String },
+    /// We (a subgroup's owner) added `device` to subgroup `org` (`<org>/<name>`).
+    MemberAdded { org: String, device: String },
     /// Two members changed the group at the same time. `we_win` false: this device
     /// asked `peer` to re-add it (data catches up afterwards); nothing to do for the app.
     Fork {
@@ -454,9 +456,56 @@ impl RelaySession {
     /// once a `Presence` event shows another device); also use it on a new device
     /// to download the full history. The relay's `Receipt` event has an empty
     /// `delivered` list if nobody was online. Answers arrive through `receive`.
-    pub fn catch_up(&self) -> Result<Vec<u8>, KithError> {
+    /// Also covers the subgroups this device is in. Send all frames.
+    pub fn catch_up(&self) -> Result<Vec<Vec<u8>>, KithError> {
         let mut c = self.client.inner.lock().unwrap();
-        encode_frame(&c.sync_request_frame(&self.org)?)
+        c.sync_request_frames(&self.org)?
+            .iter()
+            .map(encode_frame)
+            .collect()
+    }
+
+    /// Create read-restricted subgroup `name` with `members` (hex IDs; admins
+    /// only). Data created with `createIn("<org>/<name>", ...)` only reaches its
+    /// members. This device runs the subgroup and must be online for members to be
+    /// added. Send all frames.
+    pub fn create_subgroup(
+        &self,
+        name: String,
+        members: Vec<String>,
+    ) -> Result<Vec<Vec<u8>>, KithError> {
+        let mut c = self.client.inner.lock().unwrap();
+        c.create_subgroup(&self.org, &name, &members)?
+            .iter()
+            .map(encode_frame)
+            .collect()
+    }
+
+    /// Replace the members of subgroup `name` (admins only). Send all frames.
+    pub fn set_subgroup_members(
+        &self,
+        name: String,
+        members: Vec<String>,
+    ) -> Result<Vec<Vec<u8>>, KithError> {
+        let mut c = self.client.inner.lock().unwrap();
+        c.set_subgroup_members(&self.org, &name, &members)?
+            .iter()
+            .map(encode_frame)
+            .collect()
+    }
+
+    /// Members of subgroup `name` per the policy (`nil`/`null` if it does not exist).
+    pub fn subgroup_members(&self, name: String) -> Option<Vec<String>> {
+        self.client
+            .inner
+            .lock()
+            .unwrap()
+            .subgroup_members(&self.org, &name)
+    }
+
+    /// Subgroups of this org this device can read.
+    pub fn my_subgroups(&self) -> Vec<String> {
+        self.client.inner.lock().unwrap().my_subgroups(&self.org)
     }
 
     /// Claim an invite link (on the new device; open this session for the link's
@@ -649,6 +698,7 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
         },
         Event::ReAddRequested { org, from } => RelayEvent::ReAddRequested { org, from },
         Event::MemberReAdded { org, device } => RelayEvent::MemberReAdded { org, device },
+        Event::MemberAdded { org, device } => RelayEvent::MemberAdded { org, device },
         Event::Fork { org, peer, we_win } => RelayEvent::Fork { org, peer, we_win },
         Event::Ignored => return None,
     })
@@ -856,7 +906,7 @@ mod tests {
             Some(RelayEvent::GroupChanged { removed: false, .. })
         ));
         // Roles: b first catches up (it gets the policy), then a demotes and removes it.
-        bounce((&b, &sb), (&a, &sa), vec![sb.catch_up().unwrap()]);
+        bounce((&b, &sb), (&a, &sa), sb.catch_up().unwrap());
         let demote = relay_to(
             &a,
             &sb,
@@ -915,7 +965,7 @@ mod tests {
         ));
         assert_eq!(b.history(created.object_id.clone()).unwrap().len(), 2);
         // And catch_up works the same way later: nothing to do now.
-        let served = relay_to(&b, &sa, &sb.catch_up().unwrap());
+        let served = relay_to(&b, &sa, &sb.catch_up().unwrap()[0]);
         let compared = relay_to(&a, &sb, &served.replies[0]);
         assert!(matches!(
             compared.event,
@@ -951,6 +1001,28 @@ mod tests {
         assert!(matches!(out.event, Some(RelayEvent::Rejected { .. })));
         assert!(sb.receive(b"not a frame".to_vec()).is_err());
         assert!(b.history(created.object_id).unwrap().is_empty());
+    }
+
+    /// req: REQ-PERM-003
+    #[test]
+    fn subgroups_through_sessions() {
+        let (a, sa, b, sb) = pair();
+        // b's catch-up after joining brings it the policy.
+        let catch_up = join(&a, &sa, &b, &sb);
+        bounce((&b, &sb), (&a, &sa), catch_up);
+        let frames = sa
+            .create_subgroup("finance".into(), vec![b.device_id()])
+            .unwrap();
+        bounce((&a, &sa), (&b, &sb), frames);
+        assert_eq!(sb.my_subgroups(), vec!["finance".to_string()]);
+        assert_eq!(sa.subgroup_members("finance".into()).unwrap().len(), 2);
+        let scope = format!("{}/finance", sa.org);
+        let c = a
+            .create_in(scope.clone(), "ledger".into(), b"x".to_vec())
+            .unwrap();
+        let out = relay_to(&a, &sb, &sa.broadcast(c.change_id.clone()).unwrap());
+        assert!(matches!(out.event, Some(RelayEvent::Received { .. })));
+        assert!(a.create_in("bad scope".into(), "x".into(), vec![]).is_err());
     }
 
     /// req: REQ-ENC-001

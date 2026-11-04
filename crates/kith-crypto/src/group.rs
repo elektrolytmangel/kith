@@ -494,6 +494,22 @@ impl Groups {
         ser(&msg)
     }
 
+    /// The group (org or `org/subgroup` key) a message belongs to, read from its
+    /// clear header without decrypting.
+    pub fn message_group(message: &[u8]) -> Result<String, GroupError> {
+        let msg = MlsMessageIn::tls_deserialize_exact(message)
+            .map_err(invalid)?
+            .try_into_protocol_message()
+            .map_err(invalid)?;
+        String::from_utf8(msg.group_id().as_slice().to_vec())
+            .map_err(|_| GroupError::Invalid("group id is not text".into()))
+    }
+
+    /// True if this device has state for group `key` (member or removed).
+    pub fn has_group(&self, key: &str) -> bool {
+        self.groups.contains_key(key)
+    }
+
     /// The epoch a message (application or commit) was sent in, read from its
     /// clear header without decrypting.
     pub fn message_epoch(message: &[u8]) -> Result<Epoch, GroupError> {

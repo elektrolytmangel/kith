@@ -164,6 +164,18 @@ if (process.env.KITH_RELAY_BIN) {
     await waitFor(evC, (e) => e.type === "receipt" && e.delivered.length === 1, "catch-up receipt");
     assert.throws(() => new kith.KithClient().catchUp(), /not connected/);
 
+    // A read-restricted subgroup: b is in "finance", c is not.
+    const fin = `${org}/finance`;
+    a.createSubgroup("finance", [b.deviceId()]);
+    await waitFor(evB, (e) => e.type === "joined" && e.org === fin, "b to join finance");
+    assert.deepEqual(b.mySubgroups(org), ["finance"]);
+    assert.deepEqual(c.mySubgroups(org), []);
+    const ledger = a.createIn(fin, "acme.ledger", new TextEncoder().encode("q3"));
+    await waitFor(evB, (e) => e.type === "received" && e.objectId === ledger, "b to receive the ledger");
+    assert.equal(b.historyLength(ledger), 1);
+    assert.equal(c.historyLength(ledger), 0);
+    assert.throws(() => c.createIn(fin, "acme.ledger", new Uint8Array()), /not a member/);
+
     a.disconnect();
     b.disconnect();
     c.disconnect();

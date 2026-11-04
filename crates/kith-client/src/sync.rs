@@ -65,15 +65,35 @@ pub(crate) enum Outer {
     },
     /// A new membership certificate chain for the receiver (hex), e.g. admin rights.
     Cert(String),
-    /// KeyPackage of a device that wants to be added (or re-added), direct to a member.
-    KeyPackage(Vec<u8>),
-    /// "I am at this epoch, send me the commits since."
-    CommitRequest(u64),
-    /// Commits in epoch order with their committers, answering a `CommitRequest`
-    /// (or showing a peer on a losing fork branch the winning commit).
-    Commits(Vec<(DeviceId, Vec<u8>)>),
-    /// "My commit log does not reach back to your epoch; send a KeyPackage to be re-added."
-    ReaddNeeded,
+    /// KeyPackage of a device that wants to be added (or re-added) to `group` (the
+    /// org, or `org/subgroup`), direct to a member.
+    KeyPackage {
+        /// Group key.
+        group: String,
+        /// The KeyPackage.
+        key_package: Vec<u8>,
+    },
+    /// "I am at this epoch of `group`, send me the commits since."
+    CommitRequest {
+        /// Group key.
+        group: String,
+        /// Our epoch.
+        epoch: u64,
+    },
+    /// Commits of `group` in epoch order with their committers, answering a
+    /// `CommitRequest` (or showing a peer on a losing fork branch the winning commit).
+    Commits {
+        /// Group key.
+        group: String,
+        /// (committer, commit).
+        commits: Vec<(DeviceId, Vec<u8>)>,
+    },
+    /// "My commit log for `group` does not reach back to your epoch; send a
+    /// KeyPackage to be re-added."
+    ReaddNeeded {
+        /// Group key.
+        group: String,
+    },
 }
 
 pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
@@ -99,23 +119,34 @@ pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
             return out;
         }
         Outer::Cert(chain) => (OUTER_CERT, chain.as_bytes()),
-        Outer::KeyPackage(b) => (OUTER_KEY_PACKAGE, b),
-        Outer::CommitRequest(e) => {
-            let mut out = vec![OUTER_COMMIT_REQUEST];
-            out.extend_from_slice(&e.to_be_bytes());
+        Outer::KeyPackage { group, key_package } => {
+            let mut out = vec![OUTER_KEY_PACKAGE];
+            put_group(&mut out, group);
+            out.extend_from_slice(key_package);
             return out;
         }
-        Outer::Commits(cs) => {
+        Outer::CommitRequest { group, epoch } => {
+            let mut out = vec![OUTER_COMMIT_REQUEST];
+            put_group(&mut out, group);
+            out.extend_from_slice(&epoch.to_be_bytes());
+            return out;
+        }
+        Outer::Commits { group, commits } => {
             let mut out = vec![OUTER_COMMITS];
-            out.extend_from_slice(&(cs.len() as u32).to_be_bytes());
-            for (committer, c) in cs {
+            put_group(&mut out, group);
+            out.extend_from_slice(&(commits.len() as u32).to_be_bytes());
+            for (committer, c) in commits {
                 out.extend_from_slice(&committer.0);
                 out.extend_from_slice(&(c.len() as u32).to_be_bytes());
                 out.extend_from_slice(c);
             }
             return out;
         }
-        Outer::ReaddNeeded => return vec![OUTER_READD_NEEDED],
+        Outer::ReaddNeeded { group } => {
+            let mut out = vec![OUTER_READD_NEEDED];
+            put_group(&mut out, group);
+            return out;
+        }
     };
     let mut out = Vec::with_capacity(1 + payload.len());
     out.push(kind);
@@ -123,21 +154,35 @@ pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
     out
 }
 
-/// `Commits` bodies for `commits`, split to stay under the frame limit, in order.
-pub(crate) fn commits_bodies(commits: Vec<kith_crypto::group::LoggedCommit>) -> Vec<Vec<u8>> {
+fn put_group(out: &mut Vec<u8>, group: &str) {
+    out.push(group.len().min(255) as u8);
+    out.extend_from_slice(&group.as_bytes()[..group.len().min(255)]);
+}
+
+/// `Commits` bodies of `group` for `commits`, split to stay under the frame limit, in order.
+pub(crate) fn commits_bodies(
+    group: &str,
+    commits: Vec<kith_crypto::group::LoggedCommit>,
+) -> Vec<Vec<u8>> {
     let mut bodies = vec![];
     let mut batch = vec![];
     let mut size = 0;
+    let body = |commits| {
+        outer_body(&Outer::Commits {
+            group: group.into(),
+            commits,
+        })
+    };
     for c in commits {
         if size + c.commit.len() > MAX_OFFER_BYTES && !batch.is_empty() {
-            bodies.push(outer_body(&Outer::Commits(std::mem::take(&mut batch))));
+            bodies.push(body(std::mem::take(&mut batch)));
             size = 0;
         }
         size += c.commit.len();
         batch.push((c.committer, c.commit));
     }
     if !batch.is_empty() {
-        bodies.push(outer_body(&Outer::Commits(batch)));
+        bodies.push(body(batch));
     }
     bodies
 }
@@ -174,11 +219,23 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
         OUTER_CERT => Outer::Cert(
             String::from_utf8(rest.to_vec()).map_err(|_| "certificate chain is not text")?,
         ),
-        OUTER_KEY_PACKAGE => Outer::KeyPackage(rest.to_vec()),
+        OUTER_KEY_PACKAGE => {
+            let group = r.group()?;
+            let key_package = std::mem::take(&mut r.0).to_vec();
+            if key_package.is_empty() {
+                return Err("empty key package".into());
+            }
+            Outer::KeyPackage { group, key_package }
+        }
         OUTER_COMMIT_REQUEST => {
-            Outer::CommitRequest(u64::from_be_bytes(r.take(8)?.try_into().expect("8 bytes")))
+            let group = r.group()?;
+            Outer::CommitRequest {
+                group,
+                epoch: u64::from_be_bytes(r.take(8)?.try_into().expect("8 bytes")),
+            }
         }
         OUTER_COMMITS => {
+            let group = r.group()?;
             let n = r.u32()? as usize;
             if n > r.0.len() / 36 {
                 return Err("commit count exceeds data".into());
@@ -189,16 +246,21 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
                 let len = r.u32()? as usize;
                 cs.push((committer, r.take(len)?.to_vec()));
             }
-            Outer::Commits(cs)
+            Outer::Commits { group, commits: cs }
         }
-        OUTER_READD_NEEDED => Outer::ReaddNeeded,
+        OUTER_READD_NEEDED => Outer::ReaddNeeded { group: r.group()? },
         // 1..=3 were plaintext data bodies before MLS (hard break, ADR 0004).
         1..=3 => return Err("unencrypted body refused".into()),
         other => return Err(format!("unknown body kind {other}")),
     };
     let fixed = matches!(
         kind,
-        OUTER_COMMIT_REQUEST | OUTER_COMMITS | OUTER_READD_NEEDED | OUTER_WELCOME | OUTER_CLAIM
+        OUTER_COMMIT_REQUEST
+            | OUTER_COMMITS
+            | OUTER_READD_NEEDED
+            | OUTER_WELCOME
+            | OUTER_CLAIM
+            | OUTER_KEY_PACKAGE
     );
     if fixed && !r.0.is_empty() {
         return Err("trailing bytes".into());
@@ -338,6 +400,15 @@ impl<'a> Reader<'a> {
         ))
     }
 
+    fn group(&mut self) -> Result<String, String> {
+        let n = self.take(1)?[0] as usize;
+        let g = String::from_utf8(self.take(n)?.to_vec()).map_err(|_| "group is not text")?;
+        if g.is_empty() {
+            return Err("empty group".into());
+        }
+        Ok(g)
+    }
+
     fn ids(&mut self) -> Result<Vec<ChangeId>, String> {
         let n = self.u32()? as usize;
         // 32 bytes per ID: a huge count fails here instead of allocating.
@@ -420,18 +491,33 @@ mod tests {
                 key_package: vec![3],
             },
             Outer::Cert("cd".into()),
-            Outer::KeyPackage(vec![5]),
-            Outer::CommitRequest(7),
-            Outer::Commits(vec![
-                (DeviceId([7; 32]), vec![1]),
-                (DeviceId([8; 32]), vec![2, 3]),
-            ]),
-            Outer::Commits(vec![]),
-            Outer::ReaddNeeded,
+            Outer::KeyPackage {
+                group: "g".into(),
+                key_package: vec![5],
+            },
+            Outer::CommitRequest {
+                group: "g/s".into(),
+                epoch: 7,
+            },
+            Outer::Commits {
+                group: "g".into(),
+                commits: vec![
+                    (DeviceId([7; 32]), vec![1]),
+                    (DeviceId([8; 32]), vec![2, 3]),
+                ],
+            },
+            Outer::Commits {
+                group: "g".into(),
+                commits: vec![],
+            },
+            Outer::ReaddNeeded { group: "g".into() },
         ] {
             assert_eq!(parse_outer(&outer_body(&msg)).unwrap(), msg);
         }
-        let body = outer_body(&Outer::Commits(vec![(DeviceId([7; 32]), vec![1, 2])]));
+        let body = outer_body(&Outer::Commits {
+            group: "g".into(),
+            commits: vec![(DeviceId([7; 32]), vec![1, 2])],
+        });
         for len in 1..body.len() {
             assert!(parse_outer(&body[..len]).is_err(), "len {len}");
         }
@@ -458,12 +544,12 @@ mod tests {
                 commit: vec![i; 200 * 1024],
             })
             .collect();
-        let bodies = commits_bodies(commits.clone());
+        let bodies = commits_bodies("g", commits.clone());
         assert!(bodies.len() >= 2);
         let back: Vec<(DeviceId, Vec<u8>)> = bodies
             .iter()
             .flat_map(|b| match parse_outer(b).unwrap() {
-                Outer::Commits(cs) => cs,
+                Outer::Commits { commits, .. } => commits,
                 _ => panic!("commits expected"),
             })
             .collect();

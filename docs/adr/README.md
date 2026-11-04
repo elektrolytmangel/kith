@@ -9,6 +9,7 @@ Open questions from the design doc that are waiting for an ADR:
 - [x] Automerge for all types vs. detect-and-resolve (REQ-DATA-004): [ADR 0003](0003-merge-automerge-default-pluggable.md)
 - [x] MLS implementation, ciphersuite, KeyPackage distribution (REQ-ENC-001..004): [ADR 0004](0004-mls-openmls-rustcrypto.md)
 - [x] Ordering of concurrent MLS commits (REQ-ENC-001): fork resolution in [ADR 0004](0004-mls-openmls-rustcrypto.md)
+- [x] Read-restricted subgroups (REQ-PERM-003): [ADR 0008](0008-subgroups.md)
 - [x] Scope in the change envelope (REQ-PERM-003): [ADR 0007](0007-scope-in-change-envelope.md)
 - [x] Org identity, membership proofs, invitations (REQ-ID-003, REQ-INV-*, REQ-RELAY-004): [ADR 0005](0005-org-root-key-certificates-invites.md)
 - [x] 30 s relay buffer vs. "no persistence" (REQ-RELAY-005): no buffer (user, 2026-11-04); always-on client instead

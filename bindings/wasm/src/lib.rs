@@ -277,6 +277,47 @@ impl KithClient {
         self.inner.borrow().group_members(org).map_err(js_err)
     }
 
+    /// Create read-restricted subgroup `name` of the connected org with `members`
+    /// (array of hex IDs; admins only). Data created with
+    /// `createIn(org + "/" + name, ...)` only reaches its members. This device runs
+    /// the subgroup and must be online for members to be added.
+    #[wasm_bindgen(js_name = createSubgroup)]
+    pub fn create_subgroup(&self, name: &str, members: Vec<String>) -> Result<(), JsError> {
+        let live = self.live()?;
+        let frames = self
+            .inner
+            .borrow_mut()
+            .create_subgroup(live.org(), name, &members)
+            .map_err(js_err)?;
+        live.send(&frames);
+        Ok(())
+    }
+
+    /// Replace the members of subgroup `name` of the connected org (admins only).
+    #[wasm_bindgen(js_name = setSubgroupMembers)]
+    pub fn set_subgroup_members(&self, name: &str, members: Vec<String>) -> Result<(), JsError> {
+        let live = self.live()?;
+        let frames = self
+            .inner
+            .borrow_mut()
+            .set_subgroup_members(live.org(), name, &members)
+            .map_err(js_err)?;
+        live.send(&frames);
+        Ok(())
+    }
+
+    /// Members of subgroup `name` of `org` per the policy, or `undefined`.
+    #[wasm_bindgen(js_name = subgroupMembers)]
+    pub fn subgroup_members(&self, org: &str, name: &str) -> Option<Vec<String>> {
+        self.inner.borrow().subgroup_members(org, name)
+    }
+
+    /// Subgroups of `org` this device can read.
+    #[wasm_bindgen(js_name = mySubgroups)]
+    pub fn my_subgroups(&self, org: &str) -> Vec<String> {
+        self.inner.borrow().my_subgroups(org)
+    }
+
     /// Remove `device` (hex) from the connected org: out of the encrypted group and
     /// revoked in the policy. Admins only.
     #[wasm_bindgen(js_name = removeMember)]

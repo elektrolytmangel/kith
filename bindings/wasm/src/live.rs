@@ -177,6 +177,11 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "org", org);
             set(&o, "from", from);
         }
+        Event::MemberAdded { org, device } => {
+            set(&o, "type", "memberAdded");
+            set(&o, "org", org);
+            set(&o, "device", device);
+        }
         Event::MemberReAdded { org, device } => {
             set(&o, "type", "memberReAdded");
             set(&o, "org", org);
@@ -320,11 +325,11 @@ impl Live {
 
     /// Ask one online peer for the changes we lack and offer ours.
     pub fn catch_up(&self, client: &SharedClient) -> Result<(), String> {
-        let frame = client
+        let frames = client
             .borrow_mut()
-            .sync_request_frame(&self.org)
+            .sync_request_frames(&self.org)
             .map_err(|e| e.to_string())?;
-        self.send(&[frame]);
+        self.send(&frames);
         Ok(())
     }
 

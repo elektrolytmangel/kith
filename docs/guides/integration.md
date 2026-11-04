@@ -59,6 +59,21 @@ this device belongs to, so most apps never name a scope. A device in several org
 uses `createIn(org, type, payload)` (Rust: `create_in`, `create_document_in`); each
 org's data only ever syncs with that org ([ADR 0007](../adr/0007-scope-in-change-envelope.md)).
 
+### Subgroups (read-restricted data)
+
+Data that only some members may read goes into a subgroup, with its own encryption
+keys ([ADR 0008](../adr/0008-subgroups.md)):
+
+```ts
+client.createSubgroup("finance", [aliceId, bobId]);   // admins; this device runs it
+client.createIn(`${org}/finance`, "acme.ledger", bytes); // only finance members get it
+client.mySubgroups(org);                                 // ["finance"] on members
+client.setSubgroupMembers("finance", [aliceId]);         // bob loses access to new data
+```
+
+Members join automatically once they see the subgroup in the policy, while the
+device that created it is online. `catchUp()` also catches up the subgroups.
+
 ### Roles and write permissions
 
 Every org has a policy that all devices enforce on every change

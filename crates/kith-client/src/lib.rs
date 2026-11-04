@@ -301,6 +301,13 @@ pub enum Event {
         /// The peer that will re-add us (hex).
         from: String,
     },
+    /// We (the subgroup's owner) added `device` to subgroup `org` (`org/name`).
+    MemberAdded {
+        /// Group key (`org/name`).
+        org: String,
+        /// The device (hex).
+        device: String,
+    },
     /// We re-added `device`, which had fallen too far behind (REQ-ENC-004).
     MemberReAdded {
         /// Organization.
@@ -344,8 +351,10 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     /// Per org: the epoch at which we last asked to be re-added after losing a
     /// fork, so one fork sends one request, not one per message.
     readd_asked: std::collections::HashMap<String, u64>,
-    /// Per org: our running catch-up reconciliation (one at a time).
+    /// Per scope: our running catch-up reconciliation (one at a time).
     reconciling: std::collections::HashMap<String, kith_sync::Reconciliation>,
+    /// Subgroups we sent our KeyPackage to the owner for (RAM; `sync_request_frames` retries).
+    kp_asked: std::collections::HashSet<String>,
     /// Certificates, root keys, issued invites.
     orgs: org::Orgs,
     /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
@@ -375,6 +384,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             groups,
             readd_asked: Default::default(),
             reconciling: Default::default(),
+            kp_asked: Default::default(),
             orgs,
             claims: Default::default(),
             policies: Default::default(),
@@ -435,6 +445,11 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     /// `local`, or an org (or subgroup of one) this device is a member of.
     fn check_scope(&self, scope: &Scope) -> Result<(), ClientError> {
+        if scope.subgroup_name().is_some() && !self.groups.is_member(scope.as_str()) {
+            return Err(ClientError::Forbidden(format!(
+                "not a member of subgroup {scope}"
+            )));
+        }
         match scope.org_id() {
             None => Ok(()),
             Some(org)
@@ -654,6 +669,101 @@ impl<S: Store, K: Signer> Client<S, K> {
                 keep,
             },
         )
+    }
+
+    /// Create read-restricted subgroup `name` of `org` with `members` (hex; this
+    /// device is always included) (REQ-PERM-003). Admins only. This device becomes
+    /// the subgroup's owner: it runs its MLS group and must be online for members to
+    /// be added (they send it their KeyPackage once they see the policy). Data in
+    /// scope `org/name` ([`Scope::subgroup`]) only reaches members. Send the frames.
+    pub fn create_subgroup(
+        &mut self,
+        org: &str,
+        name: &str,
+        members: &[String],
+    ) -> Result<Vec<Frame>, ClientError> {
+        let org_id = DeviceId::from_hex(org)?;
+        Scope::subgroup(&org_id, name).map_err(|e| ClientError::Forbidden(e.to_string()))?;
+        if self
+            .policies
+            .get(org)
+            .is_some_and(|p| p.subgroup(name).is_some())
+        {
+            return Err(ClientError::Forbidden(format!("subgroup {name} exists")));
+        }
+        self.set_subgroup_members(org, name, members)
+    }
+
+    /// Replace the members of subgroup `name` (hex IDs; admins only). Removed
+    /// members keep the subgroup changes this device has seen; the owner removes them
+    /// from the MLS group, so they cannot read anything new. Send the frames.
+    pub fn set_subgroup_members(
+        &mut self,
+        org: &str,
+        name: &str,
+        members: &[String],
+    ) -> Result<Vec<Frame>, ClientError> {
+        let org_id = DeviceId::from_hex(org)?;
+        let scope =
+            Scope::subgroup(&org_id, name).map_err(|e| ClientError::Forbidden(e.to_string()))?;
+        let mut list: Vec<DeviceId> = members
+            .iter()
+            .map(|m| DeviceId::from_hex(m))
+            .collect::<Result<_, _>>()?;
+        let me = self.device_id();
+        let owner = self
+            .policies
+            .get(org)
+            .and_then(|p| p.subgroup_owners.get(name).copied())
+            .unwrap_or(me);
+        for d in [me, owner] {
+            if !list.contains(&d) {
+                list.push(d);
+            }
+        }
+        list.sort();
+        list.dedup();
+        // Changes by members being removed that we have seen stay valid.
+        let mut keep = vec![];
+        for id in self.store.scope_ids(&scope)? {
+            if !self.invalid.contains(&id)
+                && let Some(c) = self.store.get(&id)?
+                && !list.contains(&c.author)
+            {
+                keep.push(id);
+            }
+        }
+        let change = self.policy_commit(
+            org,
+            PolicyOp::SetSubgroup {
+                name: name.into(),
+                members: list,
+                keep,
+            },
+        )?;
+        let mut frames = vec![self.broadcast_frame(org, &change)?];
+        frames.extend(self.subgroup_tasks()?);
+        Ok(frames)
+    }
+
+    /// Members (hex) of subgroup `name` of `org` per the policy, if it exists.
+    pub fn subgroup_members(&self, org: &str, name: &str) -> Option<Vec<String>> {
+        self.policies
+            .get(org)?
+            .subgroup(name)
+            .map(|m| m.iter().map(DeviceId::to_hex).collect())
+    }
+
+    /// Subgroups of `org` this device can read (it is in their MLS group).
+    pub fn my_subgroups(&self, org: &str) -> Vec<String> {
+        self.groups
+            .orgs()
+            .into_iter()
+            .filter_map(|g| {
+                let name = g.strip_prefix(org)?.strip_prefix('/')?.to_string();
+                self.groups.is_member(&g).then_some(name)
+            })
+            .collect()
     }
 
     fn changes_by(&self, device: &DeviceId) -> Result<Vec<ChangeId>, ClientError> {
@@ -964,11 +1074,23 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     /// Ask the member `to` to re-add this device (after a fork or falling too far
     /// behind, REQ-ENC-004): sends a fresh KeyPackage.
-    fn readd_request_frame(&mut self, org: &str, to: &str) -> Result<Frame, ClientError> {
-        let kp = self.groups.key_package(&self.key)?;
+    fn readd_request_frame(
+        &mut self,
+        org: &str,
+        group: &str,
+        to: &str,
+    ) -> Result<Frame, ClientError> {
+        let key_package = self.groups.key_package(&self.key)?;
         // The private part must be stored before the KeyPackage leaves.
         self.save_groups()?;
-        Ok(direct(org, to, sync::outer_body(&Outer::KeyPackage(kp))))
+        Ok(direct(
+            org,
+            to,
+            sync::outer_body(&Outer::KeyPackage {
+                group: group.into(),
+                key_package,
+            }),
+        ))
     }
 
     fn readded_frames(&self, org: &str, added: kith_crypto::Added) -> Vec<Frame> {
@@ -1025,13 +1147,14 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Frame that broadcasts a new change, encrypted for `org`'s group, to the
     /// other online devices (REQ-SYNC-004).
     pub fn broadcast_frame(&mut self, org: &str, change: &Change) -> Result<Frame, ClientError> {
-        if change.body.scope.as_str() != org {
+        if !in_org(org, change.body.scope.as_str()) {
             return Err(ClientError::Forbidden(format!(
                 "change belongs to scope {}, not org {org}",
                 change.body.scope
             )));
         }
-        let body = self.app_body(org, &sync::change_body(change))?;
+        // Encrypted for the scope's group: subgroup data only its members can read.
+        let body = self.app_body(change.body.scope.as_str(), &sync::change_body(change))?;
         self.save_groups()?;
         Ok(Frame::Broadcast {
             org: org.into(),
@@ -1054,13 +1177,164 @@ impl<S: Store, K: Signer> Client<S, K> {
         })
     }
 
-    /// Start (or restart) our reconciliation for `org`; returns the encrypted first query.
-    fn start_reconcile(&mut self, org: &str) -> Result<Vec<u8>, ClientError> {
-        let ids = self.store.scope_ids(&org_scope(org)?)?;
+    /// Start (or restart) our reconciliation for `scope` (an org or `org/subgroup`
+    /// key); returns the first query, encrypted for that scope's group.
+    fn start_reconcile(&mut self, scope: &str) -> Result<Vec<u8>, ClientError> {
+        let ids = self.store.scope_ids(&org_scope(scope)?)?;
         let (r, first) = kith_sync::Reconciliation::start(&ids)?;
-        let body = self.app_body(org, &sync::query_body(&first))?;
-        self.reconciling.insert(org.into(), r);
+        let body = self.app_body(scope, &sync::query_body(&first))?;
+        self.reconciling.insert(scope.into(), r);
         Ok(body)
+    }
+
+    /// Catch-up requests for `org` and for each of its subgroups this device is in
+    /// (those go `direct` to a subgroup member: the relay does not know them), plus
+    /// any pending subgroup membership messages.
+    pub fn sync_request_frames(&mut self, org: &str) -> Result<Vec<Frame>, ClientError> {
+        let mut frames = vec![self.sync_request_frame(org)?];
+        let me = self.device_id();
+        let subs: Vec<String> = self
+            .groups
+            .orgs()
+            .into_iter()
+            .filter(|g| in_org(org, g) && g.as_str() != org && self.groups.is_member(g))
+            .collect();
+        for g in subs {
+            let owner = self.subgroup_owner(org, &g);
+            let peer = owner
+                .filter(|o| *o != me)
+                .or_else(|| self.groups.members(&g).ok()?.into_iter().find(|d| *d != me));
+            if let Some(peer) = peer {
+                let body = self.start_reconcile(&g)?;
+                frames.push(direct(org, &peer.to_hex(), body));
+            }
+        }
+        self.kp_asked.retain(|g| !in_org(org, g));
+        frames.extend(self.subgroup_tasks()?);
+        self.save_groups()?;
+        Ok(frames)
+    }
+
+    fn subgroup_owner(&self, org: &str, group: &str) -> Option<DeviceId> {
+        let name = group.strip_prefix(org)?.strip_prefix('/')?;
+        self.policies.get(org)?.subgroup_owners.get(name).copied()
+    }
+
+    /// Bring MLS subgroups in line with the policy (6b-2): the owner creates the
+    /// group and removes devices the policy no longer lists; a listed member that is
+    /// not in the group yet sends the owner a KeyPackage.
+    fn subgroup_tasks(&mut self) -> Result<Vec<Frame>, ClientError> {
+        let me = self.device_id();
+        let mut frames = vec![];
+        let mut wanted: Vec<(
+            String,
+            String,
+            std::collections::BTreeSet<DeviceId>,
+            DeviceId,
+        )> = vec![];
+        for (org, policy) in &self.policies {
+            for (name, members) in &policy.subgroups {
+                if let Some(owner) = policy.subgroup_owners.get(name) {
+                    wanted.push((
+                        org.clone(),
+                        format!("{org}/{name}"),
+                        members.clone(),
+                        *owner,
+                    ));
+                }
+            }
+        }
+        for (org, key, members, owner) in wanted {
+            if owner == me {
+                if !self.groups.has_group(&key) {
+                    self.groups.create_group(&self.key, &key)?;
+                }
+                let stale: Vec<DeviceId> = self
+                    .groups
+                    .members(&key)?
+                    .into_iter()
+                    .filter(|d| *d != me && !members.contains(d))
+                    .collect();
+                for d in stale {
+                    let commit = self.groups.remove_member(&self.key, &key, d)?;
+                    frames.push(Frame::Broadcast {
+                        org: org.clone(),
+                        body: sync::outer_body(&Outer::Commit(commit)),
+                    });
+                }
+            } else if members.contains(&me)
+                && !self.groups.is_member(&key)
+                && self.kp_asked.insert(key.clone())
+            {
+                frames.push(self.readd_request_frame(&org, &key, &owner.to_hex())?);
+            }
+        }
+        if !frames.is_empty() {
+            self.save_groups()?;
+        }
+        Ok(frames)
+    }
+
+    /// The owner's side of a member's KeyPackage for subgroup `group` (`org/name`).
+    fn subgroup_key_package(
+        &mut self,
+        org: String,
+        group: String,
+        from: String,
+        key_package: &[u8],
+    ) -> Result<Handled, ClientError> {
+        let rejected = |reason: &str| {
+            Ok(Handled::event(Event::Rejected {
+                org: org.clone(),
+                from: from.clone(),
+                reason: reason.into(),
+            }))
+        };
+        let me = self.device_id();
+        let Some(name) = group.strip_prefix(&org).and_then(|g| g.strip_prefix('/')) else {
+            return rejected("not a subgroup of this org");
+        };
+        let Some(policy) = self.policies.get(&org) else {
+            return rejected("no policy");
+        };
+        if policy.subgroup_owners.get(name) != Some(&me) {
+            return Ok(Handled::event(Event::Ignored));
+        }
+        let listed = DeviceId::from_hex(&from)
+            .ok()
+            .is_some_and(|d| policy.subgroup(name).is_some_and(|m| m.contains(&d)));
+        if !listed {
+            return rejected("not a member of this subgroup in the policy");
+        }
+        let already = self
+            .groups
+            .members(&group)
+            .is_ok_and(|m| m.iter().any(|d| d.to_hex() == from));
+        let added = if already {
+            self.groups.readd_member(&self.key, &group, key_package)
+        } else {
+            self.groups.add_member(&self.key, &group, key_package)
+        };
+        let added = match added {
+            Ok(a) if a.member.to_hex() == from => a,
+            Ok(_) => return rejected("KeyPackage is not the sender's"),
+            Err(e) => return rejected(&e.to_string()),
+        };
+        self.save_groups()?;
+        Ok(Handled {
+            replies: self.readded_frames(&org, added),
+            event: if already {
+                Event::MemberReAdded {
+                    org: group,
+                    device: from,
+                }
+            } else {
+                Event::MemberAdded {
+                    org: group,
+                    device: from,
+                }
+            },
+        })
     }
 
     /// Encrypt an inner message as an outer `App` body. The caller saves the
@@ -1086,7 +1360,11 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// failures (storage, MLS state) return `Err`.
     pub fn handle_frame(&mut self, frame: Frame) -> Result<Handled, ClientError> {
         let handled = match frame {
-            Frame::Deliver { org, from, body } => self.handle_deliver(org, from, &body)?,
+            Frame::Deliver { org, from, body } => {
+                let mut h = self.handle_deliver(org, from, &body)?;
+                h.replies.extend(self.subgroup_tasks()?);
+                h
+            }
             Frame::Presence { org, online } => Handled::event(Event::Presence { org, online }),
             Frame::Receipt { delivered } => Handled::event(Event::Receipt { delivered }),
             Frame::Error { code, message } => Handled::event(Event::RelayError { code, message }),
@@ -1116,23 +1394,42 @@ impl<S: Store, K: Signer> Client<S, K> {
             Err(e) => return Ok(rejected(e)),
         };
         match outer {
-            Outer::App(ct) => self.handle_app(org, from, &ct),
+            Outer::App(ct) => {
+                let Some(group) = self.group_in(&org, &ct) else {
+                    return Ok(rejected("message for another org".into()));
+                };
+                if group == SUBGROUP_NOT_OURS {
+                    // Subgroup traffic we are not part of: reaches all of the org.
+                    return Ok(Handled::event(Event::Ignored));
+                }
+                self.handle_app(org, group, from, &ct)
+            }
             Outer::Commit(commit) => {
+                let Some(group) = self.group_in(&org, &commit) else {
+                    return Ok(rejected("commit for another org".into()));
+                };
+                if group == SUBGROUP_NOT_OURS {
+                    return Ok(Handled::event(Event::Ignored));
+                }
                 // A broadcast commit comes from its committer.
                 let Ok(committer) = DeviceId::from_hex(&from) else {
                     return Ok(rejected("sender is not a device ID".into()));
                 };
-                match self.groups.apply_commit(&org, &commit, committer) {
+                match self.groups.apply_commit(&group, &commit, committer) {
                     Ok(CommitOutcome::Applied { epoch, removed }) => {
                         Ok(Handled::event(Event::GroupChanged {
-                            org,
+                            org: group,
                             epoch,
                             removed,
                         }))
                     }
                     Ok(CommitOutcome::Stale) => Ok(Handled::event(Event::Ignored)),
-                    Ok(CommitOutcome::Fork { we_win, .. }) => self.on_fork(org, from, we_win),
-                    Err(GroupError::EpochGap { local, .. }) => Ok(self.behind(org, from, local)),
+                    Ok(CommitOutcome::Fork { we_win, .. }) => {
+                        self.on_fork(org, group, from, we_win)
+                    }
+                    Err(GroupError::EpochGap { local, .. }) => {
+                        Ok(self.behind(org, group, from, local))
+                    }
                     Err(e) => Ok(rejected(e.to_string())),
                 }
             }
@@ -1142,6 +1439,17 @@ impl<S: Store, K: Signer> Client<S, K> {
                     Err(e) => return Ok(rejected(e.to_string())),
                 };
                 self.readd_asked.remove(&joined);
+                if joined.contains('/') {
+                    // A subgroup: fetch its history from the owner that added us.
+                    self.kp_asked.remove(&joined);
+                    let body = self.start_reconcile(&joined)?;
+                    return Ok(Handled {
+                        event: Event::Joined {
+                            org: joined.clone(),
+                        },
+                        replies: vec![direct(&org, &from, body)],
+                    });
+                }
                 if !chain.is_empty() {
                     if let Err(e) = self.adopt_chain(&joined, &chain) {
                         return Ok(rejected(format!("membership certificate: {e}")));
@@ -1201,7 +1509,15 @@ impl<S: Store, K: Signer> Client<S, K> {
                 }
                 Err(e) => Ok(rejected(format!("membership certificate: {e}"))),
             },
-            Outer::KeyPackage(kp) => {
+            Outer::KeyPackage { group, key_package } if group != org => {
+                if !in_org(&org, &group) {
+                    return Ok(rejected("group of another org".into()));
+                }
+                self.subgroup_key_package(org, group, from, &key_package)
+            }
+            Outer::KeyPackage {
+                key_package: kp, ..
+            } => {
                 let known = self
                     .groups
                     .members(&org)
@@ -1221,30 +1537,39 @@ impl<S: Store, K: Signer> Client<S, K> {
                     Err(e) => Ok(rejected(e.to_string())),
                 }
             }
-            Outer::CommitRequest(epoch) => Ok(self.serve_commits(org, from, epoch)?),
-            Outer::Commits(commits) => {
+            Outer::CommitRequest { group, .. }
+            | Outer::Commits { group, .. }
+            | Outer::ReaddNeeded { group }
+                if !in_org(&org, &group) =>
+            {
+                Ok(rejected("group of another org".into()))
+            }
+            Outer::CommitRequest { group, epoch } => {
+                Ok(self.serve_commits(org, group, from, epoch)?)
+            }
+            Outer::Commits { group, commits } => {
                 let mut applied = 0;
                 for (committer, c) in &commits {
-                    match self.groups.apply_commit(&org, c, *committer) {
+                    match self.groups.apply_commit(&group, c, *committer) {
                         Ok(CommitOutcome::Applied { .. }) => applied += 1,
                         Ok(CommitOutcome::Stale) => {}
                         // The rest of the batch belongs to the other branch.
                         Ok(CommitOutcome::Fork { we_win, .. }) => {
-                            return self.on_fork(org, from, we_win);
+                            return self.on_fork(org, group, from, we_win);
                         }
                         Err(e) => return Ok(rejected(e.to_string())),
                     }
                 }
-                let epoch = self.groups.epoch(&org)?;
+                let epoch = self.groups.epoch(&group)?;
                 // Data sent while we were behind could not be read: resync with this peer.
-                let replies = if applied > 0 && self.groups.is_member(&org) {
-                    vec![direct(&org, &from, self.start_reconcile(&org)?)]
+                let replies = if applied > 0 && self.groups.is_member(&group) {
+                    vec![direct(&org, &from, self.start_reconcile(&group)?)]
                 } else {
                     vec![]
                 };
                 Ok(Handled {
                     event: Event::CommitsApplied {
-                        org,
+                        org: group,
                         from,
                         applied,
                         epoch,
@@ -1252,14 +1577,14 @@ impl<S: Store, K: Signer> Client<S, K> {
                     replies,
                 })
             }
-            Outer::ReaddNeeded => {
+            Outer::ReaddNeeded { group } => {
                 // Only a group we have can be re-joined; ignore strangers' requests.
-                if self.groups.epoch(&org).is_err() {
+                if self.groups.epoch(&group).is_err() {
                     return Ok(rejected("not in this group".into()));
                 }
-                let frame = self.readd_request_frame(&org, &from)?;
+                let frame = self.readd_request_frame(&org, &group, &from)?;
                 Ok(Handled {
-                    event: Event::ReAddRequested { org, from },
+                    event: Event::ReAddRequested { org: group, from },
                     replies: vec![frame],
                 })
             }
@@ -1267,56 +1592,98 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 
     /// The group forked between us and `peer` (ADR 0004).
-    fn on_fork(&mut self, org: String, peer: String, we_win: bool) -> Result<Handled, ClientError> {
+    fn on_fork(
+        &mut self,
+        org: String,
+        group: String,
+        peer: String,
+        we_win: bool,
+    ) -> Result<Handled, ClientError> {
         let mut replies = vec![];
         if we_win {
             // Show the peer the commit we followed: it then sees it lost.
-            if let Some(c) = self.groups.last_commit(&org) {
+            if let Some(c) = self.groups.last_commit(&group) {
                 replies.push(direct(
                     &org,
                     &peer,
-                    sync::outer_body(&Outer::Commits(vec![(c.committer, c.commit)])),
+                    sync::outer_body(&Outer::Commits {
+                        group: group.clone(),
+                        commits: vec![(c.committer, c.commit)],
+                    }),
                 ));
             }
         } else {
-            let epoch = self.groups.epoch(&org)?;
-            if self.readd_asked.get(&org) != Some(&epoch) {
-                self.readd_asked.insert(org.clone(), epoch);
-                replies.push(self.readd_request_frame(&org, &peer)?);
+            let epoch = self.groups.epoch(&group)?;
+            if self.readd_asked.get(&group) != Some(&epoch) {
+                self.readd_asked.insert(group.clone(), epoch);
+                replies.push(self.readd_request_frame(&org, &group, &peer)?);
             }
         }
         Ok(Handled {
-            event: Event::Fork { org, peer, we_win },
+            event: Event::Fork {
+                org: group,
+                peer,
+                we_win,
+            },
             replies,
         })
     }
 
-    /// We are behind on `org`: ask `from` for the commits since `local`.
-    fn behind(&self, org: String, from: String, local: u64) -> Handled {
+    /// We are behind on `group`: ask `from` for the commits since `local`.
+    fn behind(&self, org: String, group: String, from: String, local: u64) -> Handled {
         Handled {
             replies: vec![direct(
                 &org,
                 &from,
-                sync::outer_body(&Outer::CommitRequest(local)),
+                sync::outer_body(&Outer::CommitRequest {
+                    group: group.clone(),
+                    epoch: local,
+                }),
             )],
-            event: Event::EpochBehind { org, from },
+            event: Event::EpochBehind { org: group, from },
         }
+    }
+
+    /// The group (org or `org/subgroup` key) of an MLS message delivered for `org`;
+    /// `None` if it is for another org, [`SUBGROUP_NOT_OURS`] for a subgroup of this
+    /// org that we are not in.
+    fn group_in(&self, org: &str, mls_message: &[u8]) -> Option<String> {
+        let g = Groups::message_group(mls_message).ok()?;
+        if !in_org(org, &g) {
+            return None;
+        }
+        if g != org && !self.groups.has_group(&g) {
+            return Some(SUBGROUP_NOT_OURS.into());
+        }
+        Some(g)
     }
 
     /// Send `to` the commits since `epoch`, or ask it to be re-added. Starts one
     /// epoch earlier when the log has it, so the peer can tell whether it followed
     /// the same commit out of its previous epoch (fork detection).
-    fn serve_commits(&self, org: String, to: String, epoch: u64) -> Result<Handled, ClientError> {
+    fn serve_commits(
+        &self,
+        org: String,
+        group: String,
+        to: String,
+        epoch: u64,
+    ) -> Result<Handled, ClientError> {
         let since = match epoch.checked_sub(1) {
-            Some(prev) if matches!(self.groups.commits_since(&org, prev), Ok(Some(_))) => prev,
+            Some(prev) if matches!(self.groups.commits_since(&group, prev), Ok(Some(_))) => prev,
             _ => epoch,
         };
-        let (bodies, commits, readd_needed) = match self.groups.commits_since(&org, since) {
+        let (bodies, commits, readd_needed) = match self.groups.commits_since(&group, since) {
             Ok(Some(cs)) => {
                 let n = cs.len();
-                (sync::commits_bodies(cs), n, false)
+                (sync::commits_bodies(&group, cs), n, false)
             }
-            Ok(None) => (vec![sync::outer_body(&Outer::ReaddNeeded)], 0, true),
+            Ok(None) => (
+                vec![sync::outer_body(&Outer::ReaddNeeded {
+                    group: group.clone(),
+                })],
+                0,
+                true,
+            ),
             Err(e) => {
                 return Ok(Handled::event(Event::Rejected {
                     org,
@@ -1328,7 +1695,7 @@ impl<S: Store, K: Signer> Client<S, K> {
         Ok(Handled {
             replies: bodies.into_iter().map(|b| direct(&org, &to, b)).collect(),
             event: Event::CommitsServed {
-                org,
+                org: group,
                 to,
                 commits,
                 readd_needed,
@@ -1336,28 +1703,36 @@ impl<S: Store, K: Signer> Client<S, K> {
         })
     }
 
-    fn handle_app(&mut self, org: String, from: String, ct: &[u8]) -> Result<Handled, ClientError> {
+    fn handle_app(
+        &mut self,
+        org: String,
+        group: String,
+        from: String,
+        ct: &[u8],
+    ) -> Result<Handled, ClientError> {
         // A sender at an older epoch missed commits: send them along (REQ-ENC-002).
-        let help = match (Groups::message_epoch(ct), self.groups.epoch(&org)) {
+        let help = match (Groups::message_epoch(ct), self.groups.epoch(&group)) {
             (Ok(theirs), Ok(ours)) if theirs < ours => {
-                self.serve_commits(org.clone(), from.clone(), theirs)?
+                self.serve_commits(org.clone(), group.clone(), from.clone(), theirs)?
                     .replies
             }
             _ => vec![],
         };
-        let mut handled = match self.groups.decrypt(&org, ct) {
-            Ok(d) if d.sender.to_hex() == from => self.handle_plain(org, from, &d.plaintext)?,
+        let mut handled = match self.groups.decrypt(&group, ct) {
+            Ok(d) if d.sender.to_hex() == from => {
+                self.handle_plain(org, group, from, &d.plaintext)?
+            }
             Ok(_) => Handled::event(Event::Rejected {
                 org,
                 from,
                 reason: "MLS sender does not match the relay's sender".into(),
             }),
-            Err(GroupError::EpochGap { local, .. }) => self.behind(org, from, local),
+            Err(GroupError::EpochGap { local, .. }) => self.behind(org, group, from, local),
             Err(e) => {
                 // A member's message for our own epoch that we cannot read means we
                 // are on different branches of a fork: ask for its commits, which
                 // start one epoch back and show the fork.
-                let probe = self.same_epoch_member(&org, &from, ct);
+                let probe = self.same_epoch_member(&group, &from, ct);
                 let mut h = Handled::event(Event::Rejected {
                     org: org.clone(),
                     from: from.clone(),
@@ -1367,7 +1742,10 @@ impl<S: Store, K: Signer> Client<S, K> {
                     h.replies.push(direct(
                         &org,
                         &from,
-                        sync::outer_body(&Outer::CommitRequest(local)),
+                        sync::outer_body(&Outer::CommitRequest {
+                            group,
+                            epoch: local,
+                        }),
                     ));
                 }
                 h
@@ -1390,9 +1768,12 @@ impl<S: Store, K: Signer> Client<S, K> {
         (member && Groups::message_epoch(ct).ok()? == local).then_some(local)
     }
 
+    /// `scope`: the group the message was encrypted for, which is also the scope
+    /// its data belongs to.
     fn handle_plain(
         &mut self,
         org: String,
+        scope: String,
         from: String,
         plaintext: &[u8],
     ) -> Result<Handled, ClientError> {
@@ -1409,7 +1790,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             Err(e) => return Ok(rejected(e)),
         };
         match msg {
-            Message::Change(change) if change.body.scope.as_str() != org => {
+            Message::Change(change) if change.body.scope.as_str() != scope => {
                 Ok(rejected("change belongs to another scope".into()))
             }
             Message::Change(change) => match self.receive(change.clone()) {
@@ -1424,12 +1805,12 @@ impl<S: Store, K: Signer> Client<S, K> {
                 Err(e) => Err(e),
             },
             Message::Query(query) => {
-                match kith_sync::respond(&self.store.scope_ids(&org_scope(&org)?)?, &query) {
+                match kith_sync::respond(&self.store.scope_ids(&org_scope(&scope)?)?, &query) {
                     Ok(answer) => Ok(Handled {
                         replies: vec![direct(
                             &org,
                             &from,
-                            self.app_body(&org, &sync::reply_body(&answer))?,
+                            self.app_body(&scope, &sync::reply_body(&answer))?,
                         )],
                         event: Event::SyncServed { from },
                     }),
@@ -1437,7 +1818,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 }
             }
             Message::Reply(answer) => {
-                let Some(r) = self.reconciling.get_mut(&org) else {
+                let Some(r) = self.reconciling.get_mut(&scope) else {
                     // Not reconciling (any more): a late or duplicate answer.
                     return Ok(Handled::event(Event::Ignored));
                 };
@@ -1446,17 +1827,17 @@ impl<S: Store, K: Signer> Client<S, K> {
                         replies: vec![direct(
                             &org,
                             &from,
-                            self.app_body(&org, &sync::query_body(&query))?,
+                            self.app_body(&scope, &sync::query_body(&query))?,
                         )],
                         event: Event::Ignored,
                     }),
                     Ok(kith_sync::Step::Done(diff)) => {
-                        self.reconciling.remove(&org);
-                        let to_send = self.changes_for(&org, &diff.to_send)?;
+                        self.reconciling.remove(&scope);
+                        let to_send = self.changes_for(&scope, &diff.to_send)?;
                         let replies = if to_send.is_empty() && diff.to_request.is_empty() {
                             vec![]
                         } else {
-                            self.offer_frames(&org, &from, &diff.to_request, &to_send)?
+                            self.offer_frames(&org, &scope, &from, &diff.to_request, &to_send)?
                         };
                         Ok(Handled {
                             event: Event::SyncCompared {
@@ -1468,7 +1849,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                         })
                     }
                     Err(e) => {
-                        self.reconciling.remove(&org);
+                        self.reconciling.remove(&scope);
                         Ok(rejected(e.to_string()))
                     }
                 }
@@ -1483,7 +1864,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                             continue;
                         }
                     };
-                    if change.body.scope.as_str() != org {
+                    if change.body.scope.as_str() != scope {
                         rejected_n += 1;
                         continue;
                     }
@@ -1500,8 +1881,8 @@ impl<S: Store, K: Signer> Client<S, K> {
                 let replies = if want.is_empty() {
                     vec![]
                 } else {
-                    let wanted = self.changes_for(&org, &want)?;
-                    self.offer_frames(&org, &from, &[], &wanted)?
+                    let wanted = self.changes_for(&scope, &want)?;
+                    self.offer_frames(&org, &scope, &from, &[], &wanted)?
                 };
                 Ok(Handled {
                     event: Event::SyncReceived {
@@ -1520,11 +1901,11 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// The stored changes of `org`'s scope with these IDs (unknown IDs and other
     /// scopes are skipped), oldest first. Includes changes the policy rejects: the
     /// peer must see them to reject them (and their dependents) too.
-    fn changes_for(&self, org: &str, ids: &[ChangeId]) -> Result<Vec<Change>, ClientError> {
+    fn changes_for(&self, scope: &str, ids: &[ChangeId]) -> Result<Vec<Change>, ClientError> {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(c) = self.store.get(id)?
-                && c.body.scope.as_str() == org
+                && c.body.scope.as_str() == scope
             {
                 out.push(c);
             }
@@ -1536,13 +1917,14 @@ impl<S: Store, K: Signer> Client<S, K> {
     fn offer_frames(
         &mut self,
         org: &str,
+        scope: &str,
         to: &str,
         want: &[ChangeId],
         changes: &[Change],
     ) -> Result<Vec<Frame>, ClientError> {
         sync::offer_bodies(want, changes)
             .into_iter()
-            .map(|inner| Ok(direct(org, to, self.app_body(org, &inner)?)))
+            .map(|inner| Ok(direct(org, to, self.app_body(scope, &inner)?)))
             .collect()
     }
 
@@ -1602,6 +1984,17 @@ impl<S: Store, K: Signer> Client<S, K> {
         self.store.put(change.clone())?;
         Ok(change)
     }
+}
+
+/// Marker returned by `group_in` for subgroups of the org that we are not in.
+const SUBGROUP_NOT_OURS: &str = "";
+
+/// True if `group` is `org` itself or one of its subgroups (`org/name`).
+fn in_org(org: &str, group: &str) -> bool {
+    group == org
+        || group
+            .strip_prefix(org)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn org_scope(org: &str) -> Result<Scope, ClientError> {
