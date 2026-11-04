@@ -15,4 +15,10 @@ const id = client.create("acme.note", new TextEncoder().encode("hello"));
 client.edit(id, new TextEncoder().encode("hello world"));
 assert.equal(client.historyLength(id), 2);
 assert.throws(() => client.edit("not-hex", new Uint8Array()));
+
+// Key restore: same secret key, same device identity.
+const restored = kith.KithClient.withSecretKey(client.secretKey());
+assert.equal(restored.deviceId(), client.deviceId());
+assert.notEqual(new kith.KithClient().deviceId(), client.deviceId());
+assert.throws(() => kith.KithClient.withSecretKey(new Uint8Array(31)));
 console.log(`ok: kith-wasm ${kith.version()}`);

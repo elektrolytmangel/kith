@@ -9,4 +9,12 @@ final class KithTests: XCTestCase {
         XCTAssertEqual(try client.history(objectId: change.objectId).count, 1)
         XCTAssertFalse(kithVersion().isEmpty)
     }
+
+    /// req: REQ-PLAT-002
+    func testRestoredKeyKeepsDeviceIdentity() throws {
+        let first = KithClient()
+        let restored = try KithClient.withSecretKey(secretKey: first.secretKey())
+        XCTAssertEqual(restored.deviceId(), first.deviceId())
+        XCTAssertThrowsError(try KithClient.withSecretKey(secretKey: Data(count: 31)))
+    }
 }

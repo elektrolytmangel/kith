@@ -5,7 +5,7 @@ next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 - **Last updated:** 2026-11-04
-- **Version:** 0.1.0-alpha.1 in the release PR (`main` still 0.1.0 until merged), **not released** (no tags yet)
+- **Version:** 0.1.0-alpha.1, released as a pre-release (tag `v0.1.0-alpha.1`)
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
 
 ## Where things stand
@@ -34,7 +34,6 @@ WebSocket server; the `create` / `edit` / `history` API on every platform.
 | Gap | Effect | Requirement |
 | --- | --- | --- |
 | Bindings still use the in-memory store (`SqliteStore` exists in Rust but is not wired in; web needs IndexedDB) | Data lost on restart | REQ-STORE-001 |
-| Bindings make a new device key per launch (`from_secret_bytes` exists only in Rust) | New identity every start | REQ-PLAT-002, REQ-PLAT-003 |
 | `Transport` is only a trait; no WebSocket client | Clients can't talk to the relay | REQ-SYNC-004 |
 | Relay has no device authentication | Don't expose it publicly | REQ-RELAY-004 |
 | No encryption (MLS) | Payloads are not end-to-end encrypted | REQ-ENC-001..004 |
@@ -54,11 +53,11 @@ Work top to bottom; check items off here as they land.
 1. **First pre-release `v0.1.0-alpha.1`**, so projects can install it.
    - [x] PR (branch `release/0.1.0-alpha.1`): version `0.1.0-alpha.1` in `Cargo.toml`, `Cargo.lock`,
          CHANGELOG, and the artifact names/URLs in `docs/guides/integration.md`. Waiting for CI + merge.
-   - [ ] After merge, the user tags `v0.1.0-alpha.1`. The workflow marks versions with `-` as pre-release.
+   - [x] Tag `v0.1.0-alpha.1` pushed by the user; release published as pre-release 2026-11-04.
 2. **Repository settings** (need the owner or explicit approval):
-   - [ ] Create label `requirement` (the Requirement issue form applies it; it doesn't exist).
+   - [x] Label `requirement` created (user, 2026-11-04).
    - [x] Branch protection on `main`: require the CI checks (done by the user 2026-11-04).
-   - [ ] Enable private vulnerability reporting (Settings → Code security). Owner only.
+   - [x] Private vulnerability reporting enabled (user, 2026-11-04).
    - [ ] Optional: mark the repository as a template.
 3. **Phase 1, Local core** (makes it usable in a real app). Start here, in this order
    (decided 2026-11-03): SQLite store and key restore first, because together they let an app
@@ -66,8 +65,8 @@ Work top to bottom; check items off here as they land.
    - [x] REQ-STORE-001, native: `SqliteStore` in `kith-store` (feature `sqlite`, off by default because the bundled
          C SQLite does not build for wasm32; CI tests it explicitly). PR `feat/sqlite-store`.
    - [ ] REQ-STORE-001, web: IndexedDB store for the web package.
-   - [ ] Key restore in bindings: expose key seed in/out in `bindings/ffi` and `bindings/wasm`
-         (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`).
+   - [x] Key restore in bindings: `secretKey()` / `withSecretKey(...)` in `bindings/ffi` and `bindings/wasm`
+         (Keychain / Android Keystore / IndexedDB are the app's job, see `Signer`). PR `feat/key-restore`.
    - [ ] Database path / store selection in the binding constructors (`TODO(phase 1)` in `bindings/ffi/src/lib.rs`, `bindings/wasm/src/lib.rs`).
    - [ ] REQ-DATA-004: Automerge objects so concurrent edits merge.
 4. **Phase 2, Relay and live sync**: WebSocket `Transport` (tokio native, browser WebSocket on web),
@@ -130,3 +129,4 @@ None right now.
 - **2026-11-04**: Opened the `0.1.0-alpha.1` version-bump PR (Next steps 1). Next: user merges and tags.
 - **2026-11-04**: PR #13 merged. User set up branch protection on `main`.
 - **2026-11-04**: Added `SqliteStore` (PR `feat/sqlite-store`). Next: key restore in bindings, then store selection in constructors.
+- **2026-11-04**: `v0.1.0-alpha.1` released; label, vulnerability reporting set up; #15 merged. Added key restore to bindings (PR `feat/key-restore`). Next: store selection (SQLite path) in binding constructors.

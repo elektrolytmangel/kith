@@ -5,6 +5,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Bindings: `secretKey()` and `KithClient.withSecretKey(...)` (Swift, Kotlin, JS) restore the
+  device identity across restarts; `Client::signer()` in `kith-client`.
+
+### Added
 - `kith_store::SqliteStore` (feature `sqlite`, native only): persistent append-only
   change store with a rebuildable `objects` table (REQ-STORE-001).
 
