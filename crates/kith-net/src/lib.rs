@@ -380,7 +380,7 @@ mod tests {
             _ => None,
         })
         .await;
-        assert_eq!(stored, 2);
+        assert_eq!(stored, 3, "2 changes + the policy genesis");
         assert_eq!(b.client().history(&oid).unwrap().len(), 2);
         a_task.abort();
     }

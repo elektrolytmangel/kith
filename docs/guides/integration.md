@@ -51,6 +51,25 @@ or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-cer
 The creator can make another member an admin with `grantAdmin(deviceId)`; that device
 gets `certificateUpdated { admin: true }` and can then invite too.
 
+### Roles and write permissions
+
+Every org has a policy that all devices enforce on every change
+([ADR 0006](../adr/0006-policy-object-roles-revocation.md)). Roles are `viewer`,
+`editor` (the default for members) and `admin`:
+
+```ts
+client.setWriteRule("config", "admin");   // only admins write objects of type "config"
+client.setRole(deviceId, "viewer");      // read-only; earlier changes stay valid
+client.roleOf(org, deviceId);            // "viewer" | "editor" | "admin" | undefined (revoked)
+client.removeMember(deviceId);           // out of the group and revoked
+```
+
+A write the policy forbids fails locally (`not allowed`). A forbidden change from a
+modified app arrives as a `rejected` event and never shows up in history or documents.
+When a device is revoked, its changes that the admin had already seen stay; anything
+else it made (for example offline) is rejected on every device, and so are edits that
+build only on those changes.
+
 Devices that missed group changes while offline catch up automatically
 (`epochBehind`, `commitsApplied` events); one that missed more than the last 256
 changes is re-added automatically by an online member (`reAddRequested`,

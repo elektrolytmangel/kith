@@ -285,8 +285,8 @@ fn relay_cannot_attribute_a_message_to_another_device() {
 fn removed_device_gets_nothing_new() {
     let mut net = Net::org(3);
     let removed = hex(&net.devs[2]);
-    let f = net.devs[0].remove_member(&ORG, &removed).unwrap();
-    let events = net.send(0, vec![f]);
+    let frames = net.devs[0].remove_member(&ORG, &removed).unwrap();
+    let events = net.send(0, frames);
     assert!(
         events
             .iter()
@@ -485,7 +485,7 @@ fn both_sides_receive_only_what_they_lack() {
     let f = net.devs[1].sync_request_frame(&ORG).unwrap();
     let events: Vec<Event> = net.send(1, vec![f]).into_iter().map(|(_, e)| e).collect();
     assert_eq!(net.ids(0), net.ids(1));
-    assert_eq!(net.ids(0).len(), 3);
+    assert_eq!(net.ids(0).len(), 4, "3 notes + the policy genesis");
     // 0 answers the reconciliation; 1 learns it must send 1 and fetch 1.
     assert!(matches!(events[0], Event::SyncServed { .. }));
     assert!(matches!(
@@ -895,8 +895,8 @@ fn a_rejected_claim_admits_nobody_and_the_invite_stays_valid() {
 fn the_root_makes_admins_who_can_admit_others() {
     let mut net = Net::org(2);
     let d1 = hex(&net.devs[1]);
-    let f = net.devs[0].grant_admin(&ORG, &d1).unwrap();
-    let events = net.send(0, vec![f]);
+    let frames = net.devs[0].grant_admin(&ORG, &d1).unwrap();
+    let events = net.send(0, frames);
     assert!(
         events
             .iter()
@@ -953,4 +953,189 @@ fn org_state_survives_a_restart() {
     let claim = net.devs[1].claim_invite(&link).unwrap();
     let events = net.send(1, vec![claim.frame]);
     assert!(claimed_by(&events, 0).is_some());
+}
+
+// ---- permissions (phase 6, ADR 0006) ----
+
+/// Broadcast `change` from `who`.
+fn spread(net: &mut Net, who: usize, change: &Change) -> Vec<(usize, Event)> {
+    let f = net.devs[who].broadcast_frame(&ORG, change).unwrap();
+    net.send(who, vec![f])
+}
+
+/// A change signed by `who`'s key but made outside its client (a modified app).
+fn forged(net: &Net, who: usize, ty: &str, parents: Vec<ChangeId>, object: ObjectId) -> Change {
+    Change::sign(
+        UnsignedChange {
+            object_id: object,
+            object_type: ObjectType::new(ty),
+            parents,
+            timestamp_ms: 1,
+            payload: b"forged".to_vec(),
+        },
+        net.devs[who].signer(),
+    )
+}
+
+/// req: REQ-PERM-001
+/// req: REQ-PERM-002
+#[test]
+fn viewers_cannot_write_and_peers_reject_what_they_send_anyway() {
+    let mut net = Net::org(3);
+    let d2 = hex(&net.devs[2]);
+    let demote = net.devs[0].set_role(&ORG, &d2, Role::Viewer).unwrap();
+    spread(&mut net, 0, &demote);
+    for i in 0..3 {
+        assert_eq!(
+            net.devs[i].role_of(&ORG, &d2).unwrap(),
+            Some(Role::Viewer),
+            "device {i}"
+        );
+    }
+    assert!(matches!(
+        net.devs[2].create(ObjectType::new("note"), b"x".to_vec()),
+        Err(ClientError::Forbidden(_))
+    ));
+    // A modified client sends it anyway: honest peers reject it; it never shows up.
+    let c = forged(&net, 2, "note", vec![], ObjectId::random());
+    let events = spread(&mut net, 2, &c);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 0 && matches!(e, Event::Rejected { .. }))
+    );
+    for i in 0..2 {
+        assert!(net.devs[i].history(&c.body.object_id).unwrap().is_empty());
+        assert!(net.devs[i].edit(c.body.object_id, b"y".to_vec()).is_err());
+    }
+    // Promoted later, the same change counts everywhere (a late grant).
+    let promote = net.devs[0].set_role(&ORG, &d2, Role::Editor).unwrap();
+    spread(&mut net, 0, &promote);
+    assert_eq!(net.devs[1].history(&c.body.object_id).unwrap().len(), 1);
+}
+
+/// req: REQ-PERM-001
+#[test]
+fn write_rules_per_type_and_only_admins_change_the_policy() {
+    let mut net = Net::org(2);
+    let rule = net.devs[0]
+        .set_write_rule(&ORG, "config", Role::Admin)
+        .unwrap();
+    spread(&mut net, 0, &rule);
+    assert!(matches!(
+        net.devs[1].create(ObjectType::new("config"), b"x".to_vec()),
+        Err(ClientError::Forbidden(_))
+    ));
+    assert!(
+        net.devs[1]
+            .create(ObjectType::new("note"), b"ok".to_vec())
+            .is_ok()
+    );
+    let cfg = net.devs[0]
+        .create(ObjectType::new("config"), b"theme=dark".to_vec())
+        .unwrap();
+    let events = spread(&mut net, 0, &cfg);
+    assert_eq!(received_by(&events, 1), 1);
+    // Members cannot change the policy, and cannot write the policy object directly.
+    assert!(matches!(
+        net.devs[1].set_write_rule(&ORG, "config", Role::Editor),
+        Err(ClientError::NotAdmin(_))
+    ));
+    let d0 = hex(&net.devs[0]);
+    assert!(net.devs[1].set_role(&ORG, &d0, Role::Viewer).is_err());
+    assert!(
+        net.devs[1]
+            .create(ObjectType::new(POLICY_TYPE), vec![])
+            .is_err()
+    );
+}
+
+/// req: REQ-PERM-004
+/// req: REQ-INV-004
+#[test]
+fn revocation_keeps_seen_changes_and_rejects_the_rest_with_their_dependents() {
+    let mut net = Net::org(3);
+    let shared = net.devs[2]
+        .create(ObjectType::new("note"), b"seen by all".to_vec())
+        .unwrap();
+    spread(&mut net, 2, &shared);
+    // The admin goes offline; 2 writes, 1 builds on it.
+    net.offline.insert(0);
+    let unseen = net.devs[2]
+        .edit(shared.body.object_id, b"not seen by the admin".to_vec())
+        .unwrap();
+    spread(&mut net, 2, &unseen);
+    let child = net.devs[1]
+        .edit(shared.body.object_id, b"builds on it".to_vec())
+        .unwrap();
+    assert_eq!(child.body.parents, vec![unseen.change_id]);
+    spread(&mut net, 1, &child);
+    net.offline.clear();
+    // The admin removes 2 without having seen those changes.
+    let d2 = hex(&net.devs[2]);
+    net.offline.insert(1);
+    let frames = net.devs[0].remove_member(&ORG, &d2).unwrap();
+    net.send(0, frames);
+    net.offline.clear();
+    // 1 learns about the revocation through catch-up with 0.
+    let f = net.devs[1].sync_request_frame(&ORG).unwrap();
+    net.send(1, vec![f]);
+    assert_eq!(net.devs[1].role_of(&ORG, &d2).unwrap(), None);
+    let oid = shared.body.object_id;
+    let visible: Vec<ChangeId> = net.devs[1]
+        .history(&oid)
+        .unwrap()
+        .iter()
+        .map(|c| c.change_id)
+        .collect();
+    assert_eq!(
+        visible,
+        vec![shared.change_id],
+        "seen change kept; unseen + dependent hidden"
+    );
+    // The admin never accepts them either, even if offered again.
+    assert!(matches!(
+        net.devs[0].receive(unseen.clone()),
+        Err(ClientError::Forbidden(_))
+    ));
+    assert!(matches!(
+        net.devs[0].receive(child.clone()),
+        Err(ClientError::Forbidden(_))
+    ));
+    // New edits build on the valid head only.
+    let next = net.devs[1].edit(oid, b"again".to_vec()).unwrap();
+    assert_eq!(next.body.parents, vec![shared.change_id]);
+}
+
+/// req: REQ-PERM-002
+#[test]
+fn the_policy_reaches_new_members_and_survives_restarts() {
+    let mut net = Net::org(1);
+    let rule = net.devs[0]
+        .set_write_rule(&ORG, "config", Role::Admin)
+        .unwrap();
+    let _ = rule;
+    net.devs.push(client());
+    net.admit(0, 1);
+    // The new member got the policy with the history and enforces it.
+    assert_eq!(
+        net.devs[1].policy(&ORG).map(|p| p.write_rule("config")),
+        Some(Role::Admin)
+    );
+    assert!(
+        net.devs[1]
+            .create(ObjectType::new("config"), vec![1])
+            .is_err()
+    );
+    // And after a restart.
+    let old = std::mem::replace(&mut net.devs[1], client());
+    let key = DeviceKey::from_secret_bytes(&old.signer().secret_bytes());
+    let Client { store, .. } = old;
+    net.devs[1] = Client::new(key, store).unwrap();
+    assert!(
+        net.devs[1]
+            .create(ObjectType::new("config"), vec![1])
+            .is_err()
+    );
+    assert!(net.devs[1].create(ObjectType::new("note"), vec![1]).is_ok());
 }

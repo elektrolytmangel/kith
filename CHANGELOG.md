@@ -5,6 +5,19 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Write permissions (phase 6, ADR 0006): a `kith.policy` object per org (`kith_core::policy`:
+  `PolicyOp`, `Policy::fold`, `Role`), created with the org. `Client::set_role`, `set_write_rule`,
+  `revoke`, `role_of`, `policy`; every incoming change is checked (REQ-PERM-002), forbidden ones are
+  quarantined (hidden from history, merge and edits, still forwarded), dependents of rejected changes
+  are rejected, and stored changes are re-checked when the policy changes. Web `setRole`,
+  `setWriteRule`, `roleOf`; Swift/Kotlin `RelaySession.setRole`, `setWriteRule`, `roleOf`.
+
+### Changed
+- `remove_member` and `grant_admin` return several frames: `remove_member` also revokes the device
+  in the policy (REQ-INV-004), `grant_admin` also records the admin role.
+- `ClientError::Forbidden` for writes the policy does not allow.
+
+### Added
 - Invitations (phase 5, ADR 0005): `Client::create_org` (org ID = new org root public key),
   `create_invite` (one-time, expiring link), `claim_invite` (proof + 6-digit code),
   `Event::InviteClaimed` → `accept_claim` / `reject_claim`, `grant_admin`; the Welcome carries the

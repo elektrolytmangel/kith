@@ -43,6 +43,11 @@ fn js_err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }
 
+fn parse_role(s: &str) -> Result<kith_client::Role, JsError> {
+    kith_client::Role::parse(s)
+        .ok_or_else(|| JsError::new(&format!("unknown role {s:?}: use viewer, editor or admin")))
+}
+
 fn wrap(key: DeviceKey, store: Box<dyn Store>) -> Result<KithClient, JsError> {
     Ok(KithClient {
         inner: Rc::new(RefCell::new(Client::new(key, store).map_err(js_err)?)),
@@ -211,13 +216,53 @@ impl KithClient {
     #[wasm_bindgen(js_name = grantAdmin)]
     pub fn grant_admin(&self, device: &str) -> Result<(), JsError> {
         let live = self.live()?;
-        let f = self
+        let frames = self
             .inner
             .borrow_mut()
             .grant_admin(live.org(), device)
             .map_err(js_err)?;
+        live.send(&frames);
+        Ok(())
+    }
+
+    /// Set a member's role in the connected org: `"viewer"`, `"editor"` or
+    /// `"admin"` (admin only from the org's creator). Admins only.
+    #[wasm_bindgen(js_name = setRole)]
+    pub fn set_role(&self, device: &str, role: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let role = parse_role(role)?;
+        let mut c = self.inner.borrow_mut();
+        let change = c.set_role(live.org(), device, role).map_err(js_err)?;
+        let f = c.broadcast_frame(live.org(), &change).map_err(js_err)?;
         live.send(&[f]);
         Ok(())
+    }
+
+    /// Set the minimum role that may write objects of `objectType` in the connected
+    /// org (`"viewer"`, `"editor"`, `"admin"`). Admins only.
+    #[wasm_bindgen(js_name = setWriteRule)]
+    pub fn set_write_rule(&self, object_type: &str, role: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let role = parse_role(role)?;
+        let mut c = self.inner.borrow_mut();
+        let change = c
+            .set_write_rule(live.org(), object_type, role)
+            .map_err(js_err)?;
+        let f = c.broadcast_frame(live.org(), &change).map_err(js_err)?;
+        live.send(&[f]);
+        Ok(())
+    }
+
+    /// A device's role in `org`: `"viewer"`, `"editor"`, `"admin"`, or `undefined`
+    /// if revoked.
+    #[wasm_bindgen(js_name = roleOf)]
+    pub fn role_of(&self, org: &str, device: &str) -> Result<Option<String>, JsError> {
+        Ok(self
+            .inner
+            .borrow()
+            .role_of(org, device)
+            .map_err(js_err)?
+            .map(|r| r.as_str().to_string()))
     }
 
     /// True if this device is a member of `org`'s group.
@@ -232,16 +277,17 @@ impl KithClient {
         self.inner.borrow().group_members(org).map_err(js_err)
     }
 
-    /// Remove `device` (hex) from the connected org's group.
+    /// Remove `device` (hex) from the connected org: out of the encrypted group and
+    /// revoked in the policy. Admins only.
     #[wasm_bindgen(js_name = removeMember)]
     pub fn remove_member(&self, device: &str) -> Result<(), JsError> {
         let live = self.live()?;
-        let f = self
+        let frames = self
             .inner
             .borrow_mut()
             .remove_member(live.org(), device)
             .map_err(js_err)?;
-        live.send(&[f]);
+        live.send(&frames);
         Ok(())
     }
 

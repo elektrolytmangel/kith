@@ -41,6 +41,9 @@ final class KithTests: XCTestCase {
         let change = try client.create(type: "note", text: "hello")
         XCTAssertFalse(try session.broadcast(changeId: change.changeId).isEmpty)
         XCTAssertFalse(try session.rotateKey().isEmpty)
+        XCTAssertEqual(try session.roleOf(device: client.deviceId()), "admin")
+        XCTAssertFalse(try session.setWriteRule(objectType: "config", role: "admin").isEmpty)
+        XCTAssertThrowsError(try session.setRole(device: client.deviceId(), role: "boss"))
         XCTAssertThrowsError(try session.receive(frame: Data("not a frame".utf8)))
         // An invite another device can claim.
         let link = try client.createInvite(org: org, relay: "wss://relay.example/v1/ws", ttlSeconds: 600)

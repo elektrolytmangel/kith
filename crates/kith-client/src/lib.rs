@@ -27,6 +27,7 @@ mod org;
 mod sync;
 
 pub use kith_core::membership::{CertChain, Invite, MembershipCert};
+pub use kith_core::policy::{POLICY_TYPE, Policy, PolicyOp, Role, policy_object_id};
 pub use org::ORGS_KEY;
 
 pub use kith_merge::{Materialized, MergeError, Merger};
@@ -68,6 +69,9 @@ pub enum ClientError {
     /// Not a valid device ID.
     #[error(transparent)]
     Id(#[from] IdError),
+    /// The policy does not allow this change (REQ-PERM-002).
+    #[error("not allowed: {0}")]
+    Forbidden(String),
     /// This device is not an admin of the org (or lacks the root key, for
     /// `grant_admin`).
     #[error("not an admin of {0}")]
@@ -343,6 +347,10 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
     /// (KeyPackage, invite token). RAM only: after a restart the device claims again.
     claims: std::collections::HashMap<(String, String), (Vec<u8>, [u8; 16])>,
+    /// Per org: the policy folded from its policy object (phase 6).
+    policies: std::collections::BTreeMap<String, Policy>,
+    /// Stored changes the policy does not allow (hidden from history, merge, sync).
+    invalid: std::collections::HashSet<ChangeId>,
 }
 
 impl<S: Store, K: Signer> Client<S, K> {
@@ -357,7 +365,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             Some(bytes) => org::Orgs::from_bytes(&bytes).map_err(GroupError::Corrupt)?,
             None => org::Orgs::default(),
         };
-        Ok(Self {
+        Self {
             key,
             store,
             groups,
@@ -365,7 +373,15 @@ impl<S: Store, K: Signer> Client<S, K> {
             reconciling: Default::default(),
             orgs,
             claims: Default::default(),
-        })
+            policies: Default::default(),
+            invalid: Default::default(),
+        }
+        .with_policies()
+    }
+
+    fn with_policies(mut self) -> Result<Self, ClientError> {
+        self.refresh_policies()?;
+        Ok(self)
     }
 
     /// This device's ID.
@@ -373,8 +389,13 @@ impl<S: Store, K: Signer> Client<S, K> {
         self.key.device_id()
     }
 
-    /// Create a new object with an initial payload.
+    /// Create a new object with an initial payload. Fails with
+    /// [`ClientError::Forbidden`] if the org's policy does not let this device
+    /// write objects of type `ty`.
     pub fn create(&mut self, ty: ObjectType, payload: Vec<u8>) -> Result<Change, ClientError> {
+        if ty.as_str() == POLICY_TYPE {
+            return Err(ClientError::Forbidden("use the policy methods".into()));
+        }
         self.commit(ObjectId::random(), ty, vec![], payload)
     }
 
@@ -382,22 +403,255 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Never blocks on a lock: concurrent edits become a fork that the merge
     /// layer resolves (REQ-DATA-004).
     pub fn edit(&mut self, object: ObjectId, payload: Vec<u8>) -> Result<Change, ClientError> {
-        let hist = self.store.history(&object)?;
+        let hist = self.history(&object)?;
         let ty = hist
             .first()
             .map(|c| c.body.object_type.clone())
             .ok_or(ClientError::UnknownObject(object))?;
-        let parents = self.store.heads(&object)?;
+        if ty.as_str() == POLICY_TYPE {
+            return Err(ClientError::Forbidden("use the policy methods".into()));
+        }
+        let parents = self.valid_heads(&object)?;
         self.commit(object, ty, parents, payload)
+    }
+
+    /// Heads of an object among the changes the policy allows.
+    fn valid_heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, ClientError> {
+        let hist = self.history(object)?;
+        let mut heads: Vec<ChangeId> = hist.iter().map(|c| c.change_id).collect();
+        for c in &hist {
+            heads.retain(|h| !c.body.parents.contains(h));
+        }
+        heads.sort();
+        Ok(heads)
     }
 
     /// Validate and store a change received from a peer.
     /// Returns `true` if it was new.
+    /// A change with a bad hash or signature is refused. Every other change is
+    /// stored, and the policy decides whether it counts (REQ-PERM-002): one the
+    /// author was not allowed to make, or that builds on such a change, returns
+    /// [`ClientError::Forbidden`] and is kept out of history, merging and new
+    /// edits. It is still passed on in catch-up, so every device sees it and reaches
+    /// the same verdict, and a later policy change (a late grant) can make it count.
+    /// Policy changes trigger a re-check of everything stored.
     pub fn receive(&mut self, change: Change) -> Result<bool, ClientError> {
         change.verify()?;
-        // TODO(phase 6, REQ-PERM-002): check author permissions under the
-        // policy as of the change's parents before storing.
-        Ok(self.store.put(change)?)
+        let new = self.store.put(change.clone())?;
+        if change.body.object_type.as_str() == POLICY_TYPE {
+            if new {
+                self.refresh_policies()?;
+            }
+            return Ok(new);
+        }
+        if let Err(e) = self.check_allowed(&change) {
+            self.invalid.insert(change.change_id);
+            return Err(e);
+        }
+        Ok(new)
+    }
+
+    fn check_allowed(&self, change: &Change) -> Result<(), ClientError> {
+        if let Some(p) = change
+            .body
+            .parents
+            .iter()
+            .find(|p| self.invalid.contains(p))
+        {
+            return Err(ClientError::Forbidden(format!(
+                "builds on rejected change {p}"
+            )));
+        }
+        for (org, policy) in &self.policies {
+            if policy.creator.is_some() && !policy.allows(change) {
+                return Err(ClientError::Forbidden(format!(
+                    "{} may not write {} in {org}",
+                    change.author,
+                    change.body.object_type.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-fold every org's policy and re-check all stored changes against it.
+    /// Called on start and whenever a policy change arrives (they are rare).
+    fn refresh_policies(&mut self) -> Result<(), ClientError> {
+        let mut policies = std::collections::BTreeMap::new();
+        for org in self.orgs.0.keys() {
+            let Ok(org_id) = DeviceId::from_hex(org) else {
+                continue;
+            };
+            let hist = self.store.history(&policy_object_id(&org_id))?;
+            if !hist.is_empty() {
+                policies.insert(org.clone(), Policy::fold(&org_id, &hist));
+            }
+        }
+        self.policies = policies;
+        self.invalid.clear();
+        if self.policies.is_empty() {
+            return Ok(());
+        }
+        // Parents before children (per object), so a rejected parent rejects its children.
+        let mut all = Vec::new();
+        for id in self.store.all_ids()? {
+            if let Some(c) = self.store.get(&id)? {
+                all.push(c);
+            }
+        }
+        all.sort_by_key(|c| (c.body.timestamp_ms, c.change_id));
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for c in &all {
+                if self.invalid.contains(&c.change_id) || c.body.object_type.as_str() == POLICY_TYPE
+                {
+                    continue;
+                }
+                if self.check_allowed(c).is_err() {
+                    self.invalid.insert(c.change_id);
+                    changed = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ---- permissions (phase 6, ADR 0006) ----
+
+    /// The current policy of `org`, if this device has it.
+    pub fn policy(&self, org: &str) -> Option<&Policy> {
+        self.policies.get(org)
+    }
+
+    /// A device's role in `org` (`None`: revoked). Devices the policy does not
+    /// name are editors.
+    pub fn role_of(&self, org: &str, device: &str) -> Result<Option<Role>, ClientError> {
+        let d = DeviceId::from_hex(device)?;
+        Ok(self
+            .policies
+            .get(org)
+            .map_or(Some(Role::Editor), |p| p.role_of(&d)))
+    }
+
+    /// Set a member's role. Raising to admin needs the org root key (only the
+    /// creator can); lowering keeps the member's changes this device has seen.
+    /// Broadcast the returned change like any other.
+    pub fn set_role(&mut self, org: &str, device: &str, role: Role) -> Result<Change, ClientError> {
+        let d = DeviceId::from_hex(device)?;
+        let current = self.role_of(org, device)?;
+        let op = if current.is_some_and(|c| role < c) {
+            PolicyOp::Restrict {
+                device: d,
+                role: Some(role),
+                keep: self.changes_by(&d)?,
+            }
+        } else {
+            let cert = if role == Role::Admin {
+                Some(self.root_admin_cert(org, d)?)
+            } else {
+                None
+            };
+            PolicyOp::SetRole {
+                device: d,
+                role,
+                cert,
+            }
+        };
+        self.policy_commit(org, op)
+    }
+
+    /// Set the minimum role that may write objects of `object_type` in `org`.
+    /// Broadcast the returned change.
+    pub fn set_write_rule(
+        &mut self,
+        org: &str,
+        object_type: &str,
+        write: Role,
+    ) -> Result<Change, ClientError> {
+        self.policy_commit(
+            org,
+            PolicyOp::SetRule {
+                object_type: object_type.into(),
+                write,
+            },
+        )
+    }
+
+    /// Revoke a device's write access in `org` (REQ-INV-004). Changes of it that
+    /// this device has already seen stay valid; all others are rejected everywhere.
+    /// Usually via [`Self::remove_member`], which also removes it from the group.
+    pub fn revoke(&mut self, org: &str, device: &str) -> Result<Change, ClientError> {
+        let d = DeviceId::from_hex(device)?;
+        let keep = self.changes_by(&d)?;
+        self.policy_commit(
+            org,
+            PolicyOp::Restrict {
+                device: d,
+                role: None,
+                keep,
+            },
+        )
+    }
+
+    fn changes_by(&self, device: &DeviceId) -> Result<Vec<ChangeId>, ClientError> {
+        let mut out = Vec::new();
+        for id in self.store.all_ids()? {
+            if !self.invalid.contains(&id)
+                && let Some(c) = self.store.get(&id)?
+                && c.author == *device
+            {
+                out.push(id);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    fn root_admin_cert(&self, org: &str, device: DeviceId) -> Result<MembershipCert, ClientError> {
+        let root = self
+            .orgs
+            .0
+            .get(org)
+            .and_then(|s| s.root)
+            .ok_or_else(|| ClientError::NotAdmin(org.into()))?;
+        let root = DeviceKey::from_secret_bytes(&root);
+        Ok(MembershipCert::issue(
+            &root,
+            root.device_id(),
+            device,
+            true,
+            now_ms(),
+        ))
+    }
+
+    /// Append `op` to `org`'s policy object. Fails unless the op counts (we are an
+    /// admin and it is valid), so a refused op never leaves the device.
+    fn policy_commit(&mut self, org: &str, op: PolicyOp) -> Result<Change, ClientError> {
+        let org_id = DeviceId::from_hex(org)?;
+        let pid = policy_object_id(&org_id);
+        let parents = self.store.heads(&pid)?;
+        let change = Change::sign(
+            UnsignedChange {
+                object_id: pid,
+                object_type: ObjectType::new(POLICY_TYPE),
+                parents,
+                timestamp_ms: now_ms(),
+                payload: op.encode(),
+            },
+            &self.key,
+        );
+        let mut hist = self.store.history(&pid)?;
+        hist.push(change.clone());
+        if !Policy::fold(&org_id, &hist)
+            .accepted
+            .contains(&change.change_id)
+        {
+            return Err(ClientError::NotAdmin(org.into()));
+        }
+        self.store.put(change.clone())?;
+        self.refresh_policies()?;
+        Ok(change)
     }
 
     // ---- organizations and invitations (phase 5, ADR 0005) ----
@@ -431,6 +685,11 @@ impl<S: Store, K: Signer> Client<S, K> {
         );
         self.save_groups()?;
         self.save_orgs()?;
+        // The policy object starts with our root-signed admin certificate.
+        let genesis = PolicyOp::Genesis {
+            admin: MembershipCert::issue(&root, org_id, self.device_id(), true, now_ms()),
+        };
+        self.policy_commit(&org, genesis)?;
         Ok(org)
     }
 
@@ -581,28 +840,20 @@ impl<S: Store, K: Signer> Client<S, K> {
         self.claims.remove(&(org.to_string(), device.to_string()));
     }
 
-    /// Make `device` (hex, a member) an admin of `org`. Only the device holding the
-    /// org root key can. Send the returned frame; the device re-announces itself.
-    pub fn grant_admin(&mut self, org: &str, device: &str) -> Result<Frame, ClientError> {
-        let root = self
-            .orgs
-            .0
-            .get(org)
-            .and_then(|s| s.root)
-            .ok_or_else(|| ClientError::NotAdmin(org.into()))?;
-        let root = DeviceKey::from_secret_bytes(&root);
-        let cert = MembershipCert::issue(
-            &root,
-            root.device_id(),
-            DeviceId::from_hex(device)?,
-            true,
-            now_ms(),
-        );
-        Ok(direct(
-            org,
-            device,
-            sync::outer_body(&Outer::Cert(CertChain(vec![cert]).to_hex())),
-        ))
+    /// Make `device` (hex, a member) an admin of `org`: a root-signed certificate
+    /// for the relay and an admin role in the policy. Only the device holding the
+    /// org root key can. Send the returned frames; the device re-announces itself.
+    pub fn grant_admin(&mut self, org: &str, device: &str) -> Result<Vec<Frame>, ClientError> {
+        let cert = self.root_admin_cert(org, DeviceId::from_hex(device)?)?;
+        let change = self.set_role(org, device, Role::Admin)?;
+        Ok(vec![
+            direct(
+                org,
+                device,
+                sync::outer_body(&Outer::Cert(CertChain(vec![cert]).to_hex())),
+            ),
+            self.broadcast_frame(org, &change)?,
+        ])
     }
 
     fn save_orgs(&mut self) -> Result<(), ClientError> {
@@ -675,16 +926,23 @@ impl<S: Store, K: Signer> Client<S, K> {
         ]
     }
 
-    /// Remove `device` (hex) from `org`'s group. Send the returned commit; the
-    /// device cannot read anything sent afterwards.
-    pub fn remove_member(&mut self, org: &str, device: &str) -> Result<Frame, ClientError> {
-        let device = DeviceId::from_hex(device)?;
-        let commit = self.groups.remove_member(&self.key, org, device)?;
+    /// Remove `device` (hex) from `org` (REQ-INV-004): out of the MLS group, so it
+    /// cannot read anything sent afterwards, and revoked in the policy, so its
+    /// changes this device has not seen are rejected everywhere. Admins only. Send
+    /// the returned frames in order.
+    pub fn remove_member(&mut self, org: &str, device: &str) -> Result<Vec<Frame>, ClientError> {
+        let revocation = self.revoke(org, device)?;
+        let commit = self
+            .groups
+            .remove_member(&self.key, org, DeviceId::from_hex(device)?)?;
         self.save_groups()?;
-        Ok(Frame::Broadcast {
-            org: org.into(),
-            body: sync::outer_body(&Outer::Commit(commit)),
-        })
+        Ok(vec![
+            Frame::Broadcast {
+                org: org.into(),
+                body: sync::outer_body(&Outer::Commit(commit)),
+            },
+            self.broadcast_frame(org, &revocation)?,
+        ])
     }
 
     /// Rotate this device's key in `org`'s group (MLS update, REQ-ENC-003): call
@@ -1089,6 +1347,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                     is_new,
                 })),
                 Err(ClientError::Rejected(e)) => Ok(rejected(e.to_string())),
+                Err(ClientError::Forbidden(e)) => Ok(rejected(e)),
                 Err(e) => Err(e),
             },
             Message::Query(query) => match kith_sync::respond(&self.store.all_ids()?, &query) {
@@ -1152,7 +1411,9 @@ impl<S: Store, K: Signer> Client<S, K> {
                     match self.receive(change) {
                         Ok(true) => stored += 1,
                         Ok(false) => known += 1,
-                        Err(ClientError::Rejected(_)) => rejected_n += 1,
+                        Err(ClientError::Rejected(_) | ClientError::Forbidden(_)) => {
+                            rejected_n += 1
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -1178,6 +1439,8 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 
     /// The stored changes with these IDs (unknown IDs are skipped), oldest first.
+    /// Includes changes the policy rejects: the peer must see them to reject them
+    /// (and their dependents) too.
     fn changes_for(&self, ids: &[ChangeId]) -> Result<Vec<Change>, ClientError> {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
@@ -1210,16 +1473,18 @@ impl<S: Store, K: Signer> Client<S, K> {
         object: &ObjectId,
         merger: &M,
     ) -> Result<Materialized<M::State>, ClientError> {
-        let hist = self.store.history(object)?;
+        let hist = self.history(object)?;
         if hist.is_empty() {
             return Err(ClientError::UnknownObject(*object));
         }
         Ok(merger.materialize(&hist)?)
     }
 
-    /// Full change history of an object.
+    /// Change history of an object: the changes the policy allows.
     pub fn history(&self, object: &ObjectId) -> Result<Vec<Change>, ClientError> {
-        Ok(self.store.history(object)?)
+        let mut h = self.store.history(object)?;
+        h.retain(|c| !self.invalid.contains(&c.change_id));
+        Ok(h)
     }
 
     /// The signer this client was created with (for `DeviceKey`: read the
@@ -1250,6 +1515,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             },
             &self.key,
         );
+        self.check_allowed(&change)?;
         self.store.put(change.clone())?;
         Ok(change)
     }

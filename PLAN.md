@@ -22,9 +22,9 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41 (#20), automerge 0.12, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
-### What the library can do today (alpha, phases 1-5 done)
+### What the library can do today (alpha, phases 1-5 and 6a done)
 
-Requirements: 21 implemented, 11 partial, 10 accepted/proposed.
+Requirements: 25 implemented, 9 partial, 8 accepted/proposed.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -33,6 +33,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
   (`kith-net` in Rust, `KithClient.connect` on web, `RelaySession` on Swift/Kotlin);
 - catch-up: a new or returning device downloads what it lacks from one online peer (`catchUp`);
 - invitations: `createOrg`, one-time invite links with short codes, admins, relay-checked certificates;
+- write permissions: roles (viewer/editor/admin), per-type write rules, revocation; enforced on every device;
 - end-to-end encryption (MLS, one group per org): create group, join request + admit, remove, key rotation,
   automatic commit catch-up, re-add and fork resolution; the relay sees only routing metadata;
 - merging concurrent edits: JSON documents on Automerge on every platform (`createDocument`, `updateDocument`,
@@ -43,9 +44,9 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | Gap | Effect | Requirement |
 | --- | --- | --- |
 | A device added by the losing side of an MLS fork must be admitted again | Rare (two admins at once); app sees `JoinRequested` | ADR 0004 |
-| No revocation list: a removed device keeps a valid certificate (sees metadata, can connect; cannot decrypt) | Phase 6 policy object | REQ-INV-004 |
+| A removed device keeps a valid certificate for the relay (connects, sees metadata; cannot decrypt; its writes are revoked) | Relay-level revocation open | REQ-INV-004 |
+| Read access is all-or-nothing per org | Subgroups are phase 6b | REQ-PERM-003 |
 | No rate limits on the relay | Floodable | Phase 8 |
-| No permission checks on incoming changes | Any device can write anything | REQ-PERM-002 |
 | Sync needs another device online | Offline-only devices can't catch up | REQ-RELAY-005 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
 
@@ -85,8 +86,17 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
    - [x] 5c Client + bindings (5b+5c in PR `feat/invitations`): `create_org`, `create_invite`, `claim_frame`, `InviteClaimed { code }` →
      `accept_claim`, Welcome carries the member certificate, re-announce with it; `grant_admin`; remove
      `create_group` / open `JoinRequested` admission; e2e through the relay; smoke test.
-5. **Phases 6-8**: permissions (REQ-PERM-002, policy object, revocation), files + always-on client, hardening.
-6. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
+5. **Phase 6, permissions** (decisions in *Decisions*; ADR 0006):
+   - [x] 6a Policy object (PR `feat/policy`; invalid changes are quarantined, not dropped, see ADR 0006) (`kith.policy`, ID derived from the org): ops `Genesis` (creator's root-signed admin cert),
+     `SetRole` (admin needs a root-signed cert), `SetRule` (min write role per object type), `Restrict` (revoke or
+     demote, with a keep list of the device's change IDs the admin had seen). Deterministic fold: causal order,
+     concurrent ops by seniority (root, then admin order) then change ID; an op counts only if its author is an
+     admin at that point. Every incoming change validated (REQ-PERM-002); invalid parents make children invalid;
+     policy tightening re-checks stored changes and hides invalid ones from history, merge and sync.
+     `remove_member` also revokes. Bindings: `setRole`, `setWriteRule`, `roleOf`; events `PolicyChanged`.
+   - [ ] 6b Read-restricted subgroups (REQ-PERM-003).
+6. **Phases 7-8**: files + always-on client, hardening.
+7. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
    against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
    many changes (persistence, merge, relay auth, live and catch-up sync) and the relay body format changed.
 
@@ -95,6 +105,10 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - Release a `v0.1.0-alpha.2` now? Encryption, documents and range-based catch-up are on `main` (tags stay the user's).
 
 ### Open issues
+
+- **One org per store**: objects carry no org, and catch-up offers every stored change to any org peer. Fine with one
+  org per `KithClient`/database (the bindings' model); a device in two orgs must use two stores. Make it explicit
+  (or scope objects by org) before apps rely on multiple orgs.
 
 - **macOS jobs get cancelled or wait long** (diagnosed 2026-11-03 from job annotations). Causes:
   1. GitHub macOS arm64 capacity: "The job was not acquired by Runner … even after multiple attempts"
@@ -108,6 +122,10 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Permissions: one signed `kith.policy` object per org, admin-written, validated like any object | User choice (2026-11-04) | Phase 6, REQ-PERM-001 |
+| Fixed roles admin / editor / viewer; per object type a minimum write role | User choice (2026-11-04) | Phase 6 |
+| Revocation wins: a restricted device's changes count only if the admin had seen them (keep list); dependents of rejected changes are rejected | User choice (2026-11-04) | Phase 6, REQ-PERM-004 |
+| Read-restricted subgroups (REQ-PERM-003) come after write permissions | User choice (2026-11-04) | Phase 6b |
 | Org ID = root public key (hex); members carry a root-signed membership certificate the relay checks statelessly | User choice (2026-11-04) | Phase 5, REQ-RELAY-004 |
 | Only admins invite/admit (root + devices the root certifies as admin); members may still re-add themselves | User choice (2026-11-04), until phase 6 roles | Phase 5 |
 | Invites: single-use, expiring (e.g. 24 h), claim proves the secret; 6-digit short code optional (app decides) | User choice (2026-11-04) | Phase 5 |
@@ -192,3 +210,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: Negentropy reconciliation replaces the full-ID exchange (PR `feat/negentropy`); new `SyncCompared` event. Next: phase 5 invitations (design questions first).
 - **2026-11-04**: User decided phase 5 questions (see *Decisions*). 5a `kith_core::membership` + ADR 0005 (PR `feat/membership`). Next: 5b relay checks.
 - **2026-11-04**: Invitations end to end (PR `feat/invitations`): relay checks certificate chains, pending devices, claim/accept flow in all bindings; smoke test joins by invite. Next: phase 6 permissions (design questions).
+- **2026-11-04**: User decided phase 6 questions. Policy object, roles, rules, revocation with keep lists, quarantine (PR `feat/policy`, ADR 0006). Next: 6b read-restricted subgroups, or phase 7.

@@ -23,9 +23,9 @@ relay that substitutes its own device.
 
 ### REQ-INV-004: Device and user removal
 
-- **Priority:** must | **Phase:** 5 | **Status:** partial | **Verify:** test | **Source:** design §Removing
+- **Priority:** must | **Phase:** 5 | **Status:** implemented | **Verify:** test | **Source:** design §Removing
 
 An admin must be able to remove a device (MLS remove with key rotation) and
 revoke it in the policy object; later changes by that key must be rejected.
 
-`remove_member` does the MLS part; revocation in the policy object is phase 6.
+`remove_member` removes the device from MLS and revokes it in the policy (ADR 0006).
