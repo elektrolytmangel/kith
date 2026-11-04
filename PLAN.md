@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (REQ-ID-002 merged, #44; alpha.2 released; road-to-release proposal added)
+- **Last updated:** 2026-11-04 (road to release agreed; CI skips docs-only PRs)
 - **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices) under
   *Unreleased* in the changelog, for the next alpha.
 - **State of `main` (99f6acf, #44 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -77,7 +77,11 @@ Work top to bottom; check items off here as they land.
    mark the repository as a template (owner only). The next step needs the user's pick (nothing else is
    unblocked): the platform requirements, or one of the deferred items.
 
-### Road to a release users can use (proposal 2026-11-04, awaiting the user's pick)
+### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
+
+0. [x] **CI skips docs-only changes** (`paths-ignore` in `ci.yml`: Markdown, `docs/**`, LICENSE, templates; PR `ci/skip-docs-only`).
+   A docs-only PR therefore has no checks (merge it directly), except requirement edits. Requirements-only changes run only
+   `requirements.yml` (`scripts/reqs.py`).
 
 Blockers, in suggested order:
 
@@ -90,9 +94,11 @@ Blockers, in suggested order:
 4. [ ] **Closing known gaps:** relay-level certificate revocation (REQ-INV-004), always-on client as the supported
    way to sync offline devices (push wake-ups REQ-RELAY-007 later), resumable large syncs (REQ-SYNC-005),
    history compaction (REQ-DATA-005; the web store keeps all history in memory).
-5. [ ] **Distribution:** today only GitHub Releases (tarball, XCFramework, AAR). App developers will expect
-   `npm install`, Swift Package Manager by URL and Maven coordinates. Needs the user to revisit the
-   "GitHub Releases only" decision.
+5. [ ] **Containers for the relay and the always-on client** (replaces "publish packages"; user decision
+   2026-11-04: nothing is published outside GitHub). Plan: `release.yml` builds a multi-arch image per binary from
+   the release binaries (no Rust compile in the image) and pushes it to GitHub Packages (ghcr.io) with
+   `GITHUB_TOKEN`; plus a `docker-compose.yml` example and a deployment guide. Chosen over "Dockerfile that
+   downloads the release" because users then just `docker run`/`pull`.
 6. [ ] **Docs for adopters:** per-platform getting started, a small example app, relay deployment guide (TLS,
    limits, always-on client), threat model and the known limits above.
 
@@ -181,6 +187,8 @@ None.
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. requirement edits run only `requirements.yml` | User request (2026-11-04) | `ci.yml` |
+| Distribution: nothing outside GitHub (no npm/Maven/crates.io). Relay and always-on client ship as containers on GitHub Packages (ghcr.io), built from the release binaries | User decision (2026-11-04), replaces the package-registry idea | Road to a release, step 5 |
 | Users with several devices (REQ-ID-002): any member may admit its own extra device (same user, same role, never admin this way); admitting others stays admin-only. The member itself signs the device's relay certificate (option A) | User choice (2026-11-04) | ADR 0011 |
 | Phase 8 scope: relay abuse limits first, then encrypted backups; compaction and push wake-ups later | User choice (2026-11-04) | Phase 8 |
 | Prepare a `v0.1.0-alpha.2` release PR (version bump + changelog); **the user merges and tags** | User choice (2026-11-04) | PR #42 |
@@ -249,7 +257,7 @@ None.
 
 ## Working agreements
 
-- Branch from `main`, open a PR, wait for CI. **Once every check is green the agent merges its own PR**
+- Branch from `main`, open a PR, wait for CI (docs-only PRs have none, merge directly). **Once every check is green the agent merges its own PR**
   (`gh pr merge --merge --delete-branch`; decided 2026-11-04). Never merge on red or pending checks, never
   force-push. Tags and releases stay the user's.
 - `gh` is logged in as `finocchio-42` (push access, not admin).
@@ -304,3 +312,5 @@ None.
 - **2026-11-04**: #44 merged (REQ-ID-002, all 11 checks green). The user merged #42 and tagged `v0.1.0-alpha.2`.
   PLAN updated. Next: small items or a deferred item, user's choice.
 - **2026-11-04**: User asked what a proper release needs; proposal written under *Road to a release users can use*.
+- **2026-11-04**: User agreed the road to a release and replaced the package-registry step by containers on ghcr.io.
+  First: CI skips docs-only changes (PR `ci/skip-docs-only`). Next: step 1 onwards (containers, then the rest).
