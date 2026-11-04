@@ -13,7 +13,7 @@ pub use sqlite::{ObjectSummary, SqliteStore};
 
 use std::collections::{BTreeMap, HashMap};
 
-use kith_core::{Change, ChangeId, ObjectId};
+use kith_core::{Change, ChangeId, ObjectId, Scope};
 
 /// Storage errors.
 #[derive(Debug, thiserror::Error)]
@@ -33,8 +33,19 @@ pub trait Store {
     fn contains(&self, id: &ChangeId) -> Result<bool, StoreError>;
     /// All changes of an object, in arrival order.
     fn history(&self, object: &ObjectId) -> Result<Vec<Change>, StoreError>;
-    /// IDs of all stored changes (input to set reconciliation).
+    /// IDs of all stored changes.
     fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError>;
+    /// IDs of the stored changes in `scope` (input to set reconciliation). The
+    /// default loads every change; backends should index it.
+    fn scope_ids(&self, scope: &Scope) -> Result<Vec<ChangeId>, StoreError> {
+        let mut out = Vec::new();
+        for id in self.all_ids()? {
+            if self.get(&id)?.is_some_and(|c| &c.body.scope == scope) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
     /// A small named blob kept next to the changes (e.g. `"mls"`, the MLS group
     /// state). `None` if never written.
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
@@ -71,6 +82,9 @@ impl<S: Store + ?Sized> Store for Box<S> {
     fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError> {
         (**self).all_ids()
     }
+    fn scope_ids(&self, scope: &Scope) -> Result<Vec<ChangeId>, StoreError> {
+        (**self).scope_ids(scope)
+    }
     fn heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, StoreError> {
         (**self).heads(object)
     }
@@ -87,6 +101,7 @@ impl<S: Store + ?Sized> Store for Box<S> {
 pub struct MemoryStore {
     changes: HashMap<ChangeId, Change>,
     by_object: BTreeMap<ObjectId, Vec<ChangeId>>,
+    by_scope: HashMap<Scope, Vec<ChangeId>>,
     meta: HashMap<String, Vec<u8>>,
 }
 
@@ -104,6 +119,10 @@ impl Store for MemoryStore {
         }
         self.by_object
             .entry(change.body.object_id)
+            .or_default()
+            .push(change.change_id);
+        self.by_scope
+            .entry(change.body.scope.clone())
             .or_default()
             .push(change.change_id);
         self.changes.insert(change.change_id, change);
@@ -130,6 +149,10 @@ impl Store for MemoryStore {
 
     fn all_ids(&self) -> Result<Vec<ChangeId>, StoreError> {
         Ok(self.changes.keys().copied().collect())
+    }
+
+    fn scope_ids(&self, scope: &Scope) -> Result<Vec<ChangeId>, StoreError> {
+        Ok(self.by_scope.get(scope).cloned().unwrap_or_default())
     }
 
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {

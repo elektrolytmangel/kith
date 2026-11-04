@@ -193,6 +193,24 @@ impl KithClient {
         Ok(c.into())
     }
 
+    /// Create an object in `scope`: an org ID (or `org/subgroup`) this device is a
+    /// member of, or `local`. `create` uses the only org, or `local` before joining.
+    pub fn create_in(
+        &self,
+        scope: String,
+        object_type: String,
+        payload: Vec<u8>,
+    ) -> Result<ChangeInfo, KithError> {
+        let scope = kith_client::Scope::parse(&scope)
+            .map_err(|e| KithError::Failed { msg: e.to_string() })?;
+        let c =
+            self.inner
+                .lock()
+                .unwrap()
+                .create_in(scope, ObjectType::new(object_type), payload)?;
+        Ok(c.into())
+    }
+
     pub fn edit(&self, object_id: String, payload: Vec<u8>) -> Result<ChangeInfo, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
         Ok(self.inner.lock().unwrap().edit(oid, payload)?.into())

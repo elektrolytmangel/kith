@@ -51,6 +51,14 @@ or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-cer
 The creator can make another member an admin with `grantAdmin(deviceId)`; that device
 gets `certificateUpdated { admin: true }` and can then invite too.
 
+### Scopes
+
+Every change belongs to a scope: the org, or `local` for data created before the
+device joins an org (it is never synced). `create` and `createDocument` use the org
+this device belongs to, so most apps never name a scope. A device in several orgs
+uses `createIn(org, type, payload)` (Rust: `create_in`, `create_document_in`); each
+org's data only ever syncs with that org ([ADR 0007](../adr/0007-scope-in-change-envelope.md)).
+
 ### Roles and write permissions
 
 Every org has a policy that all devices enforce on every change

@@ -1,17 +1,18 @@
 //! Compact binary encoding of a [`Change`] for backends that store opaque
 //! blobs (IndexedDB, files, key-value stores).
 //!
-//! Layout (all integers big-endian): version byte `1`, change id (32),
+//! Layout (all integers big-endian): version byte `2`, change id (32),
 //! object id (16), author (32), timestamp (u64), signature (64), object type
-//! (u32 length + UTF-8), parent count (u32) + 32 bytes each, payload (u32
-//! length + bytes). Decoding does not verify the signature; callers that
+//! (u32 length + UTF-8), scope (u32 length + UTF-8), parent count (u32) + 32
+//! bytes each, payload (u32 length + bytes). Decoding does not verify the signature; callers that
 //! load untrusted data should call [`Change::verify`].
 
-use kith_core::{Change, ChangeId, DeviceId, ObjectId, ObjectType, UnsignedChange};
+use kith_core::{Change, ChangeId, DeviceId, ObjectId, ObjectType, Scope, UnsignedChange};
 
 use crate::StoreError;
 
-const VERSION: u8 = 1;
+/// 2: adds the scope (phase 6b).
+const VERSION: u8 = 2;
 
 /// Encode a change into bytes.
 pub fn encode_change(c: &Change) -> Vec<u8> {
@@ -24,6 +25,7 @@ pub fn encode_change(c: &Change) -> Vec<u8> {
     out.extend_from_slice(&b.timestamp_ms.to_be_bytes());
     out.extend_from_slice(&c.signature);
     put_bytes(&mut out, b.object_type.as_str().as_bytes());
+    put_bytes(&mut out, b.scope.as_str().as_bytes());
     out.extend_from_slice(&(b.parents.len() as u32).to_be_bytes());
     for p in &b.parents {
         out.extend_from_slice(p.as_bytes());
@@ -44,6 +46,10 @@ pub fn decode_change(bytes: &[u8]) -> Result<Change, StoreError> {
     let timestamp_ms = u64::from_be_bytes(r.array()?);
     let signature = r.array()?;
     let ty = String::from_utf8(r.bytes()?.to_vec()).map_err(|_| bad("object type is not UTF-8"))?;
+    let scope = std::str::from_utf8(r.bytes()?)
+        .ok()
+        .and_then(|s| Scope::parse(s).ok())
+        .ok_or_else(|| bad("invalid scope"))?;
     let n = u32::from_be_bytes(r.array()?) as usize;
     // Each parent needs 32 bytes, so a huge count fails fast instead of allocating.
     if n > r.0.len() / 32 {
@@ -60,6 +66,7 @@ pub fn decode_change(bytes: &[u8]) -> Result<Change, StoreError> {
     Ok(Change {
         change_id,
         body: UnsignedChange {
+            scope,
             object_id,
             object_type: ObjectType::new(ty),
             parents,
@@ -110,6 +117,7 @@ mod tests {
     fn sample(parents: Vec<ChangeId>, payload: &[u8]) -> Change {
         Change::sign(
             UnsignedChange {
+                scope: Scope::local(),
                 object_id: ObjectId::random(),
                 object_type: ObjectType::new("acme.note"),
                 parents,
@@ -144,7 +152,7 @@ mod tests {
         extra.push(0);
         assert!(decode_change(&extra).is_err());
         let mut wrong_version = bytes;
-        wrong_version[0] = 2;
+        wrong_version[0] = 1; // before scopes
         assert!(decode_change(&wrong_version).is_err());
     }
 }

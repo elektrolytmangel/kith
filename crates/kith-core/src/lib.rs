@@ -11,7 +11,7 @@ pub mod membership;
 pub mod policy;
 
 pub use change::{Change, ChangeError, Signer, UnsignedChange, verify_signature};
-pub use ids::{ChangeId, DeviceId, IdError, ObjectId, ObjectType};
+pub use ids::{ChangeId, DeviceId, IdError, ObjectId, ObjectType, Scope, ScopeError};
 
 /// `N` bytes from the operating system's secure random number generator
 /// (`crypto.getRandomValues` on the web). The only randomness source in kith.

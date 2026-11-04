@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** every change is signed with its scope (`kith/change/v2`, ADR 0007): `local`, an org,
+  or (later) a subgroup. Catch-up, offers, broadcasts and policy checks work per scope, so one store
+  can hold several orgs. `Client::create` uses the default scope (the only org, else `local`);
+  `create_in` / `create_document_in` (web `createIn`, FFI `createIn`) choose one. `Store::scope_ids`;
+  codec v2 and SQLite schema 3 (older non-empty databases are refused).
+
 ### Added
 - Write permissions (phase 6, ADR 0006): a `kith.policy` object per org (`kith_core::policy`:
   `PolicyOp`, `Policy::fold`, `Role`), created with the org. `Client::set_role`, `set_write_rule`,
