@@ -4,10 +4,10 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (REQ-ID-002 own devices implemented, PR `feat/own-devices`)
-- **Version:** `v0.1.0-alpha.1` released. `0.1.0-alpha.2` is prepared in **PR #42** (version bump + changelog),
-  waiting for the **user to merge and tag** (`git tag v0.1.0-alpha.2 && git push origin v0.1.0-alpha.2`).
-- **State of `main` (e68a21b, #41 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
+- **Last updated:** 2026-11-04 (REQ-ID-002 merged, #44; alpha.2 released)
+- **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices) under
+  *Unreleased* in the changelog, for the next alpha.
+- **State of `main` (99f6acf, #44 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
   workspace tests, wasm32 per crate, MSRV 1.91, npm smoke test against the real relay.
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
 
@@ -66,7 +66,7 @@ Work top to bottom; check items off here as they land.
 
 ### Next steps (in order)
 
-1. **User:** merge release PR **#42** and push the tag `v0.1.0-alpha.2`. The agent does not merge this PR.
+1. [x] Release `v0.1.0-alpha.2` (#42 merged and tagged by the user).
 2. [x] **REQ-ID-002, users with several devices** (option A decided 2026-11-04: the member signs its own device's
    certificate; ADR 0011, PR `feat/own-devices`): `LinkDevice` policy op, own-device certificates (chains of up to 3),
    `create_own_device_invite` (web/FFI), `InviteClaim.to` routing, removal covers linked devices.
@@ -74,7 +74,8 @@ Work top to bottom; check items off here as they land.
    resumable large syncs (REQ-SYNC-005), moving subgroup ownership, relay-level certificate revocation.
 4. **Small items:** run the Swift/Kotlin live-sync glue against a real relay on a device or emulator
    (REQ-SYNC-004 partial); the remaining `partial` platform requirements (REQ-PLAT-002..005, REQ-RELAY-001);
-   mark the repository as a template (owner only).
+   mark the repository as a template (owner only). The next step needs the user's pick (nothing else is
+   unblocked): the platform requirements, or one of the deferred items.
 
 ### Completed phases (reference)
 
@@ -281,3 +282,5 @@ None.
   REQ-ID-002 (open question first).
 - **2026-11-04**: PR #42 conflicts resolved (merged `main` into the release branch). User chose option A for REQ-ID-002.
   Implemented own devices (PR `feat/own-devices`, ADR 0011). Next: merge when CI is green; then the small items.
+- **2026-11-04**: #44 merged (REQ-ID-002, all 11 checks green). The user merged #42 and tagged `v0.1.0-alpha.2`.
+  PLAN updated. Next: small items or a deferred item, user's choice.
