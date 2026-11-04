@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Works with a strict policy: the package needs 'wasm-unsafe-eval', not 'unsafe-eval'.
+         Add your relay to connect-src, e.g. wss://relay.example.com -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:"
+    />
+    <title>kith notes</title>
+  </head>
+  <body>
+    <main>
+      <h1>kith notes</h1>
+      <p id="status">starting…</p>
+      <form id="add"><input id="text" placeholder="New note" autocomplete="off" /> <button>Add</button></form>
+      <ul id="notes"></ul>
+      <details>
+        <summary>Sync with other devices</summary>
+        <p>
+          Relay URL <input id="relay" size="34" value="ws://localhost:8080/v1/ws" />
+          <button id="start">Create group &amp; connect</button>
+        </p>
+        <p><button id="invite" disabled>Create invite link</button> <output id="link"></output></p>
+        <p>
+          Join with a link <input id="joinlink" size="34" /> <button id="join">Join</button>
+          <output id="code"></output>
+        </p>
+      </details>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

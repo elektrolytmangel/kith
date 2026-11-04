@@ -319,6 +319,13 @@ impl KithClient {
         Ok(h.into_iter().map(Into::into).collect())
     }
 
+    /// The objects this device knows, as their creation changes (object ID, type, author,
+    /// creation time), oldest first. Pass an object type to list only those.
+    pub fn objects(&self, object_type: Option<String>) -> Result<Vec<ChangeInfo>, KithError> {
+        let list = self.inner.lock().unwrap().objects(object_type.as_deref())?;
+        Ok(list.into_iter().map(Into::into).collect())
+    }
+
     /// Create a JSON document (an object whose edits merge without conflicts, see
     /// `updateDocument`). `json` must be a JSON object. Broadcast the change like any other.
     pub fn create_document(

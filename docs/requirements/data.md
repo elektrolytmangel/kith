@@ -51,6 +51,14 @@ A device must be able to export its data, files and identity as a
 passphrase-encrypted backup and restore it on new hardware, rejoining its groups
 without reusing old encryption keys ([ADR 0010](../adr/0010-encrypted-backups.md)).
 
+### REQ-DATA-007: List objects
+
+- **Priority:** must | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** this repo
+
+An app must be able to list the objects a device knows (optionally of one type),
+in every binding, so it can build its views after a restart or a catch-up without
+keeping its own index of object IDs.
+
 ### REQ-STORE-001: SQLite local store
 
 - **Priority:** must | **Phase:** 1 | **Status:** implemented | **Verify:** test | **Source:** design §Local storage

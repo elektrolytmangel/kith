@@ -1760,3 +1760,29 @@ fn an_own_device_invite_cannot_be_accepted_by_someone_else() {
     assert!(net.devs[2].accept_claim(&ORG, &new).is_err());
     assert!(!net.devs[3].is_member(&ORG));
 }
+
+/// req: REQ-DATA-007
+#[test]
+fn objects_lists_what_the_device_knows() {
+    let mut c = client();
+    assert!(c.objects(None).unwrap().is_empty());
+    let note = c
+        .create(ObjectType::new("acme.note"), b"a".to_vec())
+        .unwrap();
+    c.edit(note.body.object_id, b"b".to_vec()).unwrap();
+    let todo = c
+        .create(ObjectType::new("acme.todo"), b"x".to_vec())
+        .unwrap();
+    let all = c.objects(None).unwrap();
+    // One entry per object (not per change), creation changes only.
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().all(|c| c.is_creation()));
+    let notes = c.objects(Some("acme.note")).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].body.object_id, note.body.object_id);
+    assert_eq!(
+        c.objects(Some("acme.todo")).unwrap()[0].body.object_id,
+        todo.body.object_id
+    );
+    assert!(c.objects(Some("nope")).unwrap().is_empty());
+}
