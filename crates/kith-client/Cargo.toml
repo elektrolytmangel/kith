@@ -12,8 +12,9 @@ authors.workspace = true
 workspace = true
 
 [features]
-# Re-export the Automerge merger (kith_client::automerge_merger). Off by default: it is large on wasm.
-automerge = ["kith-merge/automerge"]
+# JSON documents on Automerge (`Client::create_document` & co.) and the Automerge merger
+# (kith_client::automerge_merger). Off by default here: it is large on wasm. The bindings enable it.
+automerge = ["kith-merge/automerge", "dep:serde_json"]
 
 [dependencies]
 kith-core.workspace = true
@@ -23,6 +24,7 @@ kith-merge.workspace = true
 kith-sync.workspace = true
 kith-protocol.workspace = true
 thiserror.workspace = true
+serde_json = { workspace = true, optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys.workspace = true

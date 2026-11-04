@@ -182,6 +182,44 @@ impl KithClient {
         let h = self.inner.lock().unwrap().history(&oid)?;
         Ok(h.into_iter().map(Into::into).collect())
     }
+
+    /// Create a JSON document (an object whose edits merge without conflicts, see
+    /// `updateDocument`). `json` must be a JSON object. Broadcast the change like any other.
+    pub fn create_document(
+        &self,
+        object_type: String,
+        json: String,
+    ) -> Result<ChangeInfo, KithError> {
+        let c = self
+            .inner
+            .lock()
+            .unwrap()
+            .create_document(ObjectType::new(object_type), &json)?;
+        Ok(c.into())
+    }
+
+    /// Change a document with a JSON merge patch (RFC 7396: `null` removes a key,
+    /// objects merge, other values replace). Edits of different keys on different
+    /// devices all survive. `nil`/`null` if the patch changes nothing.
+    pub fn update_document(
+        &self,
+        object_id: String,
+        patch: String,
+    ) -> Result<Option<ChangeInfo>, KithError> {
+        let oid = ObjectId::from_hex(&object_id)?;
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .update_document(oid, &patch)?
+            .map(Into::into))
+    }
+
+    /// The merged state of a document as a JSON string (all devices' edits).
+    pub fn document_json(&self, object_id: String) -> Result<String, KithError> {
+        let oid = ObjectId::from_hex(&object_id)?;
+        Ok(self.inner.lock().unwrap().document_json(&oid)?)
+    }
 }
 
 /// What happened when a frame from the relay was handled.
@@ -726,6 +764,35 @@ mod tests {
         let c = KithClient::open(path, key).unwrap();
         assert!(c.is_member("org".into()));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// req: REQ-DATA-004
+    #[test]
+    fn documents_merge_across_sessions() {
+        let (a, sa, b, sb) = pair();
+        join(&a, &sa, &b, &sb);
+        let doc = a
+            .create_document("todo".into(), r#"{"title":"x"}"#.into())
+            .unwrap();
+        let _ = relay_to(&a, &sb, &sa.broadcast(doc.change_id).unwrap());
+        let ea = a
+            .update_document(doc.object_id.clone(), r#"{"owner":"ann"}"#.into())
+            .unwrap()
+            .unwrap();
+        let eb = b
+            .update_document(doc.object_id.clone(), r#"{"done":true}"#.into())
+            .unwrap()
+            .unwrap();
+        let _ = relay_to(&a, &sb, &sa.broadcast(ea.change_id).unwrap());
+        let _ = relay_to(&b, &sa, &sb.broadcast(eb.change_id).unwrap());
+        let want: serde_json::Value =
+            serde_json::from_str(r#"{"title":"x","owner":"ann","done":true}"#).unwrap();
+        for c in [&a, &b] {
+            let got: serde_json::Value =
+                serde_json::from_str(&c.document_json(doc.object_id.clone()).unwrap()).unwrap();
+            assert_eq!(got, want);
+        }
+        assert!(a.create_document("todo".into(), "[]".into()).is_err());
     }
 
     /// req: REQ-PLAT-002

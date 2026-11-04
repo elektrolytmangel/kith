@@ -16,7 +16,7 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kith-client.workspace = true
+kith-client = { workspace = true, features = ["automerge"] }
 kith-store.workspace = true
 kith-protocol.workspace = true
 wasm-bindgen.workspace = true

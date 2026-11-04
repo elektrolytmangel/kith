@@ -1361,6 +1361,7 @@ dependencies = [
  "kith-protocol",
  "kith-store",
  "kith-sync",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1398,6 +1399,7 @@ dependencies = [
  "kith-client",
  "kith-protocol",
  "kith-store",
+ "serde_json",
  "thiserror",
  "uniffi",
 ]
@@ -1410,6 +1412,7 @@ dependencies = [
  "getrandom 0.4.3",
  "kith-client",
  "kith-core",
+ "serde_json",
  "thiserror",
 ]
 

@@ -25,15 +25,16 @@ old version is a new change.
 
 ### REQ-DATA-004: Lock-free concurrent edits
 
-- **Priority:** must | **Phase:** 1 | **Status:** partial | **Verify:** test | **Source:** design §Concurrency
+- **Priority:** must | **Phase:** 1 | **Status:** implemented | **Verify:** test | **Source:** design §Concurrency
 
 Edits must never wait for a lock. Concurrent edits must be detected (shared
 parent) and merged deterministically on every client (Automerge by default,
 per-type rules otherwise).
 
-`kith_merge::Merger` with the Automerge implementation does this in Rust (see
-[ADR 0003](../adr/0003-merge-automerge-default-pluggable.md)). Still open: exposing
-merged state in the Swift/Kotlin/JS bindings.
+`kith_merge::Merger` with the Automerge implementation does this (see
+[ADR 0003](../adr/0003-merge-automerge-default-pluggable.md)). All bindings expose it
+as JSON documents: `createDocument`, `updateDocument` (RFC 7396 merge patch) and
+`documentJson`.
 
 ### REQ-DATA-005: Compaction
 

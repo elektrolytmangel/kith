@@ -47,6 +47,19 @@ final class KithTests: XCTestCase {
         XCTAssertFalse(try other.joinRequest(to: client.deviceId()).isEmpty)
     }
 
+    /// req: REQ-DATA-004
+    func testDocuments() throws {
+        let client = KithClient()
+        let doc = try client.createDocument(objectType: "todo", json: #"{"title":"x"}"#)
+        XCTAssertNotNil(try client.updateDocument(objectId: doc.objectId, patch: #"{"done":true}"#))
+        XCTAssertNil(try client.updateDocument(objectId: doc.objectId, patch: #"{"done":true}"#))
+        let json = try client.documentJson(objectId: doc.objectId)
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        XCTAssertEqual(parsed?["title"] as? String, "x")
+        XCTAssertEqual(parsed?["done"] as? Bool, true)
+        XCTAssertThrowsError(try client.createDocument(objectType: "todo", json: "[1]"))
+    }
+
     /// req: REQ-PLAT-002
     func testRestoredKeyKeepsDeviceIdentity() throws {
         let first = KithClient()

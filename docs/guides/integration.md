@@ -7,6 +7,26 @@ restarts (store the key in the platform's secure storage).
 file on Swift and Kotlin (`dbPath`), in IndexedDB on the web (`dbName`, returns a
 Promise). `KithClient()` stays ephemeral. Invitations (links/QR) and permissions come in later phases.
 
+## Documents
+
+`create`/`edit` store opaque bytes: concurrent edits of one object stay a fork that
+the app resolves. For JSON-like data use **documents**, which merge on their own
+(Automerge, [ADR 0003](../adr/0003-merge-automerge-default-pluggable.md)):
+
+```ts
+const id = client.createDocument("acme.todo", JSON.stringify({ title: "Buy milk" }));
+client.updateDocument(id, JSON.stringify({ done: true, title: null })); // RFC 7396 merge patch
+const todo = JSON.parse(client.documentJson(id)); // merged state, all devices' edits
+```
+
+A patch sets the keys it names, removes keys set to `null` and merges nested objects.
+Edits of different keys on different devices all survive; for the same key every
+device picks the same winner. Arrays are replaced as a whole. The same three calls
+exist on Swift/Kotlin (`createDocument(objectType:json:)`, `updateDocument(objectId:patch:)`,
+`documentJson(objectId:)`) and in Rust (`Client::create_document`, feature `automerge`).
+Re-read `documentJson` on `received` / `syncReceived` events. Documents add about
+1.2 MB to the web package (3.2 MB `.wasm` uncompressed).
+
 ## Organizations and encryption
 
 Everything a device sends through the relay is end-to-end encrypted for the

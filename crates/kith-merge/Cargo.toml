@@ -15,10 +15,11 @@ workspace = true
 kith-core.workspace = true
 thiserror.workspace = true
 automerge = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = ["automerge"]
-automerge = ["dep:automerge"]
+automerge = ["dep:automerge", "dep:serde_json"]
 
 [dev-dependencies]
 kith-client.workspace = true

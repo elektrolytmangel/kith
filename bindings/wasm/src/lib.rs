@@ -240,6 +240,50 @@ impl KithClient {
         Ok(c.change_id.to_hex())
     }
 
+    /// Create a JSON document (an object whose edits merge without conflicts, see
+    /// `updateDocument`) from a JSON object string; returns its object ID (hex).
+    /// Broadcast to the other online devices when connected.
+    #[wasm_bindgen(js_name = createDocument)]
+    pub fn create_document(&mut self, object_type: &str, json: &str) -> Result<String, JsError> {
+        let c = self
+            .inner
+            .borrow_mut()
+            .create_document(ObjectType::new(object_type), json)
+            .map_err(js_err)?;
+        self.broadcast(&c);
+        Ok(c.body.object_id.to_hex())
+    }
+
+    /// Change a document with a JSON merge patch (RFC 7396: `null` removes a key,
+    /// objects merge, other values replace); returns the change ID, or `undefined`
+    /// if the patch changes nothing. Edits of different keys on different devices
+    /// all survive.
+    #[wasm_bindgen(js_name = updateDocument)]
+    pub fn update_document(
+        &mut self,
+        object_id: &str,
+        patch: &str,
+    ) -> Result<Option<String>, JsError> {
+        let oid = ObjectId::from_hex(object_id).map_err(js_err)?;
+        let c = self
+            .inner
+            .borrow_mut()
+            .update_document(oid, patch)
+            .map_err(js_err)?;
+        Ok(c.map(|c| {
+            self.broadcast(&c);
+            c.change_id.to_hex()
+        }))
+    }
+
+    /// The merged state of a document as a JSON string (`JSON.parse` it). Call it
+    /// again on `received` / `syncReceived` events to re-render.
+    #[wasm_bindgen(js_name = documentJson)]
+    pub fn document_json(&self, object_id: &str) -> Result<String, JsError> {
+        let oid = ObjectId::from_hex(object_id).map_err(js_err)?;
+        self.inner.borrow().document_json(&oid).map_err(js_err)
+    }
+
     /// Number of changes in an object's history.
     #[wasm_bindgen(js_name = historyLength)]
     pub fn history_length(&self, object_id: &str) -> Result<usize, JsError> {

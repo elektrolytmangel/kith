@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- JSON documents in all bindings (REQ-DATA-004): `createDocument`, `updateDocument` (RFC 7396 merge
+  patch) and `documentJson` on web, Swift and Kotlin; `Client::create_document`, `update_document`,
+  `document_json` in Rust (feature `automerge`, which the bindings enable). `kith_merge::automerge_merger`
+  gains `to_json` and `merge_patch`. The web package grows to about 3.2 MB (`.wasm`, uncompressed).
+
+### Added
 - Fork resolution for concurrent MLS commits (ADR 0004): a competing commit for the epoch just
   passed is detected (`CommitOutcome::Fork`, `Event::Fork`); the commit from the lower device ID
   wins on every device and devices on the losing branch are re-added automatically. Commit

@@ -19,6 +19,13 @@ client.edit(id, new TextEncoder().encode("hello world"));
 assert.equal(client.historyLength(id), 2);
 assert.throws(() => client.edit("not-hex", new Uint8Array()));
 
+// JSON documents: create, merge-patch, read back.
+const doc = client.createDocument("acme.todo", JSON.stringify({ title: "x", n: 1 }));
+assert.notEqual(client.updateDocument(doc, JSON.stringify({ n: 2, done: true })), undefined);
+assert.equal(client.updateDocument(doc, JSON.stringify({ n: 2 })), undefined); // no change
+assert.deepEqual(JSON.parse(client.documentJson(doc)), { title: "x", n: 2, done: true });
+assert.throws(() => client.createDocument("acme.todo", "[1]"));
+
 // Key restore: same secret key, same device identity.
 const restored = kith.KithClient.withSecretKey(client.secretKey());
 assert.equal(restored.deviceId(), client.deviceId());
@@ -109,8 +116,19 @@ if (process.env.KITH_RELAY_BIN) {
     assert.equal(got.isNew, true);
     assert.equal(b.historyLength(objectId), 1);
 
+    // Documents merge across devices: concurrent patches of different keys both survive.
+    const docId = a.createDocument("acme.todo", JSON.stringify({ title: "shared" }));
+    await waitFor(evB, (e) => e.type === "received" && e.objectId === docId, "b to receive the document");
+    a.updateDocument(docId, JSON.stringify({ owner: "ann" }));
+    b.updateDocument(docId, JSON.stringify({ done: true }));
+    await waitFor(evA, (e) => e.type === "received" && e.objectId === docId && e.from === b.deviceId(), "a to get b's patch");
+    await waitFor(evB, (e) => e.type === "received" && e.objectId === docId && e.from === a.deviceId(), "b to get a's patch");
+    const merged = { title: "shared", owner: "ann", done: true };
+    assert.deepEqual(JSON.parse(a.documentJson(docId)), merged);
+    assert.deepEqual(JSON.parse(b.documentJson(docId)), merged);
+
     b.edit(objectId, new TextEncoder().encode("from b"));
-    await waitFor(evA, (e) => e.type === "received" && e.from === b.deviceId(), "a to receive b's edit");
+    await waitFor(evA, (e) => e.type === "received" && e.from === b.deviceId() && e.objectId === objectId, "a to receive b's edit");
     assert.equal(a.historyLength(objectId), 2);
 
     // A new device joins and downloads the history from an online peer (joining
