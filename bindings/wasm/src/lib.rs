@@ -89,6 +89,37 @@ impl KithClient {
         wrap(key, Box::new(store))
     }
 
+    /// Restore a device from a backup (`exportBackup`) into the IndexedDB database
+    /// `dbName` (use a new one). Returns a Promise. Same identity and data; it rejoins
+    /// its groups (fresh keys) once a member is online. Only when the original
+    /// device is gone.
+    #[wasm_bindgen(js_name = restoreBackup)]
+    pub async fn restore_backup(
+        db_name: String,
+        backup: Vec<u8>,
+        passphrase: String,
+    ) -> Result<KithClient, JsError> {
+        let store = idb::IdbStore::open(&db_name)
+            .await
+            .map_err(|e| JsError::new(&idb::js_message(&e)))?;
+        let c = Client::import_backup(&backup, &passphrase, Box::new(store) as Box<dyn Store>)
+            .map_err(js_err)?;
+        Ok(KithClient {
+            inner: Rc::new(RefCell::new(c)),
+            live: None,
+        })
+    }
+
+    /// A passphrase-encrypted backup of this device (identity, data, files,
+    /// memberships) as bytes. Anyone with it and the passphrase can act as this device.
+    #[wasm_bindgen(js_name = exportBackup)]
+    pub fn export_backup(&self, passphrase: &str) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .borrow()
+            .export_backup(passphrase)
+            .map_err(js_err)
+    }
+
     /// Connect to a relay (`ws://host:port/v1/ws`, `wss://` in production),
     /// authenticate as this device and join `org`. From then on every
     /// `create`/`edit` is broadcast to the other online devices, and their

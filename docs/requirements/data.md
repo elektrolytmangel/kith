@@ -43,6 +43,14 @@ as JSON documents: `createDocument`, `updateDocument` (RFC 7396 merge patch) and
 Clients should support snapshots plus pruning of old changes under a per-type
 policy agreed by the organization.
 
+### REQ-DATA-006: Encrypted backups
+
+- **Priority:** should | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** design §Risks (all devices lose data)
+
+A device must be able to export its data, files and identity as a
+passphrase-encrypted backup and restore it on new hardware, rejoining its groups
+without reusing old encryption keys ([ADR 0010](../adr/0010-encrypted-backups.md)).
+
 ### REQ-STORE-001: SQLite local store
 
 - **Priority:** must | **Phase:** 1 | **Status:** implemented | **Verify:** test | **Source:** design §Local storage

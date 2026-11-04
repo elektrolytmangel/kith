@@ -236,6 +236,48 @@ async fn rotate_if_due(
     Ok(())
 }
 
+/// A passphrase-encrypted backup of the client in `dir` (ADR 0010). The always-on
+/// client holds everything, so this is the org's best backup.
+pub fn export_backup(dir: &Path, passphrase: &str) -> Result<Vec<u8>, Error> {
+    Ok(open_client(dir)?.export_backup(passphrase)?)
+}
+
+/// Set up `dir` (which must not hold a device yet) from a backup, to run against
+/// `relay`. Returns the org. The client rejoins its group once a member is online.
+pub fn restore_backup(
+    dir: &Path,
+    backup: &[u8],
+    passphrase: &str,
+    relay: &str,
+) -> Result<String, Error> {
+    if path(dir, "device.key").exists() {
+        return Err(Error::Config(format!(
+            "{} already holds a device",
+            dir.display()
+        )));
+    }
+    std::fs::create_dir_all(dir)?;
+    let store = SqliteStore::open(path(dir, "kith.db"))?;
+    let client = Client::import_backup(backup, passphrase, store)?;
+    let org = client
+        .default_scope()?
+        .org_id()
+        .map(|o| o.to_hex())
+        .ok_or_else(|| Error::Config("the backup is not of an org member".into()))?;
+    std::fs::write(path(dir, "device.key"), client.signer().secret_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path(dir, "device.key"),
+            std::fs::Permissions::from_mode(0o600),
+        )?;
+    }
+    std::fs::write(path(dir, "org"), &org)?;
+    std::fs::write(path(dir, "relay"), relay)?;
+    Ok(org)
+}
+
 /// The device ID of the always-on client in `dir` (creating its key if needed).
 pub fn device_id(dir: &Path) -> Result<String, Error> {
     Ok(device_key(dir)?.device_id().to_hex())

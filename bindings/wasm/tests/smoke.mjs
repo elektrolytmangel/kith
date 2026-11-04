@@ -19,6 +19,13 @@ client.edit(id, new TextEncoder().encode("hello world"));
 assert.equal(client.historyLength(id), 2);
 assert.throws(() => client.edit("not-hex", new Uint8Array()));
 
+// Backups: export, restore elsewhere with the same identity and data.
+const backup = client.exportBackup("pw");
+await assert.rejects(() => kith.KithClient.restoreBackup("restored-bad", backup, "wrong"));
+const restoredFromBackup = await kith.KithClient.restoreBackup("restored-db", backup, "pw");
+assert.equal(restoredFromBackup.deviceId(), client.deviceId());
+assert.equal(restoredFromBackup.historyLength(id), 2);
+
 // JSON documents: create, merge-patch, read back.
 const doc = client.createDocument("acme.todo", JSON.stringify({ title: "x", n: 1 }));
 assert.notEqual(client.updateDocument(doc, JSON.stringify({ n: 2, done: true })), undefined);

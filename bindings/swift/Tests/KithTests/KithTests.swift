@@ -56,6 +56,19 @@ final class KithTests: XCTestCase {
         XCTAssertEqual(claim.code.count, 6)
     }
 
+    /// req: REQ-DATA-006
+    func testBackups() throws {
+        let client = KithClient()
+        let note = try client.create(type: "note", text: "keep")
+        let backup = try client.exportBackup(passphrase: "pw")
+        let path = NSTemporaryDirectory() + "kith-restore-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        XCTAssertThrowsError(try KithClient.restore(dbPath: path + "x", backup: backup, passphrase: "no"))
+        let restored = try KithClient.restore(dbPath: path, backup: backup, passphrase: "pw")
+        XCTAssertEqual(restored.deviceId(), client.deviceId())
+        XCTAssertEqual(try restored.history(objectId: note.objectId).count, 1)
+    }
+
     /// req: REQ-FILE-001
     func testFiles() throws {
         let client = KithClient()
