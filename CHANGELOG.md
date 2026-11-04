@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- `kith_core::membership` (ADR 0005): membership certificates and chains (root → admin → member)
+  that the relay can verify against the org ID (= org root public key), one-time invite links
+  (`Invite::to_link` / `parse`), the claim proof (HMAC over the KeyPackage) and a 6-digit short
+  code. Not wired into the relay and client yet.
+
 ### Changed
 - Catch-up uses range-based set reconciliation (Negentropy, `kith_sync::Reconciliation` / `respond`)
   instead of exchanging all change IDs: no more ~32,000-change limit (`ClientError::SyncTooLarge` is

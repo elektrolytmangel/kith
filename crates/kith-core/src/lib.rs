@@ -7,6 +7,7 @@
 
 mod change;
 mod ids;
+pub mod membership;
 
 pub use change::{Change, ChangeError, Signer, UnsignedChange, verify_signature};
 pub use ids::{ChangeId, DeviceId, IdError, ObjectId, ObjectType};
