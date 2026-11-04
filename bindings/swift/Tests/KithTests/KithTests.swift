@@ -54,6 +54,10 @@ final class KithTests: XCTestCase {
         let claim = try newcomer.relaySession(org: info.org).claim(link: link)
         XCTAssertFalse(claim.frame.isEmpty)
         XCTAssertEqual(claim.code.count, 6)
+        // A link for the user's own second device.
+        let own = try client.createOwnDeviceInvite(org: org, relay: "wss://relay.example/v1/ws", ttlSeconds: 600)
+        XCTAssertEqual(try parseInvite(link: own).org, org)
+        XCTAssertThrowsError(try newcomer.createOwnDeviceInvite(org: org, relay: "wss://relay.example/v1/ws", ttlSeconds: 600))
     }
 
     /// req: REQ-DATA-006

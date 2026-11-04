@@ -117,6 +117,13 @@ pub enum PolicyOp {
         /// Changes in the subgroup by removed members that stay valid.
         keep: Vec<ChangeId>,
     },
+    /// The author links `device` as another device of the same user (ADR 0011,
+    /// REQ-ID-002). Any member may do it for its own device; the device then has
+    /// the author's role, at most editor, and is revoked or demoted with it.
+    LinkDevice {
+        /// The new device.
+        device: DeviceId,
+    },
     /// Revoke (`role: None`) or demote `device`. Its changes in `keep` (the ones the
     /// admin had seen) stay valid; all others are judged by the new role.
     Restrict {
@@ -184,6 +191,10 @@ impl PolicyOp {
                 for id in keep {
                     w.extend_from_slice(&id.0);
                 }
+            }
+            PolicyOp::LinkDevice { device } => {
+                w.push(5);
+                w.extend_from_slice(&device.0);
             }
             PolicyOp::Restrict { device, role, keep } => {
                 w.push(3);
@@ -306,6 +317,14 @@ impl PolicyOp {
                         .collect(),
                 }
             }
+            5 => {
+                if rest.len() != 32 {
+                    return Err(PolicyError("device"));
+                }
+                PolicyOp::LinkDevice {
+                    device: device(rest)?,
+                }
+            }
             _ => return Err(PolicyError("unknown kind")),
         })
     }
@@ -318,6 +337,8 @@ pub struct Policy {
     pub creator: Option<DeviceId>,
     /// Explicit roles; members not listed are editors.
     pub roles: BTreeMap<DeviceId, Role>,
+    /// Linked devices: device → the member device it was linked to (its user).
+    pub links: BTreeMap<DeviceId, DeviceId>,
     /// Revoked devices (no access).
     pub revoked: BTreeSet<DeviceId>,
     /// Minimum write role per object type (default editor).
@@ -342,7 +363,23 @@ impl Policy {
         if self.revoked.contains(device) {
             return None;
         }
-        Some(self.roles.get(device).copied().unwrap_or(Role::Editor))
+        if let Some(r) = self.roles.get(device) {
+            return Some(*r);
+        }
+        // A linked device has its user's role, but is never made admin by the link.
+        match self.links.get(device) {
+            Some(primary) => self.role_of(primary).map(|r| r.min(Role::Editor)),
+            None => Some(Role::Editor),
+        }
+    }
+
+    /// The devices linked to `device` (its user's other devices).
+    pub fn linked_to(&self, device: &DeviceId) -> Vec<DeviceId> {
+        self.links
+            .iter()
+            .filter(|(_, p)| *p == device)
+            .map(|(d, _)| *d)
+            .collect()
     }
 
     /// Minimum role to write objects of `object_type`.
@@ -457,7 +494,25 @@ impl Policy {
                 self.admin_order.push(author);
                 true
             }
-            _ if self.creator.is_none() || !self.is_admin(&author) => false,
+            _ if self.creator.is_none() => false,
+            PolicyOp::LinkDevice { device } => {
+                // Any current member may link a device of its own. Not a device that
+                // already has a role or link, and links do not chain.
+                if self.role_of(&author).is_none()
+                    || self.links.contains_key(&author)
+                    || device == author
+                    || self.links.contains_key(&device)
+                    || self.roles.contains_key(&device)
+                    || self.revoked.contains(&device)
+                    || self.creator == Some(device)
+                    || self.links.values().any(|p| *p == device)
+                {
+                    return false;
+                }
+                self.links.insert(device, author);
+                true
+            }
+            _ if !self.is_admin(&author) => false,
             PolicyOp::SetRole { device, role, cert } => {
                 if role == Role::Admin && !cert.is_some_and(|c| root_admin(&c, &device)) {
                     return false;
@@ -509,6 +564,12 @@ impl Policy {
                 }
                 if role != Some(Role::Admin) {
                     self.admin_order.retain(|d| *d != device);
+                }
+                for linked in self.linked_to(&device) {
+                    self.kept
+                        .entry(linked)
+                        .or_default()
+                        .extend(keep.iter().copied());
                 }
                 self.kept.entry(device).or_default().extend(keep);
                 true
@@ -611,6 +672,9 @@ mod tests {
                 device: a.device_id(),
                 role: Some(Role::Viewer),
                 keep: vec![],
+            },
+            PolicyOp::LinkDevice {
+                device: a.device_id(),
             },
         ] {
             assert_eq!(PolicyOp::decode(&op.encode()).unwrap(), op);
@@ -869,5 +933,108 @@ mod tests {
             policy_object_id(&Org::new().id),
             policy_object_id(&Org::new().id)
         );
+    }
+
+    /// req: REQ-ID-002
+    #[test]
+    fn members_link_their_own_devices() {
+        let org = Org::new();
+        let (creator, alice, phone, bob, other) = (key(), key(), key(), key(), key());
+        let g = org.op(
+            &creator,
+            vec![],
+            PolicyOp::Genesis {
+                admin: org.admin_cert(&creator),
+            },
+        );
+        let viewer = org.op(
+            &creator,
+            vec![g.change_id],
+            PolicyOp::Restrict {
+                device: alice.device_id(),
+                role: Some(Role::Viewer),
+                keep: vec![],
+            },
+        );
+        // Alice (a viewer, not an admin) links her phone: same role.
+        let link = org.op(
+            &alice,
+            vec![viewer.change_id],
+            PolicyOp::LinkDevice {
+                device: phone.device_id(),
+            },
+        );
+        let p = Policy::fold(&org.id, &[g.clone(), viewer.clone(), link.clone()]);
+        assert!(p.accepted.contains(&link.change_id));
+        assert_eq!(p.role_of(&phone.device_id()), Some(Role::Viewer));
+        assert_eq!(p.linked_to(&alice.device_id()), vec![phone.device_id()]);
+        assert!(!p.allows(&data(&phone, "note")), "viewer on both devices");
+        // Admitting someone else's device, or chaining links, does not count.
+        let for_bob = org.op(
+            &alice,
+            vec![link.change_id],
+            PolicyOp::LinkDevice {
+                device: bob.device_id(),
+            },
+        );
+        let chained = org.op(
+            &phone,
+            vec![link.change_id],
+            PolicyOp::LinkDevice {
+                device: other.device_id(),
+            },
+        );
+        let again = org.op(
+            &bob,
+            vec![link.change_id],
+            PolicyOp::LinkDevice {
+                device: phone.device_id(),
+            },
+        );
+        let p2 = Policy::fold(
+            &org.id,
+            &[
+                g.clone(),
+                viewer.clone(),
+                link.clone(),
+                chained.clone(),
+                again.clone(),
+            ],
+        );
+        assert!(!p2.accepted.contains(&chained.change_id), "no chains");
+        assert!(!p2.accepted.contains(&again.change_id), "already linked");
+        assert_eq!(p2.linked_to(&bob.device_id()), vec![]);
+        // (Linking `bob` is fine for Alice's policy: it only says "bob is Alice's".)
+        let p3 = Policy::fold(
+            &org.id,
+            &[g.clone(), viewer.clone(), link.clone(), for_bob.clone()],
+        );
+        assert!(p3.accepted.contains(&for_bob.change_id));
+        // An admin's linked device is an editor, never an admin.
+        let admin_link = org.op(
+            &creator,
+            vec![g.change_id],
+            PolicyOp::LinkDevice {
+                device: other.device_id(),
+            },
+        );
+        let p4 = Policy::fold(&org.id, &[g.clone(), admin_link]);
+        assert_eq!(p4.role_of(&other.device_id()), Some(Role::Editor));
+        // Revoking Alice, keeping her seen change, takes the phone with her.
+        let by_phone = data(&phone, "note");
+        let revoke = org.op(
+            &creator,
+            vec![link.change_id],
+            PolicyOp::Restrict {
+                device: alice.device_id(),
+                role: None,
+                keep: vec![by_phone.change_id],
+            },
+        );
+        let p5 = Policy::fold(&org.id, &[g, viewer, link, revoke]);
+        assert_eq!(p5.role_of(&phone.device_id()), None);
+        assert!(p5.allows(&by_phone), "kept change of the linked device");
+        assert!(!p5.allows(&data(&phone, "note")));
+        assert!(PolicyOp::decode(&[1, 5, 1, 2]).is_err());
     }
 }

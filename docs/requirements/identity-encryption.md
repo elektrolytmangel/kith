@@ -10,10 +10,12 @@ platform secure storage and must never be logged or transmitted.
 
 ### REQ-ID-002: Users own multiple devices
 
-- **Priority:** must | **Phase:** 6 | **Status:** accepted | **Verify:** test | **Source:** design §Identity
+- **Priority:** must | **Phase:** 6 | **Status:** implemented | **Verify:** test | **Source:** design §Identity
 
 The policy object must map device keys to users and users to roles, so one
-user can have several devices.
+user can have several devices. Any member must be able to add its own additional
+device, which gets the same role (never admin) and is revoked with the member
+(ADR 0011).
 
 ### REQ-ID-003: Organization root of trust
 

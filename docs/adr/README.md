@@ -9,6 +9,7 @@ Open questions from the design doc that are waiting for an ADR:
 - [x] Automerge for all types vs. detect-and-resolve (REQ-DATA-004): [ADR 0003](0003-merge-automerge-default-pluggable.md)
 - [x] MLS implementation, ciphersuite, KeyPackage distribution (REQ-ENC-001..004): [ADR 0004](0004-mls-openmls-rustcrypto.md)
 - [x] Ordering of concurrent MLS commits (REQ-ENC-001): fork resolution in [ADR 0004](0004-mls-openmls-rustcrypto.md)
+- [x] Users with several devices (REQ-ID-002): [ADR 0011](0011-own-devices.md)
 - [x] Encrypted backups (REQ-DATA-006): [ADR 0010](0010-encrypted-backups.md)
 - [x] Encrypted files (REQ-FILE-001/002): [ADR 0009](0009-encrypted-files.md)
 - [x] Read-restricted subgroups (REQ-PERM-003): [ADR 0008](0008-subgroups.md)

@@ -83,6 +83,10 @@ pub enum Frame {
         token: String,
         /// Opaque claim (KeyPackage + proof).
         body: Vec<u8>,
+        /// Set for a member's own-device invite: the issuing device, which may be a
+        /// non-admin. Without it the claim goes to the org's online admins.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<DeviceIdHex>,
     },
     /// Relay -> client: an inbound message from a peer.
     Deliver {

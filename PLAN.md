@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (end of session; phases 1-7 and 8a/8b merged)
+- **Last updated:** 2026-11-04 (REQ-ID-002 own devices implemented, PR `feat/own-devices`)
 - **Version:** `v0.1.0-alpha.1` released. `0.1.0-alpha.2` is prepared in **PR #42** (version bump + changelog),
   waiting for the **user to merge and tag** (`git tag v0.1.0-alpha.2 && git push origin v0.1.0-alpha.2`).
 - **State of `main` (e68a21b, #41 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -26,7 +26,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 ### What the library can do today (alpha, phases 1-7 and 8a/8b done)
 
-Requirements: 31 implemented, 8 partial, 4 accepted/proposed, 1 rejected.
+Requirements: 32 implemented, 8 partial, 3 accepted/proposed, 1 rejected.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -49,7 +49,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | Gap | Effect | Requirement |
 | --- | --- | --- |
 | A device added by the losing side of an MLS fork needs a new invite | Rare (two admins at once) | ADR 0004 |
-| Roles are per device; a user's second device is a separate member | Decided, not built | REQ-ID-002 |
+| A device added as a member's own device cannot add devices itself; subgroups list devices, not users | Link from the original device; admin lists linked devices | ADR 0011 |
 | Restoring a backup while the original device still runs makes them re-add each other | Restore only when the original is gone | ADR 0010 |
 | A removed device keeps a valid certificate for the relay (connects, sees metadata; cannot decrypt; its writes are revoked) | Relay-level revocation open | REQ-INV-004 |
 | Subgroup membership changes need the subgroup's owner device online; ownership cannot move | ADR 0008 | REQ-PERM-003 |
@@ -67,12 +67,9 @@ Work top to bottom; check items off here as they land.
 ### Next steps (in order)
 
 1. **User:** merge release PR **#42** and push the tag `v0.1.0-alpha.2`. The agent does not merge this PR.
-2. **REQ-ID-002, users with several devices** (decided 2026-11-04, see *Decisions*): the policy maps devices to
-   users and roles are per user. Any member may invite and admit **its own** additional device: it is linked to
-   the same user with the same role, and can never become admin this way. Admitting other people stays
-   admin-only. Needs: a policy op (e.g. `LinkDevice`), an "own device" invite kind checked on claim, a relay
-   certificate for the new device (today only the root and admins sign certificates, ADR 0005), bindings,
-   ADR 0011. Ask the user first who signs that certificate (see *Open questions*).
+2. [x] **REQ-ID-002, users with several devices** (option A decided 2026-11-04: the member signs its own device's
+   certificate; ADR 0011, PR `feat/own-devices`): `LinkDevice` policy op, own-device certificates (chains of up to 3),
+   `create_own_device_invite` (web/FFI), `InviteClaim.to` routing, removal covers linked devices.
 3. **Later (user deferred):** history compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review,
    resumable large syncs (REQ-SYNC-005), moving subgroup ownership, relay-level certificate revocation.
 4. **Small items:** run the Swift/Kotlin live-sync glue against a real relay on a device or emulator
@@ -148,8 +145,7 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-- REQ-ID-002: who signs the relay certificate of a member's own new device? Either the member itself, which
-  needs a chain-rule change in ADR 0005, or an admin or the root through the policy. Ask before building.
+None.
 
 ### Open issues
 
@@ -165,7 +161,7 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
 
 | Decision | Why | Where |
 | --- | --- | --- |
-| Users with several devices (REQ-ID-002): any member may admit its own extra device (same user, same role, never admin this way); admitting others stays admin-only | User choice (2026-11-04) | Next steps 2 |
+| Users with several devices (REQ-ID-002): any member may admit its own extra device (same user, same role, never admin this way); admitting others stays admin-only. The member itself signs the device's relay certificate (option A) | User choice (2026-11-04) | ADR 0011 |
 | Phase 8 scope: relay abuse limits first, then encrypted backups; compaction and push wake-ups later | User choice (2026-11-04) | Phase 8 |
 | Prepare a `v0.1.0-alpha.2` release PR (version bump + changelog); **the user merges and tags** | User choice (2026-11-04) | PR #42 |
 | Every signed change names its scope (org or org/subgroup); sync, encryption, permissions per scope | User choice (2026-11-04); also lifts "one org per store" | Phase 6b |
@@ -283,3 +279,5 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
   Release PR #42 opened for the user. The user decided REQ-ID-002 (members admit their own devices). **Stopped
   on the user's request**; PLAN updated (PR `docs/plan-state`). Next: user merges #42 and tags alpha.2, then
   REQ-ID-002 (open question first).
+- **2026-11-04**: PR #42 conflicts resolved (merged `main` into the release branch). User chose option A for REQ-ID-002.
+  Implemented own devices (PR `feat/own-devices`, ADR 0011). Next: merge when CI is green; then the small items.

@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- A member adds its own devices (REQ-ID-002, ADR 0011): `create_own_device_invite` (web
+  `createOwnDeviceInvite`, FFI `createOwnDeviceInvite`), policy op `LinkDevice`, own-device
+  membership certificates (chains of up to 3), `InviteClaim.to` so the relay routes the claim to the
+  issuing member. The linked device has the member's role (at most editor); `remove_member` and
+  revocation cover it.
+
 ## [0.1.0-alpha.2] - 2026-11-04
 
 End-to-end encryption (MLS), invitations with relay-checked membership, write permissions and
