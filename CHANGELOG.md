@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Fork resolution for concurrent MLS commits (ADR 0004): a competing commit for the epoch just
+  passed is detected (`CommitOutcome::Fork`, `Event::Fork`); the commit from the lower device ID
+  wins on every device and devices on the losing branch are re-added automatically. Commit
+  catch-up now starts one epoch early and carries the committer of each commit; a member's
+  undecryptable message for the current epoch triggers a commit request. MLS state format v2.
+
+### Added
 - End-to-end encryption on the wire (REQ-ENC-001..004): every relay body is an MLS message for
   the org's group. `Client::create_group`, `join_request_frame`, `add_member`, `remove_member`,
   `rotate_key`, `is_member`, `group_members`; new events `JoinRequested`, `Joined`, `GroupChanged`,

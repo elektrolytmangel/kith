@@ -19,7 +19,7 @@
 //! `Have` message therefore caps at about 32,000 changes per device until range
 //! based reconciliation (Negentropy) replaces it.
 
-use kith_core::{Change, ChangeId};
+use kith_core::{Change, ChangeId, DeviceId};
 use kith_protocol::MAX_BODY_BYTES;
 
 const KIND_CHANGE: u8 = 1;
@@ -51,8 +51,9 @@ pub(crate) enum Outer {
     KeyPackage(Vec<u8>),
     /// "I am at this epoch, send me the commits since."
     CommitRequest(u64),
-    /// Commits in epoch order, answering a `CommitRequest`.
-    Commits(Vec<Vec<u8>>),
+    /// Commits in epoch order with their committers, answering a `CommitRequest`
+    /// (or showing a peer on a losing fork branch the winning commit).
+    Commits(Vec<(DeviceId, Vec<u8>)>),
     /// "My commit log does not reach back to your epoch; send a KeyPackage to be re-added."
     ReaddNeeded,
 }
@@ -71,7 +72,8 @@ pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
         Outer::Commits(cs) => {
             let mut out = vec![OUTER_COMMITS];
             out.extend_from_slice(&(cs.len() as u32).to_be_bytes());
-            for c in cs {
+            for (committer, c) in cs {
+                out.extend_from_slice(&committer.0);
                 out.extend_from_slice(&(c.len() as u32).to_be_bytes());
                 out.extend_from_slice(c);
             }
@@ -86,17 +88,17 @@ pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
 }
 
 /// `Commits` bodies for `commits`, split to stay under the frame limit, in order.
-pub(crate) fn commits_bodies(commits: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+pub(crate) fn commits_bodies(commits: Vec<kith_crypto::group::LoggedCommit>) -> Vec<Vec<u8>> {
     let mut bodies = vec![];
     let mut batch = vec![];
     let mut size = 0;
     for c in commits {
-        if size + c.len() > MAX_OFFER_BYTES && !batch.is_empty() {
+        if size + c.commit.len() > MAX_OFFER_BYTES && !batch.is_empty() {
             bodies.push(outer_body(&Outer::Commits(std::mem::take(&mut batch))));
             size = 0;
         }
-        size += c.len();
-        batch.push(c);
+        size += c.commit.len();
+        batch.push((c.committer, c.commit));
     }
     if !batch.is_empty() {
         bodies.push(outer_body(&Outer::Commits(batch)));
@@ -117,13 +119,14 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
         }
         OUTER_COMMITS => {
             let n = r.u32()? as usize;
-            if n > r.0.len() / 4 {
+            if n > r.0.len() / 36 {
                 return Err("commit count exceeds data".into());
             }
             let mut cs = Vec::with_capacity(n);
             for _ in 0..n {
+                let committer = DeviceId(r.take(32)?.try_into().expect("32 bytes"));
                 let len = r.u32()? as usize;
-                cs.push(r.take(len)?.to_vec());
+                cs.push((committer, r.take(len)?.to_vec()));
             }
             Outer::Commits(cs)
         }
@@ -306,13 +309,16 @@ mod tests {
             Outer::Welcome(vec![4]),
             Outer::KeyPackage(vec![5]),
             Outer::CommitRequest(7),
-            Outer::Commits(vec![vec![1], vec![2, 3]]),
+            Outer::Commits(vec![
+                (DeviceId([7; 32]), vec![1]),
+                (DeviceId([8; 32]), vec![2, 3]),
+            ]),
             Outer::Commits(vec![]),
             Outer::ReaddNeeded,
         ] {
             assert_eq!(parse_outer(&outer_body(&msg)).unwrap(), msg);
         }
-        let body = outer_body(&Outer::Commits(vec![vec![1], vec![2, 3]]));
+        let body = outer_body(&Outer::Commits(vec![(DeviceId([7; 32]), vec![1, 2])]));
         for len in 1..body.len() {
             assert!(parse_outer(&body[..len]).is_err(), "len {len}");
         }
@@ -332,17 +338,26 @@ mod tests {
 
     #[test]
     fn many_commits_are_split_in_order() {
-        let commits: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i; 200 * 1024]).collect();
+        let commits: Vec<kith_crypto::group::LoggedCommit> = (0..5u8)
+            .map(|i| kith_crypto::group::LoggedCommit {
+                committer: DeviceId([i; 32]),
+                commit: vec![i; 200 * 1024],
+            })
+            .collect();
         let bodies = commits_bodies(commits.clone());
         assert!(bodies.len() >= 2);
-        let back: Vec<Vec<u8>> = bodies
+        let back: Vec<(DeviceId, Vec<u8>)> = bodies
             .iter()
             .flat_map(|b| match parse_outer(b).unwrap() {
                 Outer::Commits(cs) => cs,
                 _ => panic!("commits expected"),
             })
             .collect();
-        assert_eq!(back, commits);
+        let want: Vec<(DeviceId, Vec<u8>)> = commits
+            .into_iter()
+            .map(|c| (c.committer, c.commit))
+            .collect();
+        assert_eq!(back, want);
     }
 
     #[test]

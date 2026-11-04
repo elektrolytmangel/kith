@@ -93,7 +93,7 @@ impl KithClient {
     /// `{type: "receipt", delivered}`, `{type: "relayError", code, message}`,
     /// `{type: "syncServed", ...}`, `{type: "syncReceived", ...}`, group events
     /// (`joinRequested` with `keyPackage`, `joined`, `groupChanged`, `epochBehind`,
-    /// `commitsServed`, `commitsApplied`, `reAddRequested`, `memberReAdded`),
+    /// `commitsServed`, `commitsApplied`, `reAddRequested`, `memberReAdded`, `fork`),
     /// `{type: "closed"}` and `{type: "error"}`.
     ///
     /// Every body is encrypted for `org`'s MLS group: the device must be a member

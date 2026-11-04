@@ -46,11 +46,25 @@ first group is created, and what happens to existing plaintext data.
 ## Consequences
 
 - The relay operator can no longer read data, only metadata (accepted non-goal).
-- **Concurrent commits fork the group.** The relay does not order messages, so if
-  two members commit in the same epoch, each merges its own commit and refuses the
-  other's. Mitigation for now: commits are rare (adds, removals, key rotation) and
-  the re-add path recovers a device. A deterministic tie-break or an ordering
-  device (the always-on client, phase 7) is open.
+- **Concurrent commits fork the group.** The relay does not order messages, so two
+  members can commit in the same epoch; each merges its own commit and cannot read
+  the other branch. Resolution (added after the first version of this ADR):
+  - every device remembers its last epoch change: the committer and the commit
+    hash, or the adder if it joined through a Welcome;
+  - a different commit for that epoch is a fork. The winner is the commit whose
+    committer has the **lower device ID** (then the lower hash), so every device
+    decides alike without coordination;
+  - a device on the losing branch sends one fresh KeyPackage to the peer that
+    showed it the winning commit, which re-adds it (the REQ-ENC-004 path); a winner
+    that sees a losing commit sends its own commit to that peer so it notices;
+  - commit catch-up starts one epoch early, and a member's undecryptable message
+    for our own epoch triggers a commit request, so devices that missed the
+    winning commit find the fork later;
+  - data sent on the losing branch is not lost: it arrives again through catch-up.
+  Limits: the committer identity for an undecryptable commit comes from the relay
+  (a malicious relay can cause needless re-adds, which it could also cause by
+  dropping messages); a device that only the losing commit added is not in the
+  winning tree, so a member must admit it again (`JoinRequested`).
 - A device must be online to be added, and an admin must be online too.
 - Old clients and plaintext data stop working with the new wire format.
 

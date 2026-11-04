@@ -268,6 +268,18 @@ pub enum Event {
         /// The device (hex).
         device: String,
     },
+    /// Two members committed in the same epoch and the group forked (ADR 0004).
+    /// If `we_win` is false this device asked `peer` (on the winning branch) to
+    /// re-add it; otherwise it showed `peer` the winning commit so `peer`'s branch
+    /// rejoins. Data sent on the losing branch arrives again through catch-up.
+    Fork {
+        /// Organization.
+        org: String,
+        /// The peer on the other branch (hex).
+        peer: String,
+        /// True if our branch won.
+        we_win: bool,
+    },
     /// A frame this client has nothing to do with.
     Ignored,
 }
@@ -289,6 +301,9 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     key: K,
     store: S,
     groups: Groups,
+    /// Per org: the epoch at which we last asked to be re-added after losing a
+    /// fork, so one fork sends one request, not one per message.
+    readd_asked: std::collections::HashMap<String, u64>,
 }
 
 impl<S: Store, K: Signer> Client<S, K> {
@@ -299,7 +314,12 @@ impl<S: Store, K: Signer> Client<S, K> {
             Some(bytes) => Groups::from_bytes(&bytes)?,
             None => Groups::new(),
         };
-        Ok(Self { key, store, groups })
+        Ok(Self {
+            key,
+            store,
+            groups,
+            readd_asked: Default::default(),
+        })
     }
 
     /// This device's ID.
@@ -508,23 +528,31 @@ impl<S: Store, K: Signer> Client<S, K> {
         };
         match outer {
             Outer::App(ct) => self.handle_app(org, from, &ct),
-            Outer::Commit(commit) => match self.groups.apply_commit(&org, &commit) {
-                Ok(CommitOutcome::Applied { epoch, removed }) => {
-                    Ok(Handled::event(Event::GroupChanged {
-                        org,
-                        epoch,
-                        removed,
-                    }))
+            Outer::Commit(commit) => {
+                // A broadcast commit comes from its committer.
+                let Ok(committer) = DeviceId::from_hex(&from) else {
+                    return Ok(rejected("sender is not a device ID".into()));
+                };
+                match self.groups.apply_commit(&org, &commit, committer) {
+                    Ok(CommitOutcome::Applied { epoch, removed }) => {
+                        Ok(Handled::event(Event::GroupChanged {
+                            org,
+                            epoch,
+                            removed,
+                        }))
+                    }
+                    Ok(CommitOutcome::Stale) => Ok(Handled::event(Event::Ignored)),
+                    Ok(CommitOutcome::Fork { we_win, .. }) => self.on_fork(org, from, we_win),
+                    Err(GroupError::EpochGap { local, .. }) => Ok(self.behind(org, from, local)),
+                    Err(e) => Ok(rejected(e.to_string())),
                 }
-                Ok(CommitOutcome::Stale) => Ok(Handled::event(Event::Ignored)),
-                Err(GroupError::EpochGap { local, .. }) => Ok(self.behind(org, from, local)),
-                Err(e) => Ok(rejected(e.to_string())),
-            },
+            }
             Outer::Welcome(welcome) => {
                 let joined = match self.groups.join(&welcome) {
                     Ok(o) => o,
                     Err(e) => return Ok(rejected(e.to_string())),
                 };
+                self.readd_asked.remove(&joined);
                 // Start from whatever we have (usually nothing): ask a peer for history.
                 let body = self.have_body(&joined)?;
                 Ok(Handled {
@@ -561,10 +589,14 @@ impl<S: Store, K: Signer> Client<S, K> {
             Outer::CommitRequest(epoch) => Ok(self.serve_commits(org, from, epoch)?),
             Outer::Commits(commits) => {
                 let mut applied = 0;
-                for c in &commits {
-                    match self.groups.apply_commit(&org, c) {
+                for (committer, c) in &commits {
+                    match self.groups.apply_commit(&org, c, *committer) {
                         Ok(CommitOutcome::Applied { .. }) => applied += 1,
                         Ok(CommitOutcome::Stale) => {}
+                        // The rest of the batch belongs to the other branch.
+                        Ok(CommitOutcome::Fork { we_win, .. }) => {
+                            return self.on_fork(org, from, we_win);
+                        }
                         Err(e) => return Ok(rejected(e.to_string())),
                     }
                 }
@@ -599,6 +631,31 @@ impl<S: Store, K: Signer> Client<S, K> {
         }
     }
 
+    /// The group forked between us and `peer` (ADR 0004).
+    fn on_fork(&mut self, org: String, peer: String, we_win: bool) -> Result<Handled, ClientError> {
+        let mut replies = vec![];
+        if we_win {
+            // Show the peer the commit we followed: it then sees it lost.
+            if let Some(c) = self.groups.last_commit(&org) {
+                replies.push(direct(
+                    &org,
+                    &peer,
+                    sync::outer_body(&Outer::Commits(vec![(c.committer, c.commit)])),
+                ));
+            }
+        } else {
+            let epoch = self.groups.epoch(&org)?;
+            if self.readd_asked.get(&org) != Some(&epoch) {
+                self.readd_asked.insert(org.clone(), epoch);
+                replies.push(self.join_request_frame(&org, &peer)?);
+            }
+        }
+        Ok(Handled {
+            event: Event::Fork { org, peer, we_win },
+            replies,
+        })
+    }
+
     /// We are behind on `org`: ask `from` for the commits since `local`.
     fn behind(&self, org: String, from: String, local: u64) -> Handled {
         Handled {
@@ -611,9 +668,15 @@ impl<S: Store, K: Signer> Client<S, K> {
         }
     }
 
-    /// Send `to` the commits since `epoch`, or ask it to be re-added.
+    /// Send `to` the commits since `epoch`, or ask it to be re-added. Starts one
+    /// epoch earlier when the log has it, so the peer can tell whether it followed
+    /// the same commit out of its previous epoch (fork detection).
     fn serve_commits(&self, org: String, to: String, epoch: u64) -> Result<Handled, ClientError> {
-        let (bodies, commits, readd_needed) = match self.groups.commits_since(&org, epoch) {
+        let since = match epoch.checked_sub(1) {
+            Some(prev) if matches!(self.groups.commits_since(&org, prev), Ok(Some(_))) => prev,
+            _ => epoch,
+        };
+        let (bodies, commits, readd_needed) = match self.groups.commits_since(&org, since) {
             Ok(Some(cs)) => {
                 let n = cs.len();
                 (sync::commits_bodies(cs), n, false)
@@ -655,15 +718,41 @@ impl<S: Store, K: Signer> Client<S, K> {
                 reason: "MLS sender does not match the relay's sender".into(),
             }),
             Err(GroupError::EpochGap { local, .. }) => self.behind(org, from, local),
-            Err(e) => Handled::event(Event::Rejected {
-                org,
-                from,
-                reason: e.to_string(),
-            }),
+            Err(e) => {
+                // A member's message for our own epoch that we cannot read means we
+                // are on different branches of a fork: ask for its commits, which
+                // start one epoch back and show the fork.
+                let probe = self.same_epoch_member(&org, &from, ct);
+                let mut h = Handled::event(Event::Rejected {
+                    org: org.clone(),
+                    from: from.clone(),
+                    reason: e.to_string(),
+                });
+                if let Some(local) = probe {
+                    h.replies.push(direct(
+                        &org,
+                        &from,
+                        sync::outer_body(&Outer::CommitRequest(local)),
+                    ));
+                }
+                h
+            }
         };
         // Commits first, so the peer can read the encrypted replies that follow.
         handled.replies.splice(0..0, help);
         Ok(handled)
+    }
+
+    /// Our epoch, if `ct` is for it and `from` is a member of our view of the group.
+    fn same_epoch_member(&self, org: &str, from: &str, ct: &[u8]) -> Option<u64> {
+        let local = self.groups.epoch(org).ok()?;
+        let member = self
+            .groups
+            .members(org)
+            .ok()?
+            .iter()
+            .any(|d| d.to_hex() == from);
+        (member && Groups::message_epoch(ct).ok()? == local).then_some(local)
     }
 
     fn handle_plain(

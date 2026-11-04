@@ -24,7 +24,10 @@ or read:
 Devices that missed group changes while offline catch up automatically
 (`epochBehind`, `commitsApplied` events); one that missed more than the last 256
 changes is re-added automatically by an online member (`reAddRequested`,
-`memberReAdded`). Call `rotateKey()` now and then (for example weekly) and
+`memberReAdded`). If two devices change the group at the same moment, the group
+forks briefly; kith picks the same winner on every device and re-adds the others
+(`fork` event), with no app action needed. A device that the losing change had
+just added shows up as a new `joinRequested` and needs approval again. Call `rotateKey()` now and then (for example weekly) and
 `removeMember(deviceId)` to revoke a device. The group state contains secrets and is
 saved with the data (`KithClient.open`), so keep the database in app-private storage.
 Until phase 5 (invitations) both devices must be online to add a device.

@@ -172,6 +172,12 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "org", org);
             set(&o, "device", device);
         }
+        Event::Fork { org, peer, we_win } => {
+            set(&o, "type", "fork");
+            set(&o, "org", org);
+            set(&o, "peer", peer);
+            set(&o, "weWin", we_win);
+        }
         Event::Ignored => return None,
     }
     Some(o)
