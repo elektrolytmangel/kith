@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0-alpha.1"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/elektrolytmangel/kith"
 authors = ["kith contributors"]
@@ -59,6 +59,12 @@ web-sys = { version = "0.3", features = [
 # OS randomness. The "js" feature only takes effect on wasm32-unknown-unknown
 # (crypto.getRandomValues in browsers and Node).
 getrandom = { version = "0.2", features = ["js"] }
+# MLS (RFC 9420, REQ-ENC-001). Needs Rust 1.91, which is why the MSRV is 1.91.
+# Pure-Rust crypto (RustCrypto) so it builds for wasm32, iOS and Android.
+openmls = { version = "0.9", default-features = false }
+openmls_rust_crypto = "0.6"
+openmls_traits = "0.6"
+openmls_memory_storage = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

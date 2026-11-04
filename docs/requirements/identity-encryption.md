@@ -24,28 +24,28 @@ Every member must learn the root public key through its invitation.
 
 ### REQ-ENC-001: End-to-end encryption with MLS
 
-- **Priority:** must | **Phase:** 4 | **Status:** accepted | **Verify:** test | **Source:** design §Identity
+- **Priority:** must | **Phase:** 4 | **Status:** partial | **Verify:** test | **Source:** design §Identity
 
 Every organization must be one MLS group (RFC 9420). All change messages must
 be MLS application messages; the server must never hold keys.
 
 ### REQ-ENC-002: Commit log for catch-up
 
-- **Priority:** must | **Phase:** 4 | **Status:** accepted | **Verify:** test | **Source:** design §Sync
+- **Priority:** must | **Phase:** 4 | **Status:** partial | **Verify:** test | **Source:** design §Sync
 
 Every client must store the recent MLS commit log so returning peers can fetch
 commits they missed, and must apply commits in epoch order.
 
 ### REQ-ENC-003: Periodic key rotation
 
-- **Priority:** should | **Phase:** 4 | **Status:** accepted | **Verify:** test | **Source:** design §Identity
+- **Priority:** should | **Phase:** 4 | **Status:** partial | **Verify:** test | **Source:** design §Identity
 
 Members should rotate their own leaf key (MLS update) periodically and after a
 long pause.
 
 ### REQ-ENC-004: Re-add fallback
 
-- **Priority:** must | **Phase:** 4 | **Status:** accepted | **Verify:** test | **Source:** design §Sync fallbacks
+- **Priority:** must | **Phase:** 4 | **Status:** partial | **Verify:** test | **Source:** design §Sync fallbacks
 
 If a client cannot obtain the commits it missed, an online member must be able
 to re-add it with a fresh MLS Welcome.
