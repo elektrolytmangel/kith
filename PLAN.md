@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (containers #48 and format guards #50 merged)
+- **Last updated:** 2026-11-04 (freeze point decided; web readiness list added)
 - **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices), container
   images and format guards under *Unreleased* in the changelog, for the next alpha.
 - **State of `main` (b1acadd, #50 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -71,8 +71,8 @@ Work top to bottom; check items off here as they land.
    certificate; ADR 0011, PR `feat/own-devices`): `LinkDevice` policy op, own-device certificates (chains of up to 3),
    `create_own_device_invite` (web/FFI), `InviteClaim.to` routing, removal covers linked devices.
 3. **Road to a release users can use:** see the next section (agreed with the user 2026-11-04). Next open item: step 3
-   there (real-device verification), then 4. The freeze point (open question below) blocks finishing step 2.
-4. **Later (deferred by the user):** push wake-ups (REQ-RELAY-007), moving subgroup ownership; mark the repository as a
+   there (real-device verification), then 4. The freeze point is decided (first beta), so step 2 can be finished: migrations and previous-protocol support at the freeze.
+4. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
 ### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
@@ -85,13 +85,13 @@ Blockers, in suggested order:
 
 1. [ ] **Security review** of the crypto and protocol (MLS use, certificates, policy, backups, relay). Nothing is
    claimed safe for real data until this is done.
-2. [~] **Compatibility promise** (ADR 0012 proposed, golden tests for the change envelope and store codec in #50; the freeze point is an open question): versioned wire/storage formats with migrations (alpha.1 data already breaks on
+2. [~] **Compatibility promise** (ADR 0012 accepted, golden tests for the change envelope and store codec in #50): versioned wire/storage formats with migrations (alpha.1 data already breaks on
    `main`), a stated semver policy, and the first non-alpha version number.
 3. [ ] **Run on real devices:** Swift/Kotlin live-sync glue against a relay (REQ-SYNC-004), the `partial` platform
    requirements (REQ-PLAT-002..005, REQ-RELAY-001).
 4. [ ] **Closing known gaps:** relay-level certificate revocation (REQ-INV-004), always-on client as the supported
    way to sync offline devices (push wake-ups REQ-RELAY-007 later), resumable large syncs (REQ-SYNC-005),
-   history compaction (REQ-DATA-005; the web store keeps all history in memory).
+   history compaction (REQ-DATA-005; the web store keeps all history in memory). Push wake-ups are unplanned.
 5. [x] **Containers for the relay and the always-on client** (#48; dry run of `release.yml` verified, both images built and smoke-tested) (replaces "publish packages"; user decision
    2026-11-04: nothing is published outside GitHub). Plan: `release.yml` builds a multi-arch image per binary from
    the release binaries (no Rust compile in the image) and pushes it to GitHub Packages (ghcr.io) with
@@ -99,6 +99,22 @@ Blockers, in suggested order:
    downloads the release" because users then just `docker run`/`pull`.
 6. [ ] **Docs for adopters:** per-platform getting started, a small example app, relay deployment guide (TLS,
    limits, always-on client), threat model and the known limits above.
+
+### Web readiness (what a web app still needs; proposal 2026-11-04, my analysis, not yet verified in code)
+
+1. [ ] **Several tabs of one app:** each tab opens its own in-memory client on the same IndexedDB, with its own
+   MLS state. Two tabs can diverge and reuse ratchet state. Needs a single owner per database (Web Locks leader
+   lock, or a shared worker) and a documented pattern. Correctness/security, highest priority.
+2. [ ] **Tests in a real browser:** only a Node smoke test with `fake-indexeddb` exists. Add Playwright (Chromium) tests:
+   two contexts sync through the relay, reload keeps data, invite flow, offline then catch-up.
+3. [ ] **Connection handling:** check what `connect` does on drops, offline/online events and background tabs
+   (reconnect with backoff like `kith-net`?), and which Origins the relay accepts.
+4. [ ] **Key and storage safety:** the device key is handed to the app. Provide and document a pattern (non-extractable
+   WebCrypto wrapping, `navigator.storage.persist()`, Safari's storage eviction), and push backups.
+5. [ ] **Size and memory:** wasm is 3.2 MB and all history lives in memory (compaction, REQ-DATA-005). Measure
+   (gzip, load time, memory at 100k changes) and set limits in the docs.
+6. [ ] **Adopter material:** a small Vite example app built in CI, CSP note (`wasm-unsafe-eval`), TypeScript usage,
+   the `bundler` target as default in docs, relay behind `wss`.
 
 ### Completed phases (reference)
 
@@ -169,9 +185,7 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-- **Freeze point** (ADR 0012): from which version must releases read the previous version's data and talk to the
-  previous protocol? Recommendation: from the first beta (`0.2.0-beta.1`, after the security review and device
-  verification); alphas may keep breaking.
+None.
 
 ### Open issues
 
@@ -187,6 +201,8 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Format freeze point = the first beta (`0.2.0-beta.1`, after the security review and device verification): from then on a release reads the previous release's data and speaks the previous protocol. Alphas may keep breaking | User decision (2026-11-04) | ADR 0012 |
+| Push wake-ups (REQ-RELAY-007) stay unplanned: only background apps need them | User decision (2026-11-04) | Road to a release |
 | CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. requirement edits run only `requirements.yml` | User request (2026-11-04) | `ci.yml` |
 | Distribution: nothing outside GitHub (no npm/Maven/crates.io). Relay and always-on client ship as containers on GitHub Packages (ghcr.io), built from the release binaries | User decision (2026-11-04), replaces the package-registry idea | Road to a release, step 5 |
 | Users with several devices (REQ-ID-002): any member may admit its own extra device (same user, same role, never admin this way); admitting others stays admin-only. The member itself signs the device's relay certificate (option A) | User choice (2026-11-04) | ADR 0011 |
@@ -318,3 +334,4 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
   `release.yml` (ghcr.io, amd64+arm64, no `latest` for pre-releases), `deploy/docker-compose.yml`, deployment guide.
   After the first release with images, the user makes the packages public once. Next: step 1 (compatibility policy), then 3.
 - **2026-11-04**: #48 merged (container images; dry run verified). Format guards: golden tests for the change envelope and the store codec, ADR 0012 (proposed). Next: user picks the freeze point; then step 3 (devices) and 4 (gaps).
+- **2026-11-04**: User decided: freeze point = first beta; push wake-ups unplanned. Web readiness list added (multi-tab safety first).

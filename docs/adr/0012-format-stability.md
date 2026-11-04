@@ -1,6 +1,6 @@
 # 0012: Format versions and compatibility rules
 
-- **Status:** proposed (the freeze point is the user's decision, see PLAN.md *Open questions*)
+- **Status:** accepted
 - **Date:** 2026-11-04
 - **Requirements:** REQ-DATA-001, REQ-STORE-002
 
@@ -34,7 +34,7 @@ version, a rule for changing it, and a test that fails when it changes by accide
    means a silent break; fix the code, or bump the marker deliberately.
 4. **Before the freeze point** (alphas): breaks need no migration; stores refuse
    data they cannot read with a clear error (already true for SQLite).
-5. **From the freeze point** (first beta or 1.0, to be decided): a release can read
+5. **From the freeze point** (the first beta, `0.2.0-beta.1`; user decision 2026-11-04): a release can read
    the formats of the previous release (storage migration on open, backups still
    restore), and the relay accepts clients of the previous `PROTOCOL_VERSION`.
    Breaking beyond that needs a major version.
@@ -42,4 +42,4 @@ version, a rule for changing it, and a test that fails when it changes by accide
 ## Consequences
 
 - Accidental format changes fail CI instead of corrupting users' data.
-- The freeze point is not set yet; until it is, rule 4 applies.
+- Until the first beta, rule 4 applies.
