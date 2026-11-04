@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Always-on client (REQ-SYNC-006): `apps/always-on` (`kith-always-on --data DIR [--join LINK]`, crate
+  `kith_always_on`): joins by invite, keeps key + SQLite in a data directory, stays connected with
+  backoff, catches up periodically, rotates its group key weekly. Released as
+  `kith-always-on-<target>` next to the relay binaries.
+- `Membership.always_on` (protocol): the relay prefers certified always-on members as catch-up
+  partners. `Client::set_always_on`; `LiveClient::into_client`.
+
+### Added
 - Read-restricted subgroups (REQ-PERM-003, ADR 0008): policy op `SetSubgroup`, one MLS group per
   subgroup run by its owner (members send it their KeyPackage automatically), data in scope
   `<org>/<name>` encrypted for and synced within the subgroup. `Client::create_subgroup`,

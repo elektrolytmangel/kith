@@ -17,7 +17,7 @@ Android receives it as `-Pversion` and Swift through the release tag.
    ```
 5. `.github/workflows/release.yml` then:
    - checks that the tag matches `Cargo.toml`, that requirements pass and that tests pass,
-   - builds relay binaries for Linux, macOS and Windows,
+   - builds the relay and always-on client binaries for Linux, macOS and Windows,
    - builds the npm package and smoke-tests it in Node,
    - builds the XCFramework, tests the Swift package against it and packages it,
    - builds the Android AAR,

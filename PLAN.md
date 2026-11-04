@@ -24,7 +24,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 ### What the library can do today (alpha, phases 1-6 done)
 
-Requirements: 26 implemented, 9 partial, 7 accepted/proposed.
+Requirements: 27 implemented, 9 partial, 6 accepted/proposed, 1 rejected.
 
 Works, on Rust, web (npm), Swift and Kotlin unless noted:
 - signed, hash-linked changes; per-object history and fork detection; device keys that can be saved and restored;
@@ -48,7 +48,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | A removed device keeps a valid certificate for the relay (connects, sees metadata; cannot decrypt; its writes are revoked) | Relay-level revocation open | REQ-INV-004 |
 | Subgroup membership changes need the subgroup's owner device online; ownership cannot move | ADR 0008 | REQ-PERM-003 |
 | No rate limits on the relay | Floodable | Phase 8 |
-| Sync needs another device online | Offline-only devices can't catch up | REQ-RELAY-005 |
+| Sync needs another member online | Run the always-on client (`kith-always-on`) | REQ-SYNC-006 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
 
 Fine for: building and testing an integration. Not fine for: any real user data.
@@ -104,8 +104,13 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
      MLS (no forks); members listed in the policy send it a KeyPackage. A decrypted message's MLS group is its scope,
      so catch-up/offers run per subgroup with no new fields; MLS catch-up messages get a group field. Writes in
      `org/S` need membership of S + role. Limit: membership changes wait for the owner device to be online.
-6. **Phases 7-8**: files + always-on client, hardening.
-7. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
+6. **Phase 7, always-on client and files** (order decided by the user):
+   - [x] 7a Always-on client (PR `feat/always-on`): `Membership.always_on` (certified members only; the relay
+     prefers them as sync partners), `apps/always-on` binary `kith-always-on` (join by invite link, data dir with
+     key + SQLite, reconnect with backoff, periodic catch-up, weekly key rotation = REQ-ENC-003), release asset.
+   - [ ] 7b Encrypted large files (REQ-FILE-001/002).
+7. **Phase 8, hardening**: rate limits, compaction, encrypted backups, security review.
+8. **Small items**: mark the repository as a template (optional, owner only); run the Swift/Kotlin live-sync glue
    against a real relay on a device or emulator; consider a `v0.1.0-alpha.2` release (user's call) since `main` has
    many changes (persistence, merge, relay auth, live and catch-up sync) and the relay body format changed.
 
@@ -221,3 +226,4 @@ Phases 1-3 and the repository setup are done; the checked items are in the Log a
 - **2026-11-04**: User decided phase 6 questions. Policy object, roles, rules, revocation with keep lists, quarantine (PR `feat/policy`, ADR 0006). Next: 6b read-restricted subgroups, or phase 7.
 - **2026-11-04**: User decided 6b questions (scope in envelope, admins manage subgroups, then phase 7). 6b-1 scopes (PR `feat/scope`, ADR 0007). Next: 6b-2 subgroups.
 - **2026-11-04**: #36 merged. Subgroups (PR `feat/subgroups`, ADR 0008); smoke test covers them. Next: phase 7 (always-on client, then files).
+- **2026-11-04**: #37 merged. Always-on client `kith-always-on` + `Membership.always_on` (PR `feat/always-on`), e2e test through the relay. Next: 7b files.

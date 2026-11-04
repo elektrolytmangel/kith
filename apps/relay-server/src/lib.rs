@@ -297,6 +297,8 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
                     }
                 };
                 r.table.join_as(d, &m.org, role);
+                r.table
+                    .set_always_on(d, m.always_on && role != Role::Pending);
                 if role != Role::Pending {
                     let online = r.table.online(&m.org);
                     fan_out(r, &online, || Frame::Presence {
@@ -448,6 +450,7 @@ mod tests {
                 orgs: vec![Membership {
                     org: org.into(),
                     proof,
+                    always_on: false,
                 }],
             },
         )

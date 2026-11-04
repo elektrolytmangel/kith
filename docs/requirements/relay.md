@@ -35,10 +35,13 @@ which is the org root public key (ADR 0005); devices without one are pending.
 
 ### REQ-RELAY-005: Handover buffer
 
-- **Priority:** could | **Phase:** 7 | **Status:** proposed | **Verify:** test | **Source:** design §Relay, open question
+- **Priority:** could | **Phase:** 7 | **Status:** rejected | **Verify:** test | **Source:** design §Relay, open question
 
 The relay may buffer messages for a device that disconnected in the last few
 seconds (e.g. 30 s), in RAM only. Pending ADR.
+
+Rejected (user, 2026-11-04): the relay keeps "stores nothing"; the always-on client
+(REQ-SYNC-006) is the reliable catch-up partner instead.
 
 ### REQ-RELAY-006: Abuse limits
 

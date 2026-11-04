@@ -277,6 +277,26 @@ let frame = client.broadcast_frame("my-org", &change)?; // encrypted; send it to
 
 The always-on client (phase 7) is a headless Rust binary built this way.
 
+## Always-on client
+
+Devices sync only with peers that are online at the same time. Run one headless
+member that never sleeps (home server, Raspberry Pi, a small VM) and every device can
+catch up from it (REQ-SYNC-006):
+
+```sh
+# First run: an admin creates an invite; compare the printed short code with the admin's screen.
+kith-always-on --data /var/lib/kith --join 'kith://invite/v1?...'
+# Later runs (e.g. as a systemd service):
+kith-always-on --data /var/lib/kith
+```
+
+It keeps its device key and all data in `--data`, announces itself as always-on so the
+relay hands it catch-up requests first, reconnects on its own, catches up every 10
+minutes (`--catch-up-secs`) and rotates its group key weekly (`--rotate-days`). It
+holds everything the org can read, so protect the data directory like the device key.
+Binaries are release assets (`kith-always-on-<target>.tar.gz`); in Rust, use the
+`kith_always_on` crate (`join`, `run`).
+
 ## Relay
 
 ```sh

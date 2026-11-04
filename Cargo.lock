@@ -1351,6 +1351,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kith-always-on"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "axum",
+ "kith-client",
+ "kith-net",
+ "kith-protocol",
+ "kith-relay-server",
+ "kith-store",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kith-client"
 version = "0.1.0-alpha.1"
 dependencies = [
