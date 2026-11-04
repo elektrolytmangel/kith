@@ -712,7 +712,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             PolicyOp::Restrict {
                 device: d,
                 role: Some(role),
-                keep: self.changes_by(&d)?,
+                keep: self.changes_by_user(org, &d)?,
             }
         } else {
             let cert = if role == Role::Admin {
@@ -751,7 +751,7 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Usually via [`Self::remove_member`], which also removes it from the group.
     pub fn revoke(&mut self, org: &str, device: &str) -> Result<Change, ClientError> {
         let d = DeviceId::from_hex(device)?;
-        let keep = self.changes_by(&d)?;
+        let keep = self.changes_by_user(org, &d)?;
         self.policy_commit(
             org,
             PolicyOp::Restrict {
@@ -855,6 +855,20 @@ impl<S: Store, K: Signer> Client<S, K> {
                 self.groups.is_member(&g).then_some(name)
             })
             .collect()
+    }
+
+    /// Changes by `device` and by the devices linked to it (one user, ADR 0011).
+    fn changes_by_user(&self, org: &str, device: &DeviceId) -> Result<Vec<ChangeId>, ClientError> {
+        let mut out = self.changes_by(device)?;
+        for linked in self
+            .policies
+            .get(org)
+            .map_or(vec![], |p| p.linked_to(device))
+        {
+            out.extend(self.changes_by(&linked)?);
+        }
+        out.sort();
+        Ok(out)
     }
 
     fn changes_by(&self, device: &DeviceId) -> Result<Vec<ChangeId>, ClientError> {
@@ -1029,6 +1043,44 @@ impl<S: Store, K: Signer> Client<S, K> {
         Ok(link)
     }
 
+    /// A one-time link to add another device of *this user* to `org` (REQ-ID-002,
+    /// ADR 0011). Any member can make one, not only admins. The new device gets this
+    /// device's role (at most editor) and a certificate signed by this device; keep
+    /// this device online until it is accepted ([`Self::accept_claim`]). Not
+    /// available on a device that was itself added this way.
+    pub fn create_own_device_invite(
+        &mut self,
+        org: &str,
+        relay: &str,
+        ttl_ms: u64,
+    ) -> Result<String, ClientError> {
+        let linkable = self
+            .chain(org)
+            .is_some_and(|c| c.leaf().is_some_and(|l| !l.own))
+            && self.role_of(org, &self.device_id().to_hex())?.is_some();
+        if !linkable {
+            return Err(ClientError::Forbidden(
+                "only a member that was not itself linked can add its own devices".into(),
+            ));
+        }
+        let org_id = DeviceId::from_hex(org)?;
+        let invite = Invite::new_own_device(
+            org_id,
+            relay,
+            now_ms().saturating_add(ttl_ms),
+            self.device_id(),
+        );
+        let link = invite.to_link();
+        self.orgs
+            .0
+            .entry(org.into())
+            .or_default()
+            .invites
+            .push(invite);
+        self.save_orgs()?;
+        Ok(link)
+    }
+
     /// Claim an invite link (on the new device). Connect to `Claim::relay` and
     /// announce `Claim::org` (the client has no proof yet, so it is pending), then
     /// send `Claim::frame` and show `Claim::code`. [`Event::Joined`] follows once
@@ -1052,6 +1104,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 org: org.clone(),
                 token: hex_encode(&invite.token),
                 body,
+                to: invite.own_device.map(|d| d.to_hex()),
             },
             code: invite.short_code(&key_package),
             relay: invite.relay,
@@ -1069,9 +1122,34 @@ impl<S: Store, K: Signer> Client<S, K> {
             .ok_or_else(|| {
                 ClientError::InvalidInvite("no pending claim from that device".into())
             })?;
-        if !self.is_admin(org) {
+        let own = self
+            .orgs
+            .0
+            .get(org)
+            .and_then(|s| s.invites.iter().find(|i| i.token == token))
+            .is_some_and(|i| i.own_device == Some(self.device_id()));
+        if !own && !self.is_admin(org) {
             return Err(ClientError::NotAdmin(org.into()));
         }
+        if own
+            && !self
+                .chain(org)
+                .is_some_and(|c| c.leaf().is_some_and(|l| !l.own))
+        {
+            return Err(ClientError::Forbidden(
+                "a linked device cannot add devices".into(),
+            ));
+        }
+        // The policy learns that the new device is ours (refused, with nothing
+        // changed, if the device already has a role or link).
+        let link = if own {
+            let op = PolicyOp::LinkDevice {
+                device: DeviceId::from_hex(device)?,
+            };
+            Some(self.policy_commit(org, op)?)
+        } else {
+            None
+        };
         let added = self.groups.add_member(&self.key, org, &kp)?;
         self.save_groups()?;
         if added.member.to_hex() != device {
@@ -1083,18 +1161,16 @@ impl<S: Store, K: Signer> Client<S, K> {
         // the one we issue now: root -> us -> new device.
         let org_id = DeviceId::from_hex(org)?;
         let mut chain = self.chain(org).cloned().map(|c| c.0).unwrap_or_default();
-        chain.push(MembershipCert::issue(
-            &self.key,
-            org_id,
-            added.member,
-            false,
-            now_ms(),
-        ));
+        chain.push(if own {
+            MembershipCert::issue_own(&self.key, org_id, added.member, now_ms())
+        } else {
+            MembershipCert::issue(&self.key, org_id, added.member, false, now_ms())
+        });
         if let Some(st) = self.orgs.0.get_mut(org) {
             st.invites.retain(|i| i.token != token);
         }
         self.save_orgs()?;
-        Ok(vec![
+        let mut frames = vec![
             Frame::Broadcast {
                 org: org.into(),
                 body: sync::outer_body(&Outer::Commit(added.commit)),
@@ -1107,7 +1183,11 @@ impl<S: Store, K: Signer> Client<S, K> {
                     chain: CertChain(chain).to_hex(),
                 }),
             ),
-        ])
+        ];
+        if let Some(link) = link {
+            frames.push(self.broadcast_frame(org, &link)?);
+        }
+        Ok(frames)
     }
 
     /// Refuse a pending claim (for example: the short codes did not match). The
@@ -1240,18 +1320,31 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// changes this device has not seen are rejected everywhere. Admins only. Send
     /// the returned frames in order.
     pub fn remove_member(&mut self, org: &str, device: &str) -> Result<Vec<Frame>, ClientError> {
+        // The user's other devices (ADR 0011) go with it: revoked by the policy
+        // through the link, removed from the group here.
+        let primary = DeviceId::from_hex(device)?;
+        let members = self.groups.members(org)?;
+        let linked: Vec<DeviceId> = self
+            .policies
+            .get(org)
+            .map_or(vec![], |p| p.linked_to(&primary))
+            .into_iter()
+            .filter(|d| members.contains(d))
+            .collect();
         let revocation = self.revoke(org, device)?;
-        let commit = self
-            .groups
-            .remove_member(&self.key, org, DeviceId::from_hex(device)?)?;
-        self.save_groups()?;
-        Ok(vec![
-            Frame::Broadcast {
+        let mut frames = vec![];
+        let mut gone = vec![primary];
+        gone.extend(linked);
+        for d in gone {
+            let commit = self.groups.remove_member(&self.key, org, d)?;
+            self.save_groups()?;
+            frames.push(Frame::Broadcast {
                 org: org.into(),
                 body: sync::outer_body(&Outer::Commit(commit)),
-            },
-            self.broadcast_frame(org, &revocation)?,
-        ])
+            });
+        }
+        frames.push(self.broadcast_frame(org, &revocation)?);
+        Ok(frames)
     }
 
     /// Rotate this device's key in `org`'s group (MLS update, REQ-ENC-003): call

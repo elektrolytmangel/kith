@@ -119,6 +119,15 @@ impl RoutingTable {
         }
     }
 
+    /// Where an own-device invite claim goes (ADR 0011): the named device, if it is
+    /// an online certified member (not a pending one). Dropped otherwise.
+    pub fn member(&self, org: &str, to: &str) -> Route {
+        match self.role(org, to) {
+            Some(Role::Member | Role::Admin) => Route::To(vec![to.into()]),
+            _ => Route::Dropped,
+        }
+    }
+
     /// Mark a device as an always-on client (preferred for catch-up).
     pub fn set_always_on(&mut self, device: &str, on: bool) {
         if on {

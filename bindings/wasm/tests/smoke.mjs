@@ -192,9 +192,29 @@ if (process.env.KITH_RELAY_BIN) {
     assert.equal(c.historyLength(ledger), 0);
     assert.throws(() => c.createIn(fin, "acme.ledger", new Uint8Array()), /not a member/);
 
+    // b is a plain member (editor), yet it adds its own second device d: the claim
+    // goes to b, not to an admin, and d ends up in the group with b's role.
+    const evD = listen();
+    const d = new kith.KithClient();
+    d.connect(url, org, (e) => evD.push(e));
+    const ownLink = b.createOwnDeviceInvite(org, url, 600);
+    assert.throws(() => a.createOwnDeviceInvite("00".repeat(32), url, 600), /own devices|member|Forbidden/i);
+    const codeD = d.claimInvite(ownLink);
+    const claimed = await waitFor(evB, (e) => e.type === "inviteClaimed" && e.from === d.deviceId(), "b to get d's claim");
+    assert.equal(claimed.code, codeD);
+    b.acceptClaim(claimed.from);
+    await waitFor(evD, (e) => e.type === "joined", "d to join as b's own device");
+    assert.equal(d.isMember(org), true);
+    assert.equal(d.isAdmin(org), false);
+    await waitFor(evD, (e) => e.type === "syncReceived" && e.stored > 0, "d to catch up");
+    assert.equal(d.historyLength(objectId), 2);
+    assert.equal(d.roleOf(org, d.deviceId()), "editor");
+    assert.throws(() => d.createOwnDeviceInvite(org, url, 600), /linked/);
+
     a.disconnect();
     b.disconnect();
     c.disconnect();
+    d.disconnect();
     console.log("ok: live sync through the relay");
   } finally {
     relay.kill();

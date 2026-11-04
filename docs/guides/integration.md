@@ -66,6 +66,11 @@ or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-cer
 5. The new device gets `joined` with its membership certificate, announces itself
    to the relay with it, and downloads the history from a peer on its own.
 
+A member (not only an admin) can add **another device of its own** with
+`createOwnDeviceInvite(org, relayUrl, ttlSeconds)`; the flow is the same (the member gets
+`inviteClaimed`, calls `acceptClaim`). The new device has the member's role, at most editor,
+and goes away with it when the member is removed. A device added this way cannot add more.
+
 The creator can make another member an admin with `grantAdmin(deviceId)`; that device
 gets `certificateUpdated { admin: true }` and can then invite too.
 

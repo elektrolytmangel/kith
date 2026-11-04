@@ -192,6 +192,23 @@ impl KithClient {
             .map_err(js_err)
     }
 
+    /// A one-time link to add another device of *this user* to `org` (REQ-ID-002).
+    /// Any member can make one, not only admins; the new device gets this device's
+    /// role (at most editor). Stay online until the `inviteClaimed` event, then
+    /// `acceptClaim`. Not available on a device that was itself added this way.
+    #[wasm_bindgen(js_name = createOwnDeviceInvite)]
+    pub fn create_own_device_invite(
+        &self,
+        org: &str,
+        relay: &str,
+        ttl_seconds: f64,
+    ) -> Result<String, JsError> {
+        self.inner
+            .borrow_mut()
+            .create_own_device_invite(org, relay, (ttl_seconds.max(0.0) * 1000.0) as u64)
+            .map_err(js_err)
+    }
+
     /// Read an invite link without claiming it: `{org, relay, expiresMs}`, so the app
     /// knows where to `connect` before `claimInvite`.
     #[wasm_bindgen(js_name = parseInvite)]

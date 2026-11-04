@@ -163,6 +163,23 @@ impl KithClient {
         )?)
     }
 
+    /// A one-time link to add another device of *this user* to `org`, valid for
+    /// `ttl_seconds`. Any member can make one, not only admins. The new device gets
+    /// this device's role (at most editor); accept it with `acceptClaim` like any
+    /// claim. Not available on a device that was itself added this way.
+    pub fn create_own_device_invite(
+        &self,
+        org: String,
+        relay: String,
+        ttl_seconds: u64,
+    ) -> Result<String, KithError> {
+        Ok(self.inner.lock().unwrap().create_own_device_invite(
+            &org,
+            &relay,
+            ttl_seconds.saturating_mul(1000),
+        )?)
+    }
+
     /// True if this device is a member of `org`'s group (it can send and read).
     pub fn is_member(&self, org: String) -> bool {
         self.inner.lock().unwrap().is_member(&org)

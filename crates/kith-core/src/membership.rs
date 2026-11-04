@@ -4,8 +4,10 @@
 //!   key *is* the org ID (hex), so anyone, the relay included, can check a
 //!   membership proof against the org ID alone.
 //! - **[`MembershipCert`]**: "device D is a member (or admin) of org O", signed by
-//!   the root key or by an admin. A [`CertChain`] has at most two certificates:
-//!   root → admin, or root → admin → member. Only the root makes admins.
+//!   the root key or by an admin. A [`CertChain`] has at most three certificates:
+//!   root → admin, root → admin → member, or root → (admin →) member → own device
+//!   (ADR 0011: a member certifies its own additional device). Only the root makes
+//!   admins.
 //! - **[`Invite`]**: a one-time, expiring link from an admin with a random secret.
 //!   The new device proves it knows the secret with [`Invite::claim_proof`] over
 //!   its MLS KeyPackage; both screens can show [`Invite::short_code`].
@@ -46,6 +48,9 @@ pub struct MembershipCert {
     pub issuer: DeviceId,
     /// True if `device` may invite and admit others. Only the root grants it.
     pub admin: bool,
+    /// True for a member's own additional device (ADR 0011): signed by the member
+    /// itself, never an admin, and it cannot certify further devices.
+    pub own: bool,
     /// When it was issued (issuer's clock, informational).
     pub issued_ms: u64,
     /// Ed25519 signature by `issuer`.
@@ -66,11 +71,32 @@ impl MembershipCert {
             device,
             issuer: issuer.device_id(),
             admin,
+            own: false,
             issued_ms,
             signature: [0; 64],
         };
         c.signature = issuer.sign(&c.signed_bytes());
         c
+    }
+
+    /// Issue the certificate of `issuer`'s own additional device (ADR 0011).
+    pub fn issue_own(issuer: &dyn Signer, org: DeviceId, device: DeviceId, issued_ms: u64) -> Self {
+        let mut c = Self {
+            org,
+            device,
+            issuer: issuer.device_id(),
+            admin: false,
+            own: true,
+            issued_ms,
+            signature: [0; 64],
+        };
+        c.signature = issuer.sign(&c.signed_bytes());
+        c
+    }
+
+    /// The flag byte: 0 member, 1 admin, 2 own device.
+    fn kind(&self) -> u8 {
+        if self.own { 2 } else { self.admin as u8 }
     }
 
     fn signed_bytes(&self) -> Vec<u8> {
@@ -79,7 +105,7 @@ impl MembershipCert {
         m.extend_from_slice(&self.org.0);
         m.extend_from_slice(&self.device.0);
         m.extend_from_slice(&self.issuer.0);
-        m.push(self.admin as u8);
+        m.push(self.kind());
         m.extend_from_slice(&self.issued_ms.to_be_bytes());
         m
     }
@@ -93,7 +119,7 @@ impl MembershipCert {
         out.extend_from_slice(&self.org.0);
         out.extend_from_slice(&self.device.0);
         out.extend_from_slice(&self.issuer.0);
-        out.push(self.admin as u8);
+        out.push(self.kind());
         out.extend_from_slice(&self.issued_ms.to_be_bytes());
         out.extend_from_slice(&self.signature);
     }
@@ -103,9 +129,10 @@ impl MembershipCert {
             return Err(MembershipError::Malformed("certificate length"));
         }
         let id = |r: std::ops::Range<usize>| DeviceId(b[r].try_into().expect("32 bytes"));
-        let admin = match b[96] {
-            0 => false,
-            1 => true,
+        let (admin, own) = match b[96] {
+            0 => (false, false),
+            1 => (true, false),
+            2 => (false, true),
             _ => return Err(MembershipError::Malformed("admin flag")),
         };
         Ok(Self {
@@ -113,6 +140,7 @@ impl MembershipCert {
             device: id(32..64),
             issuer: id(64..96),
             admin,
+            own,
             issued_ms: u64::from_be_bytes(b[97..105].try_into().expect("8 bytes")),
             signature: b[105..].try_into().expect("64 bytes"),
         })
@@ -140,13 +168,10 @@ impl CertChain {
     /// Check that this chain proves `device` is a member of `org` (whose ID is the
     /// root public key). No state needed: the relay calls this on `announce`.
     pub fn verify(&self, org: &DeviceId, device: &DeviceId) -> Result<Proven, MembershipError> {
-        let leaf = match self.0.as_slice() {
-            [leaf] | [_, leaf] => leaf,
-            _ => {
-                return Err(MembershipError::Invalid(
-                    "chain must have 1 or 2 certificates",
-                ));
-            }
+        let Some(leaf) = self.0.last().filter(|_| (1..=3).contains(&self.0.len())) else {
+            return Err(MembershipError::Invalid(
+                "chain must have 1 to 3 certificates",
+            ));
         };
         if self.0.iter().any(|c| &c.org != org) {
             return Err(MembershipError::Invalid("certificate for another org"));
@@ -157,17 +182,26 @@ impl CertChain {
         for c in &self.0 {
             c.verify_signature()?;
         }
-        match self.0.as_slice() {
-            [leaf] if &leaf.issuer == org => {}
-            [admin, leaf] => {
-                if &admin.issuer != org || !admin.admin || admin.device != leaf.issuer {
-                    return Err(MembershipError::Invalid("issuer is not a root-made admin"));
-                }
-                if leaf.admin {
-                    return Err(MembershipError::Invalid("only the root makes admins"));
-                }
+        // The first certificate comes from the root and is never an own-device one.
+        let first = &self.0[0];
+        if &first.issuer != org || first.own {
+            return Err(MembershipError::Invalid("not issued by the root key"));
+        }
+        for pair in self.0.windows(2) {
+            let (issuer, c) = (&pair[0], &pair[1]);
+            if issuer.device != c.issuer {
+                return Err(MembershipError::Invalid("broken chain"));
             }
-            _ => return Err(MembershipError::Invalid("not issued by the root key")),
+            if c.admin {
+                return Err(MembershipError::Invalid("only the root makes admins"));
+            }
+            if issuer.own {
+                return Err(MembershipError::Invalid("an own device cannot certify"));
+            }
+            // Members may only certify their own devices; admins also admit members.
+            if !issuer.admin && !c.own {
+                return Err(MembershipError::Invalid("issuer is not a root-made admin"));
+            }
         }
         Ok(Proven { admin: leaf.admin })
     }
@@ -184,7 +218,7 @@ impl CertChain {
     /// Parse [`Self::to_hex`].
     pub fn from_hex(s: &str) -> Result<Self, MembershipError> {
         let b = hex::decode(s).map_err(|_| MembershipError::Malformed("not hex"))?;
-        if b.is_empty() || b.len() % CERT_LEN != 0 || b.len() > 2 * CERT_LEN {
+        if b.is_empty() || b.len() % CERT_LEN != 0 || b.len() > 3 * CERT_LEN {
             return Err(MembershipError::Malformed("chain length"));
         }
         b.chunks(CERT_LEN)
@@ -211,6 +245,10 @@ pub struct Invite {
     pub secret: [u8; 32],
     /// Expiry, milliseconds since the Unix epoch.
     pub expires_ms: u64,
+    /// Set if a member made this link to add one of its own devices (ADR 0011):
+    /// the issuing device. It links the claimer to itself instead of admitting a
+    /// new user, and the claim is routed to it, since it may not be an admin.
+    pub own_device: Option<DeviceId>,
 }
 
 impl std::fmt::Debug for Invite {
@@ -220,6 +258,7 @@ impl std::fmt::Debug for Invite {
             .field("relay", &self.relay)
             .field("token", &hex::encode(self.token))
             .field("expires_ms", &self.expires_ms)
+            .field("own_device", &self.own_device)
             .finish_non_exhaustive()
     }
 }
@@ -235,18 +274,30 @@ impl Invite {
             token: crate::random_bytes(),
             secret: crate::random_bytes(),
             expires_ms,
+            own_device: None,
+        }
+    }
+
+    /// A fresh invite for the issuer's own additional device (ADR 0011).
+    pub fn new_own_device(org: DeviceId, relay: &str, expires_ms: u64, issuer: DeviceId) -> Self {
+        Self {
+            own_device: Some(issuer),
+            ..Self::new(org, relay, expires_ms)
         }
     }
 
     /// `kith://invite/v1?org=…&relay=…&token=…&secret=…&expires=…`
     pub fn to_link(&self) -> String {
         format!(
-            "{LINK_PREFIX}org={}&relay={}&token={}&secret={}&expires={}",
+            "{LINK_PREFIX}org={}&relay={}&token={}&secret={}&expires={}{}",
             self.org.to_hex(),
             percent_encode(&self.relay),
             hex::encode(self.token),
             hex::encode(self.secret),
-            self.expires_ms
+            self.expires_ms,
+            self.own_device
+                .map(|d| format!("&own={}", d.to_hex()))
+                .unwrap_or_default()
         )
     }
 
@@ -261,6 +312,7 @@ impl Invite {
         let mut token = None;
         let mut secret = None;
         let mut expires = None;
+        let mut own_device = None;
         for pair in query.split('&') {
             let (k, v) = pair
                 .split_once('=')
@@ -271,6 +323,10 @@ impl Invite {
                 "token" => token = hex::decode(v).ok().and_then(|b| b.try_into().ok()),
                 "secret" => secret = hex::decode(v).ok().and_then(|b| b.try_into().ok()),
                 "expires" => expires = v.parse().ok(),
+                "own" => {
+                    own_device =
+                        Some(DeviceId::from_hex(v).map_err(|_| MembershipError::Malformed("own"))?)
+                }
                 _ => {} // ignore unknown keys from newer versions
             }
         }
@@ -280,6 +336,7 @@ impl Invite {
             token: token.ok_or(MembershipError::Malformed("token"))?,
             secret: secret.ok_or(MembershipError::Malformed("secret"))?,
             expires_ms: expires.ok_or(MembershipError::Malformed("expires"))?,
+            own_device,
         })
     }
 
@@ -407,6 +464,86 @@ mod tests {
         assert_eq!(CertChain::from_hex(&chain.to_hex()).unwrap(), chain);
     }
 
+    /// req: REQ-ID-002
+    #[test]
+    fn members_certify_only_their_own_devices() {
+        let (root, admin, member, phone, stranger) = (key(), key(), key(), key(), key());
+        let org = root.device_id();
+        let admin_cert = MembershipCert::issue(&root, org, admin.device_id(), true, 1);
+        let member_cert = MembershipCert::issue(&admin, org, member.device_id(), false, 2);
+        let own = MembershipCert::issue_own(&member, org, phone.device_id(), 3);
+        let chain = CertChain(vec![admin_cert.clone(), member_cert.clone(), own.clone()]);
+        assert_eq!(
+            chain.verify(&org, &phone.device_id()),
+            Ok(Proven { admin: false })
+        );
+        assert_eq!(CertChain::from_hex(&chain.to_hex()).unwrap(), chain);
+        // A root-certified member and an admin can link their own devices too.
+        let root_member = MembershipCert::issue(&root, org, member.device_id(), false, 1);
+        assert!(
+            CertChain(vec![root_member.clone(), own.clone()])
+                .verify(&org, &phone.device_id())
+                .is_ok()
+        );
+        let admin_own = MembershipCert::issue_own(&admin, org, phone.device_id(), 3);
+        assert!(
+            CertChain(vec![admin_cert.clone(), admin_own.clone()])
+                .verify(&org, &phone.device_id())
+                .is_ok()
+        );
+        // The flag is signed: a plain member certificate cannot be passed off as an
+        // own-device one or the other way round.
+        let mut forged = own.clone();
+        forged.own = false;
+        assert!(
+            CertChain(vec![root_member.clone(), forged])
+                .verify(&org, &phone.device_id())
+                .is_err()
+        );
+        // A member cannot admit a plain member, nor make admins.
+        let plain = MembershipCert::issue(&member, org, stranger.device_id(), false, 3);
+        assert!(
+            CertChain(vec![admin_cert.clone(), member_cert.clone(), plain])
+                .verify(&org, &stranger.device_id())
+                .is_err()
+        );
+        let admin_by_member = MembershipCert::issue(&member, org, stranger.device_id(), true, 3);
+        assert!(
+            CertChain(vec![
+                admin_cert.clone(),
+                member_cert.clone(),
+                admin_by_member
+            ])
+            .verify(&org, &stranger.device_id())
+            .is_err()
+        );
+        // An own device cannot certify more devices, and an own certificate cannot
+        // come straight from the root.
+        let more = MembershipCert::issue_own(&phone, org, stranger.device_id(), 4);
+        assert!(
+            CertChain(vec![
+                admin_cert.clone(),
+                member_cert.clone(),
+                own.clone(),
+                more
+            ])
+            .verify(&org, &stranger.device_id())
+            .is_err()
+        );
+        let root_own = MembershipCert::issue_own(&root, org, phone.device_id(), 1);
+        assert!(
+            CertChain(vec![root_own])
+                .verify(&org, &phone.device_id())
+                .is_err()
+        );
+        // Chain links must connect.
+        assert!(
+            CertChain(vec![admin_cert, own])
+                .verify(&org, &phone.device_id())
+                .is_err()
+        );
+    }
+
     /// req: REQ-RELAY-004
     #[test]
     fn forged_or_misused_chains_fail() {
@@ -461,7 +598,7 @@ mod tests {
                 .verify(&org, &member.device_id())
                 .is_err()
         );
-        for bad in ["", "zz", "00", &"00".repeat(CERT_LEN * 3)] {
+        for bad in ["", "zz", "00", &"00".repeat(CERT_LEN * 4)] {
             assert!(CertChain::from_hex(bad).is_err(), "{bad:.10}");
         }
     }
@@ -477,6 +614,12 @@ mod tests {
         let link = inv.to_link();
         assert!(link.starts_with("kith://invite/v1?"));
         assert_eq!(Invite::parse(&link).unwrap(), inv);
+        let me = key().device_id();
+        let own = Invite::new_own_device(inv.org, "ws://r", 5, me);
+        assert!(own.to_link().ends_with(&format!("&own={}", me.to_hex())));
+        assert_eq!(Invite::parse(&own.to_link()).unwrap(), own);
+        assert!(Invite::parse(&link).unwrap().own_device.is_none());
+        assert!(Invite::parse(&own.to_link().replace(&me.to_hex(), "zz")).is_err());
         assert!(Invite::parse("https://example.com").is_err());
         assert!(Invite::parse(&link.replace("token=", "tokn=")).is_err());
         assert!(inv.is_expired(99) && !inv.is_expired(98));

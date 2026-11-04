@@ -70,9 +70,13 @@ impl Net {
                         .collect(),
                     body,
                 ),
-                // The relay sends claims to the org's admins; here: everyone else.
-                Frame::InviteClaim { body, .. } => (
-                    (0..self.devs.len()).filter(|&i| online(i, self)).collect(),
+                // The relay sends claims to the named device (own-device invites) or the
+                // org's admins; here: that device, or everyone else.
+                Frame::InviteClaim { body, to, .. } => (
+                    (0..self.devs.len())
+                        .filter(|&i| online(i, self))
+                        .filter(|&i| to.as_ref().is_none_or(|t| *t == hex(&self.devs[i])))
+                        .collect(),
                     body,
                 ),
                 _ => continue,
@@ -1653,4 +1657,106 @@ fn a_device_restored_from_a_backup_rejoins_and_catches_up() {
     let events = spread(&mut net, 1, &c);
     assert_eq!(received_by(&events, 0), 1);
     assert!(Client::import_backup(b"garbage", "x", MemoryStore::new()).is_err());
+}
+
+/// req: REQ-ID-002
+#[test]
+fn a_member_adds_its_own_device_and_it_follows_the_member() {
+    let mut net = Net::org(2); // 0 = admin, 1 = plain member
+    net.devs.push(client());
+    let org = DeviceId::from_hex(&ORG).unwrap();
+    // Admins cannot be linked to by accident, and strangers cannot make links.
+    assert!(
+        net.devs[2]
+            .create_own_device_invite(&ORG, "ws://relay/v1/ws", 60_000)
+            .is_err(),
+        "not a member yet"
+    );
+    // Member 1 (not an admin) links device 2.
+    let link = net.devs[1]
+        .create_own_device_invite(&ORG, "ws://relay/v1/ws", 60_000)
+        .unwrap();
+    let claim = net.devs[2].claim_invite(&link).unwrap();
+    assert!(
+        matches!(&claim.frame, Frame::InviteClaim { to: Some(t), .. } if *t == hex(&net.devs[1]))
+    );
+    let events = net.send(2, vec![claim.frame]);
+    let code = events
+        .iter()
+        .find_map(|(i, e)| match e {
+            Event::InviteClaimed { code, .. } if *i == 1 => Some(code.clone()),
+            _ => None,
+        })
+        .expect("the claim reaches the member, not an admin");
+    assert_eq!(code, claim.code);
+    assert!(
+        !events
+            .iter()
+            .any(|(i, e)| *i == 0 && matches!(e, Event::InviteClaimed { .. })),
+        "the admin does not see it"
+    );
+    let phone = hex(&net.devs[2]);
+    let frames = net.devs[1].accept_claim(&ORG, &phone).unwrap();
+    let events = net.send(1, frames);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 2 && matches!(e, Event::Joined { .. }))
+    );
+    assert!(net.devs[2].is_member(&ORG));
+    // Its chain has three certificates and the relay accepts it, without admin rights.
+    let chain = CertChain::from_hex(&net.devs[2].membership_proof(&ORG)).unwrap();
+    assert_eq!(chain.0.len(), 3);
+    assert!(chain.0[2].own);
+    assert!(!chain.verify(&org, &net.devs[2].device_id()).unwrap().admin);
+    assert!(!net.devs[2].is_admin(&ORG));
+    // Every device's policy says it belongs to member 1 and has its role.
+    for d in &net.devs {
+        let p = d.policy(&ORG).unwrap();
+        assert_eq!(
+            p.links.get(&net.devs[2].device_id()),
+            Some(&net.devs[1].device_id())
+        );
+    }
+    assert_eq!(
+        net.devs[0].role_of(&ORG, &phone).unwrap(),
+        Some(Role::Editor)
+    );
+    // The linked device cannot link or admit devices itself.
+    assert!(
+        net.devs[2]
+            .create_own_device_invite(&ORG, "ws://relay/v1/ws", 60_000)
+            .is_err()
+    );
+    // Both devices write; the admin sees both.
+    let c = net.create(2, b"from the phone");
+    assert!(
+        net.devs[0]
+            .history(&c.body.object_id)
+            .is_ok_and(|h| h.len() == 1)
+    );
+    // Demoting the member demotes the phone; removing it removes the phone from the
+    // group and revokes it.
+    let member = hex(&net.devs[1]);
+    let frames = net.devs[0].remove_member(&ORG, &member).unwrap();
+    net.send(0, frames);
+    assert_eq!(net.devs[0].role_of(&ORG, &phone).unwrap(), None);
+    let members = net.devs[0].group_members(&ORG).unwrap();
+    assert_eq!(members, vec![hex(&net.devs[0])]);
+}
+
+/// req: REQ-ID-002
+#[test]
+fn an_own_device_invite_cannot_be_accepted_by_someone_else() {
+    let mut net = Net::org(3);
+    net.devs.push(client());
+    let link = net.devs[1]
+        .create_own_device_invite(&ORG, "ws://relay/v1/ws", 60_000)
+        .unwrap();
+    let claim = net.devs[3].claim_invite(&link).unwrap();
+    net.send(3, vec![claim.frame]);
+    // Device 2 never saw the claim, so it has nothing to accept.
+    let new = hex(&net.devs[3]);
+    assert!(net.devs[2].accept_claim(&ORG, &new).is_err());
+    assert!(!net.devs[3].is_member(&ORG));
 }

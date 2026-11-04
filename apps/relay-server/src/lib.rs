@@ -496,8 +496,11 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
             let route = r.table.sync_partner(&org, d);
             deliver(r, route, tx, org, d, body);
         }
-        Frame::InviteClaim { org, body, .. } if r.table.role(&org, d).is_some() => {
-            let route = r.table.admins(&org);
+        Frame::InviteClaim { org, body, to, .. } if r.table.role(&org, d).is_some() => {
+            let route = match to {
+                Some(to) => r.table.member(&org, &to),
+                None => r.table.admins(&org),
+            };
             deliver(r, route, tx, org, d, body);
         }
         Frame::Broadcast { org, .. }
@@ -854,6 +857,49 @@ mod tests {
         }
     }
 
+    /// req: REQ-ID-002
+    #[tokio::test]
+    async fn a_claim_can_be_addressed_to_one_certified_member() {
+        let url = start(Duration::from_secs(10)).await;
+        let (root, member_key, new_key) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let org = org_id(&root);
+        let mut member = login(&url, &member_key).await;
+        announce(&mut member, &org, proof(&root, &member_key, false)).await;
+        assert!(matches!(
+            next_frame(&mut member).await,
+            Some(Frame::Presence { .. })
+        ));
+        let mut new = login(&url, &new_key).await;
+        announce(&mut new, &org, String::new()).await;
+        let claim = |to: String| Frame::InviteClaim {
+            org: org.clone(),
+            token: "t".into(),
+            body: b"claim".to_vec(),
+            to: Some(to),
+        };
+        // No admin is online, but the claim reaches the named (non-admin) member.
+        send_frame(&mut new, &claim(member_key.device_id().to_hex())).await;
+        assert!(
+            matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.len() == 1)
+        );
+        assert!(
+            matches!(next_frame(&mut member).await, Some(Frame::Deliver { body, .. }) if body == b"claim")
+        );
+        // A pending or unknown device is not a target.
+        send_frame(&mut new, &claim(new_key.device_id().to_hex())).await;
+        assert!(
+            matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.is_empty())
+        );
+        send_frame(&mut new, &claim("00".repeat(32))).await;
+        assert!(
+            matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.is_empty())
+        );
+    }
+
     /// req: REQ-RELAY-004
     /// req: REQ-INV-002
     #[tokio::test]
@@ -890,6 +936,7 @@ mod tests {
                 org: org.clone(),
                 token: "t".into(),
                 body: b"claim".to_vec(),
+                to: None,
             },
         )
         .await;
@@ -949,6 +996,7 @@ mod tests {
                 org,
                 token: "t".into(),
                 body: vec![1],
+                to: None,
             },
         )
         .await;
