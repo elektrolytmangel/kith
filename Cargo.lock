@@ -891,9 +891,15 @@ name = "kith-relay-server"
 version = "0.1.0-alpha.1"
 dependencies = [
  "axum",
+ "futures-util",
+ "hex",
+ "kith-client",
+ "kith-core",
+ "kith-crypto",
  "kith-protocol",
  "kith-relay",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]

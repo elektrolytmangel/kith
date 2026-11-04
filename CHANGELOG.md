@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Relay: device authentication by challenge/response (REQ-RELAY-004, device-key half). Other frames are
+  refused until a device authenticates; connections that don't authenticate within
+  `KITH_RELAY_AUTH_TIMEOUT_SECS` (default 10) are closed. `kith_core::verify_signature`,
+  `kith_protocol::auth_message`, `kith_client::{hello_frame, auth_frame}`.
+
+### Fixed
+- Relay: a device that reconnected was unregistered when its old connection closed; the old
+  connection is now closed on reconnect and cannot remove the new one.
+
+### Added
 - `kith-merge`: `Merger` trait and Automerge implementation; `Client::materialize` merges an
   object's forked history deterministically (REQ-DATA-004, ADR 0003). Automerge is opt-in
   (`kith-client/automerge`).

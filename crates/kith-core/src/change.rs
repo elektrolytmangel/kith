@@ -81,16 +81,27 @@ impl Change {
         if ChangeId(Sha256::digest(&bytes).into()) != self.change_id {
             return Err(ChangeError::IdMismatch);
         }
-        let key = VerifyingKey::from_bytes(self.author.as_bytes())
-            .map_err(|_| ChangeError::BadAuthorKey)?;
-        key.verify(&bytes, &Signature::from_bytes(&self.signature))
-            .map_err(|_| ChangeError::BadSignature)
+        verify_signature(&self.author, &bytes, &self.signature)
     }
 
     /// True if this change creates its object.
     pub fn is_creation(&self) -> bool {
         self.body.parents.is_empty()
     }
+}
+
+/// Verify an Ed25519 `signature` over `msg` by the device `signer` (its public key).
+///
+/// Used for changes and for the relay's challenge/response. Callers must
+/// domain-separate `msg` so a signature made for one purpose is useless for another.
+pub fn verify_signature(
+    signer: &DeviceId,
+    msg: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), ChangeError> {
+    let key = VerifyingKey::from_bytes(signer.as_bytes()).map_err(|_| ChangeError::BadAuthorKey)?;
+    key.verify(msg, &Signature::from_bytes(signature))
+        .map_err(|_| ChangeError::BadSignature)
 }
 
 /// Deterministic, length-prefixed encoding of everything that is signed.

@@ -115,7 +115,11 @@ docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 80
 | Env | Default | |
 | --- | --- | --- |
 | `KITH_RELAY_ADDR` | `0.0.0.0:8080` | listen address |
+| `KITH_RELAY_AUTH_TIMEOUT_SECS` | `10` | time a new connection has to authenticate |
 | `RUST_LOG` | `info` | log filter |
 
-Until REQ-RELAY-004 (device authentication) is implemented, don't expose the
-relay publicly.
+Devices authenticate by signing a challenge with their key (`hello` → `challenge` →
+`auth`; Rust clients use `kith_client::hello_frame` and `auth_frame`). The relay
+does not check organization membership proofs yet (REQ-RELAY-004, needs the org
+root of trust from phase 5): any device with a valid key can join any org id.
+Don't expose the relay publicly until then.

@@ -48,6 +48,27 @@ pub trait Transport {
     fn send(&mut self, frame: kith_protocol::Frame) -> Result<(), String>;
 }
 
+/// The first frame to send after connecting to the relay.
+pub fn hello_frame(signer: &dyn Signer) -> kith_protocol::Frame {
+    kith_protocol::Frame::Hello {
+        version: kith_protocol::PROTOCOL_VERSION,
+        device: signer.device_id().to_hex(),
+    }
+}
+
+/// The answer to the relay's [`kith_protocol::Frame::Challenge`]: a signature
+/// proving this device owns its key (REQ-RELAY-004).
+pub fn auth_frame(signer: &dyn Signer, nonce: &str) -> kith_protocol::Frame {
+    let msg = kith_protocol::auth_message(&signer.device_id().to_hex(), nonce);
+    kith_protocol::Frame::Auth {
+        signature: hex_encode(&signer.sign(&msg)),
+    }
+}
+
+fn hex_encode(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// A device's view of the organizations it belongs to.
 pub struct Client<S: Store, K: Signer = DeviceKey> {
     key: K,

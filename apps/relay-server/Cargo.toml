@@ -19,7 +19,15 @@ path = "src/main.rs"
 [dependencies]
 kith-relay.workspace = true
 kith-protocol.workspace = true
+kith-core.workspace = true
+hex.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+kith-client.workspace = true
+kith-crypto.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
