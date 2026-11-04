@@ -94,7 +94,7 @@ Blockers, in suggested order:
 4. [ ] **Closing known gaps:** relay-level certificate revocation (REQ-INV-004), always-on client as the supported
    way to sync offline devices (push wake-ups REQ-RELAY-007 later), resumable large syncs (REQ-SYNC-005),
    history compaction (REQ-DATA-005; the web store keeps all history in memory).
-5. [x] **Containers for the relay and the always-on client** (PR `feat/containers`; dry run of `release.yml` still to check) (replaces "publish packages"; user decision
+5. [x] **Containers for the relay and the always-on client** (#48; dry run of `release.yml` verified, both images built and smoke-tested) (replaces "publish packages"; user decision
    2026-11-04: nothing is published outside GitHub). Plan: `release.yml` builds a multi-arch image per binary from
    the release binaries (no Rust compile in the image) and pushes it to GitHub Packages (ghcr.io) with
    `GITHUB_TOKEN`; plus a `docker-compose.yml` example and a deployment guide. Chosen over "Dockerfile that
