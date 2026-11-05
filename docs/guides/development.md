@@ -74,7 +74,13 @@ scripts/build-wasm.sh web && node bindings/wasm/tests/smoke.mjs   # needs wasm-p
 #   KITH_RELAY_BIN=target/debug/kith-relay node bindings/wasm/tests/browser/run.mjs
 #   (in Docker: mcr.microsoft.com/playwright:v1.62.1-noble)
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7   # after editing workflows
+cargo deny check   # dependencies: advisories, licenses, sources (deny.toml; `cargo install cargo-deny --locked`)
 ```
+
+**Dependencies and Actions.** `deny.toml` is checked by `.github/workflows/deny.yml` when a
+manifest or `Cargo.lock` changes and weekly. An advisory that does not affect kith goes into its
+`ignore` list with a reason. Workflow Actions are pinned to a commit SHA with the version as a
+comment, and base images to a digest; Dependabot updates both.
 
 The Swift package needs macOS: run `scripts/build-swift.sh && (cd bindings/swift && swift test)`
 on a Mac, or rely on the `swift` CI job. The `android` CI job builds the AAR.

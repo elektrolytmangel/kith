@@ -20,6 +20,15 @@ All notable changes to this project are documented here. Format: [Keep a Changel
   longer lets a removed device back in. Off by default (the relay then stores nothing, as before). Bicep parameter
   `persistRevocations`.
 
+### Changed
+- Build and release: GitHub Actions pinned to commit SHAs, base images (Dockerfiles, Compose) pinned to digests,
+  `cargo deny` checks advisories, licenses and sources (`deny.toml`, on dependency changes and weekly), Dependabot
+  covers every npm, Docker and Compose directory. Releases carry an SPDX SBOM and signed build provenance for every
+  file and image (`gh attestation verify`, see [releasing.md](docs/guides/releasing.md#verifying-a-release)).
+- Azure template: the relay's identity gets *Storage Table Data Contributor* on its tables only, not on the storage
+  account. Existing deployments keep the old account-wide assignment until it is deleted
+  ([deployment-azure.md](docs/guides/deployment-azure.md#updating-cost-limits)).
+
 ## [0.1.0-alpha.3] - 2026-11-05
 
 Web readiness, container images and format guards. Compatible with 0.1.0-alpha.2 (no format changes;

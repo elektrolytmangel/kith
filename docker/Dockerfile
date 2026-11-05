@@ -11,7 +11,7 @@
 # To build from source instead: apps/relay-server/Dockerfile.
 
 # Debian 13 (glibc 2.41) matches the glibc the release binaries are built against.
-FROM gcr.io/distroless/cc-debian13:nonroot AS base
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1 AS base
 ARG TARGETARCH
 USER nonroot
 

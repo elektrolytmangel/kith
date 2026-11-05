@@ -19,7 +19,7 @@ services:
       # KITH_RELAY_MAX_CONNECTIONS: "10000"
 
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:dee6bce21b6c3d17c78805046901f9558f0bcfe9d3853f26ab7eb5cf06021ba4
     restart: unless-stopped
     depends_on: [relay]
     ports: ["80:80", "443:443"]

@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-05 (Azure plan complete; optional revocation persistence)
+- **Last updated:** 2026-11-05 (build and release hardening: pinned Actions/images, cargo deny, attestations, SBOM)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
   allowlist (#57). Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
 - **State of `main` (16e991b, #57 merged):** CI green on all 12 jobs on #57. Locally checked: fmt, clippy (incl. wasm32),
@@ -389,3 +389,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-05**: #59 merged (StateStore). Bicep template + lint CI (PR `feat/azure-bicep`). Next: step 6 (Azure guide); step 3 waits for the user's OK.
 - **2026-11-05**: #60 merged (Bicep + lint CI). Azure guide `docs/guides/deployment-azure.md`. Next: user deploys and confirms ADR 0013 amendment (step 3); otherwise road step 4 gaps (REQ-SYNC-005) or step 1 security review prep.
 - **2026-11-05**: #61 merged. User asked for step 3 as an opt-in: revocation persistence (ADR 0014, PR `feat/persist-revocations`). Azure plan complete. Next: road step 4 gaps (REQ-SYNC-005), security review prep, or the user's first real Azure deploy.
+- **2026-11-05**: Build and release hardening (PR `chore/supply-chain`): Actions pinned to SHAs, base images to digests, `cargo deny` workflow (`deny.toml`, weekly + on dependency changes; three build-time/unused-curve advisories ignored with reasons), Dependabot covers all npm/Docker/Compose dirs, release SBOM + build provenance attestations, Azure role scoped to the two tables (old account-wide assignment must be deleted by hand on existing deployments).
