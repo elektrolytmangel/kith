@@ -98,6 +98,17 @@ pub struct WelcomeInfo {
     pub replaces: bool,
 }
 
+/// What a verified commit changes, for the caller's checks before applying it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitInfo {
+    /// The member that made the commit.
+    pub committer: DeviceId,
+    /// Devices added (a re-added device is in both lists).
+    pub added: Vec<DeviceId>,
+    /// Devices removed.
+    pub removed: Vec<DeviceId>,
+}
+
 /// Result of [`Groups::add_member`] / [`Groups::readd_member`].
 #[derive(Debug)]
 pub struct Added {
@@ -597,6 +608,21 @@ impl Groups {
         commit: &[u8],
         committer: DeviceId,
     ) -> Result<CommitOutcome, GroupError> {
+        self.apply_commit_checked(org, commit, committer, |_| Ok(()))
+    }
+
+    /// [`Self::apply_commit`], but a commit for our epoch is applied only if
+    /// `check` accepts what it changes. Commits that propose anything but adding,
+    /// removing or re-adding devices (and the committer's own key update), whose
+    /// sender is not `committer`, or that bring in a leaf breaking the identity
+    /// rule are refused as well. Nothing changes if it is refused.
+    pub fn apply_commit_checked(
+        &mut self,
+        org: &str,
+        commit: &[u8],
+        committer: DeviceId,
+        check: impl FnOnce(&CommitInfo) -> Result<(), String>,
+    ) -> Result<CommitOutcome, GroupError> {
         let msg = self.protocol_message(org, commit, ContentType::Commit)?;
         let local = self.epoch(org)?;
         let got = msg.epoch().as_u64();
@@ -617,9 +643,14 @@ impl Groups {
             _ => None,
         }
         .ok_or_else(|| GroupError::Invalid("committer is not a member".into()))?;
+        if sender != committer {
+            return Err(GroupError::Invalid("commit not from its sender".into()));
+        }
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             return Err(GroupError::Invalid("not a commit".into()));
         };
+        let info = commit_info(group, &staged, sender)?;
+        check(&info).map_err(GroupError::Invalid)?;
         group
             .merge_staged_commit(&self.provider, *staged)
             .map_err(backend)?;
@@ -930,6 +961,60 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The device a leaf belongs to, if it follows the kith identity rule (its
+/// credential is its Ed25519 signature key, the device ID).
+fn leaf_device(leaf: &LeafNode) -> Option<DeviceId> {
+    let device = device_of(leaf.signature_key().as_slice())?;
+    let identity = BasicCredential::try_from(leaf.credential().clone()).ok()?;
+    (identity.identity() == device.0).then_some(device)
+}
+
+/// What `staged` (a commit by `sender` in `group`, not merged yet) changes.
+fn commit_info(
+    group: &MlsGroup,
+    staged: &StagedCommit,
+    sender: DeviceId,
+) -> Result<CommitInfo, GroupError> {
+    let bad = |m: &str| GroupError::Invalid(m.into());
+    let sender_leaf = group
+        .members()
+        .find(|m| m.signature_key == sender.0)
+        .map(|m| m.index);
+    for p in staged.queued_proposals() {
+        if !matches!(p.sender(), Sender::Member(l) if Some(*l) == sender_leaf) {
+            return Err(bad("proposal not by the committer"));
+        }
+        match p.proposal().proposal_type() {
+            ProposalType::Add | ProposalType::Remove => {}
+            _ => return Err(bad("unsupported proposal in commit")),
+        }
+    }
+    if let Some(leaf) = staged.update_path_leaf_node()
+        && leaf_device(leaf) != Some(sender)
+    {
+        return Err(bad("committer changed its identity"));
+    }
+    let added = staged
+        .add_proposals()
+        .map(|a| leaf_device(a.add_proposal().key_package().leaf_node()))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| bad("added leaf breaks the identity rule"))?;
+    let removed = staged
+        .remove_proposals()
+        .map(|r| {
+            group
+                .member_at(r.remove_proposal().removed())
+                .and_then(|m| device_of(&m.signature_key))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| bad("removed leaf is not a member"))?;
+    Ok(CommitInfo {
+        committer: sender,
+        added,
+        removed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -977,9 +1062,10 @@ mod tests {
             a.mls.add_member(&a.key, ORG, &kp).unwrap()
         };
         assert_eq!(added.member, devs[new].key.device_id());
+        let by = devs[admin].key.device_id();
         for (i, d) in devs.iter_mut().enumerate() {
             if i != admin && i != new && d.mls.is_member(ORG) {
-                d.mls.apply_commit(ORG, &added.commit, ANYONE).unwrap();
+                d.mls.apply_commit(ORG, &added.commit, by).unwrap();
             }
         }
         assert_eq!(devs[new].mls.join(&added.welcome).unwrap(), ORG);
@@ -1056,7 +1142,8 @@ mod tests {
                 d.mls.self_update(&d.key, ORG).unwrap()
             };
             let other = 1 - who;
-            devs[other].mls.apply_commit(ORG, &c, ANYONE).unwrap();
+            let by = devs[who].key.device_id();
+            devs[other].mls.apply_commit(ORG, &c, by).unwrap();
             missed.push(c);
         }
         let ct = send(&mut devs, 0, b"after");
@@ -1071,10 +1158,14 @@ mod tests {
             Err(GroupError::EpochGap { .. })
         ));
         // Any peer serves the commits from its log.
-        let commits = bytes(devs[1].mls.commits_since(ORG, e2).unwrap().unwrap());
+        let logged = devs[1].mls.commits_since(ORG, e2).unwrap().unwrap();
+        let commits = bytes(logged.clone());
         assert_eq!(commits, missed);
-        for c in &commits {
-            devs[2].mls.apply_commit(ORG, c, ANYONE).unwrap();
+        for l in &logged {
+            devs[2]
+                .mls
+                .apply_commit(ORG, &l.commit, l.committer)
+                .unwrap();
         }
         assert_eq!(devs[2].mls.decrypt(ORG, &ct).unwrap().plaintext, b"after");
         // Replays are harmless.
@@ -1094,8 +1185,9 @@ mod tests {
             let d = &mut devs[1];
             d.mls.self_update(&d.key, ORG).unwrap()
         };
+        let by = devs[1].key.device_id();
         assert_eq!(
-            devs[0].mls.apply_commit(ORG, &c, ANYONE).unwrap(),
+            devs[0].mls.apply_commit(ORG, &c, by).unwrap(),
             CommitOutcome::Applied {
                 epoch: before + 1,
                 removed: false
@@ -1109,12 +1201,13 @@ mod tests {
     #[test]
     fn device_beyond_the_log_is_readded() {
         let mut devs = group_of(3);
+        let by = devs[0].key.device_id();
         for _ in 0..COMMIT_LOG_LEN + 1 {
             let c = {
                 let d = &mut devs[0];
                 d.mls.self_update(&d.key, ORG).unwrap()
             };
-            devs[1].mls.apply_commit(ORG, &c, ANYONE).unwrap();
+            devs[1].mls.apply_commit(ORG, &c, by).unwrap();
         }
         let e2 = devs[2].mls.epoch(ORG).unwrap();
         assert_eq!(devs[0].mls.commits_since(ORG, e2).unwrap(), None);
@@ -1127,10 +1220,8 @@ mod tests {
             let d = &mut devs[1];
             d.mls.readd_member(&d.key, ORG, &kp).unwrap()
         };
-        devs[0]
-            .mls
-            .apply_commit(ORG, &added.commit, ANYONE)
-            .unwrap();
+        let by = devs[1].key.device_id();
+        devs[0].mls.apply_commit(ORG, &added.commit, by).unwrap();
         devs[2].mls.join(&added.welcome).unwrap();
         assert_eq!(devs[2].mls.members(ORG).unwrap().len(), 3);
         let ct = send(&mut devs, 0, b"back");
@@ -1150,13 +1241,14 @@ mod tests {
     fn removed_device_cannot_read_new_messages() {
         let mut devs = group_of(3);
         let removed = devs[2].key.device_id();
+        let by = devs[0].key.device_id();
         let c = {
             let d = &mut devs[0];
             d.mls.remove_member(&d.key, ORG, removed).unwrap()
         };
-        devs[1].mls.apply_commit(ORG, &c, ANYONE).unwrap();
+        devs[1].mls.apply_commit(ORG, &c, by).unwrap();
         assert!(matches!(
-            devs[2].mls.apply_commit(ORG, &c, ANYONE).unwrap(),
+            devs[2].mls.apply_commit(ORG, &c, by).unwrap(),
             CommitOutcome::Applied { removed: true, .. }
         ));
         assert!(!devs[2].mls.is_member(ORG));
@@ -1184,8 +1276,8 @@ mod tests {
             let d = &mut devs[1];
             d.mls.self_update(&d.key, ORG).unwrap()
         };
-        devs[2].mls.apply_commit(ORG, &c0, ANYONE).unwrap();
         let (id0, id1) = (id(&devs, 0), id(&devs, 1));
+        devs[2].mls.apply_commit(ORG, &c0, id0).unwrap();
         let zero_wins = id0.0 < id1.0;
 
         let at0 = devs[0].mls.apply_commit(ORG, &c1, id1).unwrap();
