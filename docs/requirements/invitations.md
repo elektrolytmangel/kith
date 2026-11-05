@@ -12,7 +12,9 @@ QR) containing org ID, root public key, relay address and a random secret.
 - **Priority:** must | **Phase:** 5 | **Status:** implemented | **Verify:** test | **Source:** design §Invitations
 
 A new device must claim the invite with a proof derived from the secret; the
-admin device must verify proof and expiry before adding it to the MLS group.
+admin device must verify proof and expiry before adding it to the MLS group, and
+again when it admits the device: an invite admits one device, and only before it
+expires.
 
 ### REQ-INV-003: Short-code verification
 

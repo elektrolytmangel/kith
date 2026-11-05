@@ -906,6 +906,48 @@ fn invites_are_single_use_expiring_and_need_the_secret() {
     assert!(net.devs[0].accept_claim(&ORG, &d3).is_err());
 }
 
+/// req: REQ-INV-002
+#[test]
+fn an_invite_admits_one_device_and_only_before_it_expires() {
+    let mut net = Net::org(1);
+    net.devs.push(client());
+    net.devs.push(client());
+    let (d1, d2) = (hex(&net.devs[1]), hex(&net.devs[2]));
+    // Two devices claim the same link while it is unused: both claims are valid.
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    for i in [1, 2] {
+        let claim = net.devs[i].claim_invite(&link).unwrap();
+        let events = net.send(i, vec![claim.frame]);
+        assert_eq!(claimed_by(&events, 0), Some(claim.code));
+    }
+    // Only the first one admitted gets in.
+    let frames = net.devs[0].accept_claim(&ORG, &d1).unwrap();
+    net.send(0, frames);
+    assert!(net.devs[1].is_member(&ORG));
+    let members = net.devs[0].group_members(&ORG).unwrap();
+    assert!(matches!(
+        net.devs[0].accept_claim(&ORG, &d2),
+        Err(ClientError::InvalidInvite(_))
+    ));
+    assert_eq!(net.devs[0].group_members(&ORG).unwrap(), members);
+    // A claim made in time but accepted after the invite expired is refused.
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    let claim = net.devs[2].claim_invite(&link).unwrap();
+    let events = net.send(2, vec![claim.frame]);
+    assert_eq!(claimed_by(&events, 0), Some(claim.code));
+    let token = Invite::parse(&link).unwrap().token;
+    for inv in &mut net.devs[0].orgs.0.get_mut(&*ORG).unwrap().invites {
+        if inv.token == token {
+            inv.expires_ms = 1;
+        }
+    }
+    assert!(matches!(
+        net.devs[0].accept_claim(&ORG, &d2),
+        Err(ClientError::InvalidInvite(_))
+    ));
+    assert!(!net.devs[0].group_members(&ORG).unwrap().contains(&d2));
+}
+
 /// req: REQ-INV-003
 #[test]
 fn a_rejected_claim_admits_nobody_and_the_invite_stays_valid() {
@@ -925,6 +967,28 @@ fn a_rejected_claim_admits_nobody_and_the_invite_stays_valid() {
     let frames = net.devs[0].accept_claim(&ORG, &d1).unwrap();
     net.send(0, frames);
     assert!(net.devs[1].is_member(&ORG));
+}
+
+/// req: REQ-INV-002
+#[test]
+fn a_replayed_older_certificate_does_not_take_admin_rights_away() {
+    let mut net = Net::org(2);
+    let d1 = hex(&net.devs[1]);
+    let member_chain = net.devs[1].membership_proof(&ORG);
+    let frames = net.devs[0].grant_admin(&ORG, &d1).unwrap();
+    net.send(0, frames);
+    assert!(net.devs[1].is_admin(&ORG));
+    let admin_chain = net.devs[1].membership_proof(&ORG);
+    // A relay (or anyone) replays the member certificate it saw earlier.
+    let replay = direct(&ORG, &d1, sync::outer_body(&Outer::Cert(member_chain)));
+    let events = net.send(0, vec![replay]);
+    assert!(
+        events
+            .iter()
+            .any(|(i, e)| *i == 1 && matches!(e, Event::Rejected { .. }))
+    );
+    assert!(net.devs[1].is_admin(&ORG));
+    assert_eq!(net.devs[1].membership_proof(&ORG), admin_chain);
 }
 
 /// req: REQ-INV-002

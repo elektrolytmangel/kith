@@ -88,6 +88,17 @@ pub struct KithClient {
     inner: Mutex<Client<DynStore>>,
 }
 
+impl KithClient {
+    /// The client. A panic in an earlier call (reported to Swift/Kotlin as an
+    /// error) does not disable the handle for good: the lock is taken anyway, and
+    /// the client's state is what that call had stored.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Client<DynStore>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[uniffi::export]
 impl KithClient {
     /// New client with a fresh device key and in-memory store.
@@ -139,12 +150,12 @@ impl KithClient {
     /// device becomes its first admin and keeps the root key. Others join with an
     /// invite (`createInvite`, then `RelaySession.claim` on the new device).
     pub fn create_org(&self) -> Result<String, KithError> {
-        Ok(self.inner.lock().unwrap().create_org()?)
+        Ok(self.lock().create_org()?)
     }
 
     /// True if this device may invite and admit devices to `org`.
     pub fn is_admin(&self, org: String) -> bool {
-        self.inner.lock().unwrap().is_admin(&org)
+        self.lock().is_admin(&org)
     }
 
     /// A one-time invite link to `org`, valid for `ttl_seconds`, telling the new
@@ -156,11 +167,9 @@ impl KithClient {
         relay: String,
         ttl_seconds: u64,
     ) -> Result<String, KithError> {
-        Ok(self.inner.lock().unwrap().create_invite(
-            &org,
-            &relay,
-            ttl_seconds.saturating_mul(1000),
-        )?)
+        Ok(self
+            .lock()
+            .create_invite(&org, &relay, ttl_seconds.saturating_mul(1000))?)
     }
 
     /// A one-time link to add another device of *this user* to `org`, valid for
@@ -173,21 +182,19 @@ impl KithClient {
         relay: String,
         ttl_seconds: u64,
     ) -> Result<String, KithError> {
-        Ok(self.inner.lock().unwrap().create_own_device_invite(
-            &org,
-            &relay,
-            ttl_seconds.saturating_mul(1000),
-        )?)
+        Ok(self
+            .lock()
+            .create_own_device_invite(&org, &relay, ttl_seconds.saturating_mul(1000))?)
     }
 
     /// True if this device is a member of `org`'s group (it can send and read).
     pub fn is_member(&self, org: String) -> bool {
-        self.inner.lock().unwrap().is_member(&org)
+        self.lock().is_member(&org)
     }
 
     /// Devices (hex IDs) in `org`'s group.
     pub fn group_members(&self, org: String) -> Result<Vec<String>, KithError> {
-        Ok(self.inner.lock().unwrap().group_members(&org)?)
+        Ok(self.lock().group_members(&org)?)
     }
 
     /// Restore a device from a backup made with `exportBackup` into a new SQLite
@@ -209,18 +216,18 @@ impl KithClient {
     /// A passphrase-encrypted backup of this device (identity, data, files,
     /// memberships). Anyone with it and the passphrase can act as this device.
     pub fn export_backup(&self, passphrase: String) -> Result<Vec<u8>, KithError> {
-        Ok(self.inner.lock().unwrap().export_backup(&passphrase)?)
+        Ok(self.lock().export_backup(&passphrase)?)
     }
 
     /// The 32-byte secret key of this device. Store it only in the platform's
     /// secure storage (Keychain, Android Keystore); anyone who has it can
     /// sign as this device.
     pub fn secret_key(&self) -> Vec<u8> {
-        self.inner.lock().unwrap().signer().secret_bytes().to_vec()
+        self.lock().signer().secret_bytes().to_vec()
     }
 
     pub fn device_id(&self) -> String {
-        self.inner.lock().unwrap().device_id().to_hex()
+        self.lock().device_id().to_hex()
     }
 
     pub fn create(&self, object_type: String, payload: Vec<u8>) -> Result<ChangeInfo, KithError> {
@@ -269,7 +276,7 @@ impl KithClient {
     /// Name, MIME type, size and missing chunk count of a file object.
     pub fn file_info(&self, object_id: String) -> Result<FileInfoRecord, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
-        let i = self.inner.lock().unwrap().file_info(&oid)?;
+        let i = self.lock().file_info(&oid)?;
         Ok(FileInfoRecord {
             name: i.name,
             mime: i.mime,
@@ -282,12 +289,12 @@ impl KithClient {
     /// The contents of a file whose chunks are all here (fetch it first).
     pub fn read_file(&self, object_id: String) -> Result<Vec<u8>, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
-        Ok(self.inner.lock().unwrap().read_file(&oid)?)
+        Ok(self.lock().read_file(&oid)?)
     }
 
     /// Fetch every new file's chunks as soon as it arrives (default: only on `fetchFile`).
     pub fn set_fetch_files(&self, eager: bool) {
-        self.inner.lock().unwrap().set_fetch_files(eager);
+        self.lock().set_fetch_files(eager);
     }
 
     /// Create an object in `scope`: an org ID (or `org/subgroup`) this device is a
@@ -310,19 +317,19 @@ impl KithClient {
 
     pub fn edit(&self, object_id: String, payload: Vec<u8>) -> Result<ChangeInfo, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
-        Ok(self.inner.lock().unwrap().edit(oid, payload)?.into())
+        Ok(self.lock().edit(oid, payload)?.into())
     }
 
     pub fn history(&self, object_id: String) -> Result<Vec<ChangeInfo>, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
-        let h = self.inner.lock().unwrap().history(&oid)?;
+        let h = self.lock().history(&oid)?;
         Ok(h.into_iter().map(Into::into).collect())
     }
 
     /// The objects this device knows, as their creation changes (object ID, type, author,
     /// creation time), oldest first. Pass an object type to list only those.
     pub fn objects(&self, object_type: Option<String>) -> Result<Vec<ChangeInfo>, KithError> {
-        let list = self.inner.lock().unwrap().objects(object_type.as_deref())?;
+        let list = self.lock().objects(object_type.as_deref())?;
         Ok(list.into_iter().map(Into::into).collect())
     }
 
@@ -361,7 +368,7 @@ impl KithClient {
     /// The merged state of a document as a JSON string (all devices' edits).
     pub fn document_json(&self, object_id: String) -> Result<String, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
-        Ok(self.inner.lock().unwrap().document_json(&oid)?)
+        Ok(self.lock().document_json(&oid)?)
     }
 }
 
@@ -547,7 +554,7 @@ impl KithClient {
 impl RelaySession {
     /// The first frame to send once the WebSocket is open.
     pub fn hello(&self) -> Result<Vec<u8>, KithError> {
-        let c = self.client.inner.lock().unwrap();
+        let c = self.client.lock();
         encode_frame(&kith_client::hello_frame(c.signer()))
     }
 
@@ -558,7 +565,7 @@ impl RelaySession {
     pub fn receive(&self, frame: Vec<u8>) -> Result<SessionOutput, KithError> {
         let frame =
             kith_protocol::decode(&frame).map_err(|e| KithError::Failed { msg: e.to_string() })?;
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         if let Some(replies) = c.handshake_reply(&self.org, &frame) {
             return Ok(SessionOutput {
                 replies: replies.iter().map(encode_frame).collect::<Result<_, _>>()?,
@@ -583,7 +590,7 @@ impl RelaySession {
     /// `delivered` list if nobody was online. Answers arrive through `receive`.
     /// Also covers the subgroups this device is in. Send all frames.
     pub fn catch_up(&self) -> Result<Vec<Vec<u8>>, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         c.sync_request_frames(&self.org)?
             .iter()
             .map(encode_frame)
@@ -599,7 +606,7 @@ impl RelaySession {
         name: String,
         members: Vec<String>,
     ) -> Result<Vec<Vec<u8>>, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         c.create_subgroup(&self.org, &name, &members)?
             .iter()
             .map(encode_frame)
@@ -612,7 +619,7 @@ impl RelaySession {
         name: String,
         members: Vec<String>,
     ) -> Result<Vec<Vec<u8>>, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         c.set_subgroup_members(&self.org, &name, &members)?
             .iter()
             .map(encode_frame)
@@ -630,14 +637,14 @@ impl RelaySession {
 
     /// Subgroups of this org this device can read.
     pub fn my_subgroups(&self) -> Vec<String> {
-        self.client.inner.lock().unwrap().my_subgroups(&self.org)
+        self.client.lock().my_subgroups(&self.org)
     }
 
     /// Frames that fetch the missing chunks of a file from a peer. `FileChunks`
     /// events report progress; `ready` lists files that are complete.
     pub fn fetch_file(&self, object_id: String) -> Result<Vec<Vec<u8>>, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         c.fetch_file_frames(&self.org, &oid)?
             .iter()
             .map(encode_frame)
@@ -647,7 +654,7 @@ impl RelaySession {
     /// Claim an invite link (on the new device; open this session for the link's
     /// org, see `parseInvite`). Send `frame`, show `code`, wait for `Joined`.
     pub fn claim(&self, link: String) -> Result<ClaimOutput, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         let claim = c.claim_invite(&link)?;
         if claim.org != self.org {
             return Err(KithError::Failed {
@@ -665,7 +672,7 @@ impl RelaySession {
 
     /// Admit the device of an `InviteClaimed` event. Send all returned frames, in order.
     pub fn accept_claim(&self, device: String) -> Result<Vec<Vec<u8>>, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         c.accept_claim(&self.org, &device)?
             .iter()
             .map(encode_frame)
@@ -684,7 +691,7 @@ impl RelaySession {
     /// Make a member an admin (only the org's creator can). Send the returned
     /// frames in order.
     pub fn grant_admin(&self, device: String) -> Result<Vec<Vec<u8>>, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         c.grant_admin(&self.org, &device)?
             .iter()
             .map(encode_frame)
@@ -694,7 +701,7 @@ impl RelaySession {
     /// Remove `device` (hex) from the org: out of the encrypted group and revoked
     /// in the policy (admins only). Send the returned frames in order.
     pub fn remove_member(&self, device: String) -> Result<Vec<Vec<u8>>, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         c.remove_member(&self.org, &device)?
             .iter()
             .map(encode_frame)
@@ -705,7 +712,7 @@ impl RelaySession {
     /// creator). Admins only. Send the returned frame.
     pub fn set_role(&self, device: String, role: String) -> Result<Vec<u8>, KithError> {
         let role = parse_role(&role)?;
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         let change = c.set_role(&self.org, &device, role)?;
         encode_frame(&c.broadcast_frame(&self.org, &change)?)
     }
@@ -714,14 +721,14 @@ impl RelaySession {
     /// `object_type`. Admins only. Send the returned frame.
     pub fn set_write_rule(&self, object_type: String, role: String) -> Result<Vec<u8>, KithError> {
         let role = parse_role(&role)?;
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         let change = c.set_write_rule(&self.org, &object_type, role)?;
         encode_frame(&c.broadcast_frame(&self.org, &change)?)
     }
 
     /// A device's role: `viewer`, `editor`, `admin`, or `nil`/`null` if revoked.
     pub fn role_of(&self, device: String) -> Result<Option<String>, KithError> {
-        let c = self.client.inner.lock().unwrap();
+        let c = self.client.lock();
         Ok(c.role_of(&self.org, &device)?
             .map(|r| r.as_str().to_string()))
     }
@@ -729,7 +736,7 @@ impl RelaySession {
     /// Rotate this device's group key (do it periodically, e.g. weekly). Send the
     /// returned frame.
     pub fn rotate_key(&self) -> Result<Vec<u8>, KithError> {
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         encode_frame(&c.rotate_key(&self.org)?)
     }
 
@@ -737,7 +744,7 @@ impl RelaySession {
     /// (as returned by `create`/`edit`), encrypted for the org's group.
     pub fn broadcast(&self, change_id: String) -> Result<Vec<u8>, KithError> {
         let id = kith_client::ChangeId::from_hex(&change_id)?;
-        let mut c = self.client.inner.lock().unwrap();
+        let mut c = self.client.lock();
         let change = c.store().get(&id)?.ok_or_else(|| KithError::Failed {
             msg: format!("unknown change {change_id}"),
         })?;

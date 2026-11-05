@@ -32,7 +32,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -382,7 +382,7 @@ pub fn parse_allowed_orgs(list: &str) -> Option<HashSet<String>> {
 /// org no longer on the list are removed from it and told (`org-not-allowed`); their
 /// connections stay open for their other orgs.
 pub fn set_allowed_orgs(state: &Shared, orgs: Option<HashSet<String>>) {
-    let mut r = state.lock().unwrap();
+    let mut r = state.lock().unwrap_or_else(PoisonError::into_inner);
     r.allowed_orgs = orgs;
     let Some(allowed) = r.allowed_orgs.clone() else {
         return;
@@ -434,7 +434,7 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> Response {
     let (open, limits, per_ip) = {
-        let r = state.lock().unwrap();
+        let r = state.lock().unwrap_or_else(PoisonError::into_inner);
         (r.open.clone(), r.limits.clone(), r.per_ip.clone())
     };
     let ip = peer.and_then(|Extension(ConnectInfo(addr))| {
@@ -442,7 +442,7 @@ async fn ws_handler(
     });
     let ip_guard = match ip {
         Some(ip) if limits.max_connections_per_ip > 0 => {
-            let mut m = per_ip.lock().unwrap();
+            let mut m = per_ip.lock().unwrap_or_else(PoisonError::into_inner);
             let n = m.entry(ip).or_default();
             if *n >= limits.max_connections_per_ip {
                 return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response();
@@ -493,7 +493,7 @@ struct IpGuard(Arc<Mutex<HashMap<IpAddr, usize>>>, IpAddr);
 
 impl Drop for IpGuard {
     fn drop(&mut self) {
-        let mut m = self.0.lock().unwrap();
+        let mut m = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(n) = m.get_mut(&self.1) {
             *n -= 1;
             if *n == 0 {
@@ -512,7 +512,7 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
     let mut refused = 0u32;
     let (tx, mut rx) = Tx::new(limits.max_queued_bytes);
     let (conn_id, auth_timeout) = {
-        let r = state.lock().unwrap();
+        let r = state.lock().unwrap_or_else(PoisonError::into_inner);
         (r.next_conn.fetch_add(1, Ordering::Relaxed), r.auth_timeout)
     };
     let mut session = Session::New;
@@ -624,7 +624,7 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
     let _ = tokio::time::timeout(write, socket.send(Message::Close(None))).await;
 
     if let Session::Authed(d) = session {
-        let mut r = state.lock().unwrap();
+        let mut r = state.lock().unwrap_or_else(PoisonError::into_inner);
         // A newer connection of the same device may have replaced this one; only
         // clean up if this connection still owns the device's slot.
         if r.conns.get(&d).is_some_and(|c| c.id == conn_id) {
@@ -735,7 +735,7 @@ fn check_frame(frame: Frame, session: Option<&Session>, device: Option<&str>) ->
 }
 
 fn handle(checked: Checked, session: &mut Session, conn_id: u64, tx: &Tx, state: &Shared) -> Flow {
-    let mut r = state.lock().unwrap();
+    let mut r = state.lock().unwrap_or_else(PoisonError::into_inner);
     // Handshake first: nothing else is accepted before the device is authenticated.
     match (&*session, checked) {
         (Session::New, Checked::Frame(Frame::Hello { version, device })) => {
@@ -1176,7 +1176,11 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
                 format!("announce {org} with a valid proof first"),
             ),
         ),
-        other => send(tx, error("unsupported", format!("{other:?}"))),
+        // Never echo the frame: it is the client's input, of any size.
+        _ => send(
+            tx,
+            error("unsupported", "frame type not accepted from clients".into()),
+        ),
     }
 }
 
