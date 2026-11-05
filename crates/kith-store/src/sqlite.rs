@@ -88,6 +88,8 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open (creating if needed) the database file at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        owner_only(path).map_err(|e| StoreError::Backend(format!("{}: {e}", path.display())))?;
         Self::init(Connection::open(path).map_err(backend)?)
     }
 
@@ -406,6 +408,46 @@ impl Store for SqliteStore {
     }
 }
 
+/// Create the database file readable by its owner only, and take group/other
+/// access away from an existing one and its WAL files (REQ-STORE-003). SQLite
+/// creates the WAL files with the database file's permissions. Other platforms
+/// keep their defaults (app sandboxes, Windows ACLs of the user's profile).
+#[cfg(unix)]
+fn owner_only(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if path.as_os_str().is_empty() || path == Path::new(":memory:") {
+        return Ok(());
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut p = path.as_os_str().to_owned();
+                p.push(suffix);
+                let Ok(meta) = std::fs::metadata(&p) else {
+                    continue;
+                };
+                let mode = meta.permissions().mode();
+                if mode & 0o077 != 0 {
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o700))?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(unix))]
+fn owner_only(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +471,32 @@ mod tests {
         let p = std::env::temp_dir().join(format!("kith-{name}-{}.db", ObjectId::random()));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// req: REQ-STORE-003
+    #[cfg(unix)]
+    #[test]
+    fn database_files_are_readable_by_the_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let path = temp_path("mode");
+        {
+            let mut s = SqliteStore::open(&path).unwrap();
+            s.put_meta("mls", b"state").unwrap();
+            assert_eq!(mode(&path), 0o600);
+            let mut wal = path.clone().into_os_string();
+            wal.push("-wal");
+            assert_eq!(mode(std::path::Path::new(&wal)), 0o600);
+        }
+        // A file left world-readable by an older version is tightened on open.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(SqliteStore::open(&path).unwrap());
+        assert_eq!(mode(&path), 0o600);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = path.clone().into_os_string();
+            p.push(suffix);
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     /// req: REQ-STORE-001

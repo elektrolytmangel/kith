@@ -4,12 +4,14 @@
 //!   the device ID and it signs every change.
 //! - [`group`]: MLS (RFC 9420) group encryption with OpenMLS, one group per
 //!   organization ([`Groups`]); see ADR 0004.
+//! - [`sealed`]: secrets the client keeps in its store, encrypted (ADR 0021).
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use kith_core::{DeviceId, Signer};
 
 pub mod files;
 pub mod group;
+pub mod sealed;
 
 pub use group::{
     Added, CommitInfo, CommitOutcome, Decrypted, Epoch, GroupError, Groups, WelcomeInfo,

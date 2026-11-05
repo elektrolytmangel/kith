@@ -27,5 +27,6 @@ COPY --chmod=0755 ${TARGETARCH}/kith-always-on /kith-always-on
 COPY --chown=65532:65532 data/ /data/
 ENV RUST_LOG=info
 VOLUME /data
-# Add arguments after the image name, e.g. `--join <invite link>` on the first run.
+# Add arguments after the image name, e.g. `--join -` on the first run (reads the
+# invite link from stdin; run with `-i`).
 ENTRYPOINT ["/kith-always-on", "--data", "/data"]

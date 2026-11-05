@@ -456,6 +456,52 @@ fn device_beyond_the_commit_log_is_readded_automatically() {
     assert_eq!(received_by(&events, 1), 1);
 }
 
+/// req: REQ-STORE-003
+#[test]
+fn stored_secrets_are_encrypted_with_the_device_key() {
+    let mut net = Net::org(2);
+    let copy = |from: &Client<MemoryStore>| {
+        let mut store = MemoryStore::new();
+        for meta in [MLS_STATE_KEY, ORGS_KEY] {
+            let v = from.store().get_meta(meta).unwrap().unwrap();
+            assert!(
+                v.starts_with(kith_crypto::sealed::SEALED_MAGIC),
+                "{meta} sealed"
+            );
+            assert!(
+                !v.windows(32).any(|w| w == ROOT_SECRET),
+                "no root key in {meta}"
+            );
+            store.put_meta(meta, &v).unwrap();
+        }
+        store
+    };
+    // Same device key: everything is back, including the root key.
+    let key = DeviceKey::from_secret_bytes(&net.devs[0].signer().secret_bytes());
+    let restarted = Client::new(key, copy(&net.devs[0])).unwrap();
+    assert!(restarted.is_admin(&ORG));
+    assert_eq!(restarted.orgs.0[&*ORG].root, Some(ROOT_SECRET));
+    // Another device key can't open the copy.
+    let err = Client::new(DeviceKey::generate(), copy(&net.devs[0])).err();
+    assert!(matches!(err, Some(ClientError::StoredState(_))), "{err:?}");
+    // Unencrypted state (an older version) is refused, not read.
+    let mut old = MemoryStore::new();
+    old.put_meta(ORGS_KEY, &net.devs[0].orgs.to_bytes())
+        .unwrap();
+    let err = Client::new(DeviceKey::generate(), old).err();
+    assert!(matches!(err, Some(ClientError::StoredState(_))), "{err:?}");
+    // A sealed value moved to the other slot does not open.
+    let mut swapped = MemoryStore::new();
+    let orgs = net.devs[1].store().get_meta(ORGS_KEY).unwrap().unwrap();
+    swapped.put_meta(MLS_STATE_KEY, &orgs).unwrap();
+    let key = DeviceKey::from_secret_bytes(&net.devs[1].signer().secret_bytes());
+    assert!(matches!(
+        Client::new(key, swapped).err(),
+        Some(ClientError::StoredState(_))
+    ));
+    net.create(1, b"still works");
+}
+
 /// req: REQ-ENC-001
 #[test]
 fn group_state_survives_a_restart() {
