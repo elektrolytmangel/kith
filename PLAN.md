@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-05 (Azure plan: step 2 done, `StateStore` + Azure Table)
+- **Last updated:** 2026-11-05 (Azure plan: steps 1, 2, 4, 5 done; 3 waits for the user, 6 next)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
   allowlist (#57). Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
 - **State of `main` (16e991b, #57 merged):** CI green on all 12 jobs on #57. Locally checked: fmt, clippy (incl. wasm32),
@@ -217,12 +217,12 @@ Apps runs the relay with min = max = 1 replica (it is one in-memory router).
    The `revocations` table is not built (step 3).
 3. [ ] **Revocation notices persisted** (amends ADR 0013 after the user confirms; new ADR 0014): load on start, write on
    accept; still verified on load. Closes the "restart forgets notices" gap in *Not usable yet*.
-4. [ ] **Bicep** in `deploy/azure/` (`main.bicep` + `main.bicepparam` example): Log Analytics, Container Apps
+4. [x] **Bicep** in `deploy/azure/` (PR `feat/azure-bicep`; lint + build verified locally with `az bicep`, never deployed; custom domain / managed certificate left out of the template because DNS validation must precede the binding: do it in the guide with `az containerapp hostname add/bind`) (`main.bicep` + `main.bicepparam` example): Log Analytics, Container Apps
    environment, the app (image `ghcr.io/elektrolytmangel/kith-relay:<version>`, port 8080, external ingress, min=max=1,
    env limits), Storage account (Table), **user-assigned managed identity** with role *Storage Table Data Contributor*
    (no storage keys in the app), managed certificate + custom domain optional, optional ingress IP restrictions. All
    names and the domain are parameters (the template repo is rebranded by `scripts/rename.py`).
-5. [ ] **CI:** `az bicep build` / `bicep lint` job on changes under `deploy/azure/` (path-filtered); a `what-if` stays a
+5. [x] **CI** (`.github/workflows/bicep.yml`): `az bicep build` / `bicep lint` job on changes under `deploy/azure/` (path-filtered); a `what-if` stays a
    manual step in the guide (needs credentials).
 6. [ ] **Docs:** `docs/guides/deployment-azure.md` (prerequisites, `az deployment group create`, approving an org,
    making the ghcr.io package public or adding registry credentials, costs); link from `deployment.md`.
@@ -387,3 +387,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-05**: User asked where to host the relay and how to limit it to approved orgs (no allowlist yet). User wants Azure Container Apps with Table/Blob state and Bicep; plan written (allowlist, StateStore, Bicep in `deploy/azure/`), awaiting go-ahead.
 - **2026-11-05**: Azure plan step 1 done: relay org allowlist `KITH_RELAY_ALLOWED_ORGS` (REQ-RELAY-008, #57). #56 merged. Plan refreshed; next: step 2 (`StateStore`, Azure Table).
 - **2026-11-05**: Azure plan step 2: `StateStore`, Azure Table allowlist with live reload and eviction, Azurite CI job (PR `feat/relay-state-store`). Next: step 4 (Bicep); step 3 waits for the user's OK on amending ADR 0013.
+- **2026-11-05**: #59 merged (StateStore). Bicep template + lint CI (PR `feat/azure-bicep`). Next: step 6 (Azure guide); step 3 waits for the user's OK.
