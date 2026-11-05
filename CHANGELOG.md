@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-11-05
+
+Web readiness, container images and format guards. Compatible with 0.1.0-alpha.2 (no format changes;
+the golden tests pin them). `KithClient.open` and `KithClient.restoreBackup` take an optional last
+argument `waitForLock`.
+
 ### Added
 - Web: one owner per IndexedDB database (exclusive Web Lock; `KithClient.open(db, key, waitForLock?)`,
   REQ-PLAT-006), automatic relay reconnect with `connected` / `reconnecting` events (REQ-PLAT-007),

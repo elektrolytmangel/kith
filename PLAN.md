@@ -5,8 +5,8 @@ next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
 - **Last updated:** 2026-11-04 (web readiness implemented, PR `feat/web-readiness`)
-- **Version:** `v0.1.0-alpha.2` released (tag by the user; #42 merged). `main` has REQ-ID-002 (own devices), container
-  images and format guards under *Unreleased* in the changelog, for the next alpha.
+- **Version:** `v0.1.0-alpha.2` released. Release PR for `0.1.0-alpha.3` (web readiness, containers, format guards,
+  own devices) is open: **the user tags `v0.1.0-alpha.3` after it is merged**; then makes the two ghcr.io packages public.
 - **State of `main` (b1acadd, #50 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
   workspace tests, wasm32 per crate, MSRV 1.91, npm smoke test against the real relay.
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
@@ -342,3 +342,4 @@ None.
 - **2026-11-04**: User decided: freeze point = first beta; push wake-ups unplanned. Web readiness list added (multi-tab safety first).
 - **2026-11-04**: Web readiness (PR `feat/web-readiness`): tab lock, reconnect, `kith-web.js`, `objects()`, browser tests in CI, Vite example, web production guide.
   Next: step 3 (Swift/Kotlin on devices; needs a macOS/Android runner or device), step 4 (gaps), step 6 docs for other platforms.
+- **2026-11-05**: Release PR `release/0.1.0-alpha.3` (version bump, changelog, doc links). Release dry run on the branch before merge.
