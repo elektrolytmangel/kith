@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-05 (relay-level revocation, PR `feat/relay-revocation`)
+- **Last updated:** 2026-11-05 (user question: deploying a relay for approved orgs only)
 - **Version:** `v0.1.0-alpha.2` released. Release PR for `0.1.0-alpha.3` (web readiness, containers, format guards,
   own devices) is open: **the user tags `v0.1.0-alpha.3` after it is merged**; then makes the two ghcr.io packages public.
 - **State of `main` (b1acadd, #50 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -190,7 +190,11 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-None.
+- **Relay only for approved orgs.** The relay has no org allowlist today: any org (any root key) can announce and
+  route, limited only by the abuse limits. Proposal: `KITH_RELAY_ALLOWED_ORGS` (comma-separated org IDs = root
+  public keys, hex) or a file; the relay refuses `announce` for other orgs (error `org-not-allowed`), including
+  pending devices. Org ID is already the root key, so no new crypto. Until then: restrict by network (VPN /
+  Tailscale / IP allowlist at the proxy). Needs the user's go-ahead (env var vs file, reload without restart?).
 
 ### Open issues
 
@@ -345,3 +349,4 @@ None.
   Next: step 3 (Swift/Kotlin on devices; needs a macOS/Android runner or device), step 4 (gaps), step 6 docs for other platforms.
 - **2026-11-05**: Release PR `release/0.1.0-alpha.3` (version bump, changelog, doc links). Release dry run on the branch before merge.
 - **2026-11-05**: Road step 4, first gap: relay-level revocation (PR `feat/relay-revocation`, ADR 0013). User chose RAM-only signed notices. Next: share notices with other admins / always-on, then resumable syncs (REQ-SYNC-005), compaction (REQ-DATA-005).
+- **2026-11-05**: User asked where to host the relay and how to limit it to approved orgs. Found: no org allowlist yet; proposal under *Open questions*.
