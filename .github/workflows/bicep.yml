@@ -1,0 +1,26 @@
+# Lints and builds the Azure Bicep template. Runs only when it changes.
+# A what-if against a real subscription is a manual step (docs/guides/deployment-azure.md).
+name: Bicep
+
+on:
+  pull_request:
+    paths: ["deploy/azure/**", ".github/workflows/bicep.yml"]
+  push:
+    branches: [main]
+    paths: ["deploy/azure/**", ".github/workflows/bicep.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bicep:
+    name: bicep lint + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The runner image ships the Azure CLI; it downloads Bicep on first use.
+      - run: az bicep install
+      - run: az bicep lint --file deploy/azure/main.bicep
+      - run: az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
+      - run: az bicep build-params --file deploy/azure/main.bicepparam --stdout > /dev/null
