@@ -48,8 +48,8 @@ expiring with an optional short code; no relay buffer.
   question (ADR index).
 - Revocation is not part of the certificate: a removed device keeps a valid chain
   for the relay (it can see metadata and connect) but cannot read anything, since
-  it was removed from the MLS group. A revocation list belongs in the policy object
-  (phase 6).
+  it was removed from the MLS group. Relay-level revocation: see
+  [ADR 0013](0013-relay-revocation.md).
 
 ## Alternatives considered
 

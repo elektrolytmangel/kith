@@ -31,7 +31,7 @@ mod sync;
 
 pub use files::{FILE_TYPE, FileInfo, FileRef};
 
-pub use kith_core::membership::{CertChain, Invite, MembershipCert};
+pub use kith_core::membership::{CertChain, Invite, MembershipCert, Revocation};
 pub use kith_core::policy::{POLICY_TYPE, Policy, PolicyOp, Role, policy_object_id};
 pub use org::ORGS_KEY;
 
@@ -46,6 +46,9 @@ use sync::Outer;
 /// dropped. Honest devices stay far below; it bounds what a misbehaving member can
 /// make others store.
 pub const MAX_QUARANTINE: usize = if cfg!(test) { 20 } else { 1000 };
+
+/// Meta key of the revocation notices this device signed.
+const REVOCATIONS_KEY: &str = "revocations";
 
 /// Key under which the MLS state is kept in the [`Store`] (`Store::put_meta`).
 pub const MLS_STATE_KEY: &str = "mls";
@@ -135,6 +138,7 @@ pub fn announce_frame(org: &str, proof: &str) -> Frame {
             org: org.into(),
             proof: proof.into(),
             always_on: false,
+            revoked: vec![],
         }],
     }
 }
@@ -410,6 +414,9 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     asked_author: std::collections::HashSet<ObjectId>,
     /// Certificates, root keys, issued invites.
     orgs: org::Orgs,
+    /// Revocation notices this device signed (REQ-INV-004); repeated on every
+    /// announce so a restarted relay learns them again.
+    revocations: Vec<Revocation>,
     /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
     /// (KeyPackage, invite token). RAM only: after a restart the device claims again.
     claims: std::collections::HashMap<(String, String), (Vec<u8>, [u8; 16])>,
@@ -429,6 +436,13 @@ impl<S: Store, K: Signer> Client<S, K> {
             Some(bytes) => Groups::from_bytes(&bytes)?,
             None => Groups::new(),
         };
+        let revocations = match store.get_meta(REVOCATIONS_KEY)? {
+            Some(bytes) => String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter_map(|l| Revocation::from_hex(l).ok())
+                .collect(),
+            None => vec![],
+        };
         let orgs = match store.get_meta(ORGS_KEY)? {
             Some(bytes) => org::Orgs::from_bytes(&bytes).map_err(GroupError::Corrupt)?,
             None => org::Orgs::default(),
@@ -446,6 +460,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             wanted_chunks: Default::default(),
             asked_author: Default::default(),
             orgs,
+            revocations,
             claims: Default::default(),
             policies: Default::default(),
             invalid: Default::default(),
@@ -995,6 +1010,12 @@ impl<S: Store, K: Signer> Client<S, K> {
                 org: org.into(),
                 proof: self.membership_proof(org),
                 always_on: self.always_on,
+                revoked: self
+                    .revocations
+                    .iter()
+                    .filter(|r| r.org.to_hex() == org)
+                    .map(Revocation::to_hex)
+                    .collect(),
             }],
         }
     }
@@ -1332,6 +1353,20 @@ impl<S: Store, K: Signer> Client<S, K> {
             .filter(|d| members.contains(d))
             .collect();
         let revocation = self.revoke(org, device)?;
+        // The relay hears of it too (REQ-INV-004): a signed notice, repeated on
+        // every announce, so it refuses the device and the ones it certified.
+        let chain = self
+            .chain(org)
+            .cloned()
+            .ok_or_else(|| ClientError::NotAdmin(org.into()))?;
+        self.revocations.push(Revocation::issue(
+            &self.key,
+            chain,
+            DeviceId::from_hex(org)?,
+            primary,
+            now_ms(),
+        ));
+        self.save_revocations()?;
         let mut frames = vec![];
         let mut gone = vec![primary];
         gone.extend(linked);
@@ -1344,7 +1379,13 @@ impl<S: Store, K: Signer> Client<S, K> {
             });
         }
         frames.push(self.broadcast_frame(org, &revocation)?);
+        frames.push(self.announce_frame(org));
         Ok(frames)
+    }
+
+    fn save_revocations(&mut self) -> Result<(), ClientError> {
+        let text: String = self.revocations.iter().map(|r| r.to_hex() + "\n").collect();
+        Ok(self.store.put_meta(REVOCATIONS_KEY, text.as_bytes())?)
     }
 
     /// Rotate this device's key in `org`'s group (MLS update, REQ-ENC-003): call

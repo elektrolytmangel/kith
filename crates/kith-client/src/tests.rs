@@ -1075,6 +1075,32 @@ fn write_rules_per_type_and_only_admins_change_the_policy() {
     );
 }
 
+/// req: REQ-INV-004
+#[test]
+fn removing_a_member_gives_the_relay_a_signed_notice_that_survives_restarts() {
+    let mut net = Net::org(3);
+    let d2 = hex(&net.devs[2]);
+    let frames = net.devs[0].remove_member(&ORG, &d2).unwrap();
+    let Some(Frame::Announce { orgs }) = frames.last() else {
+        panic!("remove_member ends with an announce carrying the notice");
+    };
+    assert_eq!(orgs[0].revoked.len(), 1);
+    let org_key = DeviceId::from_hex(&ORG).unwrap();
+    let rev = kith_core::membership::Revocation::from_hex(&orgs[0].revoked[0]).unwrap();
+    assert_eq!(rev.verify(&org_key), Ok(()));
+    assert_eq!(rev.device.to_hex(), d2);
+    // Later announces repeat it; devices that did not remove anyone send none.
+    assert_eq!(announced(&net.devs[0].announce_frame(&ORG)), 1);
+    assert_eq!(announced(&net.devs[1].announce_frame(&ORG)), 0);
+}
+
+fn announced(f: &Frame) -> usize {
+    match f {
+        Frame::Announce { orgs } => orgs[0].revoked.len(),
+        _ => panic!("not an announce"),
+    }
+}
+
 /// req: REQ-PERM-004
 /// req: REQ-INV-004
 #[test]

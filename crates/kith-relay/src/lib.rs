@@ -75,6 +75,18 @@ impl RoutingTable {
             .insert(org.into());
     }
 
+    /// Take `device` out of `org` only (it was revoked there). Its other orgs stay.
+    pub fn kick(&mut self, device: &str, org: &str) {
+        self.leave(device, org);
+        if let Some(orgs) = self.devices.get_mut(device) {
+            orgs.remove(org);
+            if orgs.is_empty() {
+                self.devices.remove(device);
+                self.always_on.remove(device);
+            }
+        }
+    }
+
     fn leave(&mut self, device: &str, org: &str) {
         for map in [&mut self.orgs, &mut self.admins, &mut self.pending] {
             if let Some(set) = map.get_mut(org) {
@@ -145,6 +157,18 @@ impl RoutingTable {
             }
         }
         self.always_on.remove(device);
+    }
+
+    /// Every device announced in `org`, members and pending ones, sorted.
+    pub fn devices_in(&self, org: &str) -> Vec<DeviceIdHex> {
+        let mut v: Vec<_> = [&self.orgs, &self.pending]
+            .into_iter()
+            .filter_map(|m| m.get(org))
+            .flatten()
+            .cloned()
+            .collect();
+        v.sort();
+        v
     }
 
     /// Online devices in an org, sorted.
@@ -248,6 +272,19 @@ mod tests {
         assert_eq!(t.role("org", "new"), Some(Role::Member));
         assert_eq!(t.online("org").len(), 3);
         assert_eq!(t.admins("other"), Route::Dropped);
+    }
+
+    /// req: REQ-INV-004
+    #[test]
+    fn kick_removes_a_device_from_one_org_only() {
+        let mut t = RoutingTable::new();
+        t.join("a", "org");
+        t.join("a", "other");
+        t.kick("a", "org");
+        assert_eq!(t.role("org", "a"), None);
+        assert_eq!(t.role("other", "a"), Some(Role::Member));
+        t.kick("a", "other");
+        assert!(t.devices.is_empty());
     }
 
     /// req: REQ-SYNC-001
