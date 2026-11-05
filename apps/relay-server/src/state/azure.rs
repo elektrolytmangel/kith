@@ -344,7 +344,10 @@ impl AzureTables {
         else {
             return Err("not a managed identity".into());
         };
-        if let Some((t, exp)) = cached.lock().unwrap().as_ref()
+        if let Some((t, exp)) = cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
             && SystemTime::now() + TOKEN_SLACK < *exp
         {
             return Ok(t.clone());
@@ -379,7 +382,9 @@ impl AzureTables {
             .map_or(SystemTime::now() + Duration::from_secs(600), |s| {
                 UNIX_EPOCH + Duration::from_secs(s)
             });
-        *cached.lock().unwrap() = Some((token.clone(), expires));
+        *cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((token.clone(), expires));
         Ok(token)
     }
 }

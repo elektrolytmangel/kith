@@ -1254,12 +1254,19 @@ impl<S: Store, K: Signer> Client<S, K> {
             .ok_or_else(|| {
                 ClientError::InvalidInvite("no pending claim from that device".into())
             })?;
-        let own = self
+        // One invite admits one device, and only until it expires: the claim was
+        // checked when it arrived, but the invite may have been used or expired since.
+        let invite = self
             .orgs
             .0
             .get(org)
             .and_then(|s| s.invites.iter().find(|i| i.token == token))
-            .is_some_and(|i| i.own_device == Some(self.device_id()));
+            .cloned()
+            .ok_or_else(|| ClientError::InvalidInvite("invite already used".into()))?;
+        if invite.is_expired(now_ms()) {
+            return Err(ClientError::InvalidInvite("invite expired".into()));
+        }
+        let own = invite.own_device == Some(self.device_id());
         if !own && !self.is_admin(org) {
             return Err(ClientError::NotAdmin(org.into()));
         }
@@ -1318,6 +1325,8 @@ impl<S: Store, K: Signer> Client<S, K> {
         if let Some(st) = self.orgs.0.get_mut(org) {
             st.invites.retain(|i| i.token != token);
         }
+        // Other devices' claims on the same invite can't be admitted any more.
+        self.claims.retain(|_, (_, t)| *t != token);
         self.save_orgs()?;
         let mut frames: Vec<Frame> = policy_frame.into_iter().collect();
         frames.push(Frame::Broadcast {
@@ -1360,6 +1369,22 @@ impl<S: Store, K: Signer> Client<S, K> {
     fn save_orgs(&mut self) -> Result<(), ClientError> {
         let sealed = sealed::seal(&self.storage_key, ORGS_KEY, &self.orgs.to_bytes());
         Ok(self.store.put_meta(ORGS_KEY, &sealed)?)
+    }
+
+    /// True if `chain` (as sent in an `Outer::Cert`) may replace our proof for
+    /// `org`: it makes us an admin where we were not, or its certificate is newer
+    /// than ours. A replayed older certificate can't take admin rights away.
+    fn is_newer_chain(&self, org: &str, chain: &str) -> bool {
+        let Some(current) = self.chain(org).and_then(|c| c.leaf()) else {
+            return true;
+        };
+        let Some(new) = CertChain::from_hex(chain)
+            .ok()
+            .and_then(|c| c.leaf().cloned())
+        else {
+            return true; // adopt_chain reports why it is invalid
+        };
+        (new.admin && !current.admin) || new.issued_ms > current.issued_ms
     }
 
     /// Store `chain` as our proof for `org` if it proves exactly that.
@@ -1929,6 +1954,9 @@ impl<S: Store, K: Signer> Client<S, K> {
                 self.claims
                     .insert((org.clone(), from.clone()), (key_package, token));
                 Ok(Handled::event(Event::InviteClaimed { org, from, code }))
+            }
+            Outer::Cert(chain) if !self.is_newer_chain(&org, &chain) => {
+                Ok(rejected("membership certificate: older than ours".into()))
             }
             Outer::Cert(chain) => match self.adopt_chain(&org, &chain) {
                 Ok(admin) => {

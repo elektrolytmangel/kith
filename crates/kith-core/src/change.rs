@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::{ChangeId, DeviceId, ObjectId, ObjectType, Scope};
@@ -102,7 +102,9 @@ pub fn verify_signature(
     signature: &[u8; 64],
 ) -> Result<(), ChangeError> {
     let key = VerifyingKey::from_bytes(signer.as_bytes()).map_err(|_| ChangeError::BadAuthorKey)?;
-    key.verify(msg, &Signature::from_bytes(signature))
+    // Strict: refuses small-order keys and non-canonical signatures, so a key that
+    // "signs" every message (e.g. the identity point) can't author anything.
+    key.verify_strict(msg, &Signature::from_bytes(signature))
         .map_err(|_| ChangeError::BadSignature)
 }
 
@@ -187,6 +189,24 @@ mod tests {
         assert_eq!(second.body.parents, vec![first.change_id]);
         assert_eq!(first.verify(), Ok(()));
         assert_eq!(second.verify(), Ok(()));
+    }
+
+    /// req: REQ-DATA-001
+    #[test]
+    fn a_small_order_key_signs_nothing() {
+        // The identity point as public key, with R = identity and S = 0, satisfies
+        // the plain Ed25519 equation for every message.
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&identity);
+        let weak = DeviceId(identity);
+        for msg in [&b"kith/change/v2"[..], b"anything"] {
+            assert_eq!(
+                verify_signature(&weak, msg, &sig),
+                Err(ChangeError::BadSignature)
+            );
+        }
     }
 
     /// req: REQ-DATA-001

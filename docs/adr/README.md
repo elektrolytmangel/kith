@@ -25,6 +25,7 @@ Open questions from the design doc that are waiting for an ADR:
 - [x] Relay resource limits: [ADR 0019](0019-relay-resource-limits.md)
 - [x] Checked Automerge changes: [ADR 0020](0020-checked-automerge-changes.md)
 - [x] Encrypted secrets in the store: [ADR 0021](0021-sealed-stored-secrets.md)
+- [x] Invite admission, certificate updates, secret hygiene: [ADR 0022](0022-admission-and-secret-hygiene.md)
 - [ ] Push token persistence (REQ-RELAY-007)
 - [x] Rule for changes concurrent with a revocation (REQ-PERM-004): [ADR 0006](0006-policy-object-roles-revocation.md)
 - [ ] Always-on client required or optional
