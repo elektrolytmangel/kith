@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-04 (web readiness implemented, PR `feat/web-readiness`)
+- **Last updated:** 2026-11-05 (relay-level revocation, PR `feat/relay-revocation`)
 - **Version:** `v0.1.0-alpha.2` released. Release PR for `0.1.0-alpha.3` (web readiness, containers, format guards,
   own devices) is open: **the user tags `v0.1.0-alpha.3` after it is merged**; then makes the two ghcr.io packages public.
 - **State of `main` (b1acadd, #50 merged):** CI green on all 11 jobs. Locally checked: fmt, clippy (incl. wasm32),
@@ -51,7 +51,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | A device added by the losing side of an MLS fork needs a new invite | Rare (two admins at once) | ADR 0004 |
 | A device added as a member's own device cannot add devices itself; subgroups list devices, not users | Link from the original device; admin lists linked devices | ADR 0011 |
 | Restoring a backup while the original device still runs makes them re-add each other | Restore only when the original is gone | ADR 0010 |
-| A removed device keeps a valid certificate for the relay (connects, sees metadata; cannot decrypt; its writes are revoked) | Relay-level revocation open | REQ-INV-004 |
+| A removed device is refused by the relay only while the relay remembers the signed notice (RAM). After a relay restart it can connect again until the issuing admin reconnects; other admins and the always-on client do not repeat notices yet | Share notices with other admins | ADR 0013 |
 | Subgroup membership changes need the subgroup's owner device online; ownership cannot move | ADR 0008 | REQ-PERM-003 |
 | Sync needs another member online | Run the always-on client (`kith-always-on`) | REQ-SYNC-006 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
@@ -89,7 +89,7 @@ Blockers, in suggested order:
    `main`), a stated semver policy, and the first non-alpha version number.
 3. [ ] **Run on real devices:** Swift/Kotlin live-sync glue against a relay (REQ-SYNC-004), the `partial` platform
    requirements (REQ-PLAT-002..005, REQ-RELAY-001).
-4. [ ] **Closing known gaps:** relay-level certificate revocation (REQ-INV-004), always-on client as the supported
+4. [~] **Closing known gaps:** [x] relay-level certificate revocation (REQ-INV-004, ADR 0013, PR `feat/relay-revocation`; notice sharing between admins open), always-on client as the supported
    way to sync offline devices (push wake-ups REQ-RELAY-007 later), resumable large syncs (REQ-SYNC-005),
    history compaction (REQ-DATA-005; the web store keeps all history in memory). Push wake-ups are unplanned.
 5. [x] **Containers for the relay and the always-on client** (#48; dry run of `release.yml` verified, both images built and smoke-tested) (replaces "publish packages"; user decision
@@ -206,6 +206,7 @@ None.
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Relay revocation: admin-signed notices, held in RAM only, repeated by the issuing admin on announce (not short-lived certificates, no on-disk list) | User choice (2026-11-05) | ADR 0013 |
 | Format freeze point = the first beta (`0.2.0-beta.1`, after the security review and device verification): from then on a release reads the previous release's data and speaks the previous protocol. Alphas may keep breaking | User decision (2026-11-04) | ADR 0012 |
 | Push wake-ups (REQ-RELAY-007) stay unplanned: only background apps need them | User decision (2026-11-04) | Road to a release |
 | CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. requirement edits run only `requirements.yml` | User request (2026-11-04) | `ci.yml` |
@@ -343,3 +344,4 @@ None.
 - **2026-11-04**: Web readiness (PR `feat/web-readiness`): tab lock, reconnect, `kith-web.js`, `objects()`, browser tests in CI, Vite example, web production guide.
   Next: step 3 (Swift/Kotlin on devices; needs a macOS/Android runner or device), step 4 (gaps), step 6 docs for other platforms.
 - **2026-11-05**: Release PR `release/0.1.0-alpha.3` (version bump, changelog, doc links). Release dry run on the branch before merge.
+- **2026-11-05**: Road step 4, first gap: relay-level revocation (PR `feat/relay-revocation`, ADR 0013). User chose RAM-only signed notices. Next: share notices with other admins / always-on, then resumable syncs (REQ-SYNC-005), compaction (REQ-DATA-005).

@@ -15,7 +15,7 @@
 //! and receive `direct` messages.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -33,7 +33,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use kith_core::membership::CertChain;
+use kith_core::membership::{CertChain, Revocation};
 use kith_core::{DeviceId, verify_signature};
 use kith_protocol::{Frame, PROTOCOL_VERSION, auth_message, decode, encode};
 use kith_relay::{Role, Route, RoutingTable};
@@ -157,7 +157,17 @@ pub struct Relay {
     limits: Limits,
     open: Arc<AtomicUsize>,
     org_buckets: HashMap<String, Bucket>,
+    /// Revoked devices per org (REQ-INV-004). RAM only; admins repeat them on announce.
+    revoked: HashMap<String, HashSet<String>>,
+    /// Certificate chains of announced devices: device -> org -> chain, so a
+    /// revocation also removes devices certified through the revoked one.
+    proofs: HashMap<String, HashMap<String, CertChain>>,
 }
+
+/// Revoked devices remembered per org at most (memory bound).
+const MAX_REVOKED_PER_ORG: usize = 10_000;
+/// Revocation notices read from one announce at most.
+const MAX_NOTICES_PER_ANNOUNCE: usize = 256;
 
 /// Shared relay state (routing table and live connections).
 pub type Shared = Arc<Mutex<Relay>>;
@@ -188,6 +198,8 @@ pub fn new_state_with(auth_timeout: Duration, limits: Limits) -> Shared {
         limits,
         open: Arc::new(AtomicUsize::new(0)),
         org_buckets: HashMap::new(),
+        revoked: HashMap::new(),
+        proofs: HashMap::new(),
     }))
 }
 
@@ -303,6 +315,7 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
         // clean up if this connection still owns the device's slot.
         if r.conns.get(&d).is_some_and(|c| c.id == conn_id) {
             r.table.disconnect(&d);
+            r.proofs.remove(&d);
             r.conns.remove(&d);
             tracing::debug!(device = %d, "disconnected");
         }
@@ -413,21 +426,86 @@ fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Sh
 
 /// The role a membership proof gives `device` in `org` (REQ-RELAY-004). An empty
 /// proof means "joining": pending.
-fn check_membership(org: &str, device: &str, proof: &str) -> Result<Role, &'static str> {
+fn check_membership(
+    org: &str,
+    device: &str,
+    proof: &str,
+    revoked: Option<&HashSet<String>>,
+) -> Result<(Role, Option<CertChain>), &'static str> {
     let org_key = DeviceId::from_hex(org).map_err(|_| "org ID must be the hex org root key")?;
     if proof.is_empty() {
-        return Ok(Role::Pending);
+        return Ok((Role::Pending, None));
     }
     let device = DeviceId::from_hex(device).map_err(|_| "bad device")?;
-    let proven = CertChain::from_hex(proof)
-        .map_err(|_| "malformed membership proof")?
+    let chain = CertChain::from_hex(proof).map_err(|_| "malformed membership proof")?;
+    let proven = chain
         .verify(&org_key, &device)
         .map_err(|_| "membership proof does not verify")?;
-    Ok(if proven.admin {
+    if revoked.is_some_and(|set| chain.touches(|d| set.contains(&d.to_hex()))) {
+        return Err("device was revoked");
+    }
+    let role = if proven.admin {
         Role::Admin
     } else {
         Role::Member
-    })
+    };
+    Ok((role, Some(chain)))
+}
+
+/// Verify and remember the revocation notices of an announce, then remove every
+/// online device of `org` they affect (the revoked ones and devices certified
+/// through them). Bad notices are ignored with an error to `tx`.
+fn apply_revocations(r: &mut Relay, org: &str, notices: &[String], tx: &Tx) {
+    let Ok(org_key) = DeviceId::from_hex(org) else {
+        return;
+    };
+    let mut added = false;
+    for n in notices.iter().take(MAX_NOTICES_PER_ANNOUNCE) {
+        let rev = match Revocation::from_hex(n).and_then(|rev| rev.verify(&org_key).map(|_| rev)) {
+            Ok(rev) => rev,
+            Err(e) => {
+                send(tx, error("bad-revocation", format!("{org}: {e}")));
+                continue;
+            }
+        };
+        let set = r.revoked.entry(org.to_string()).or_default();
+        if set.len() < MAX_REVOKED_PER_ORG || set.contains(&rev.device.to_hex()) {
+            added |= set.insert(rev.device.to_hex());
+        }
+    }
+    if !added {
+        return;
+    }
+    let set = r.revoked.get(org).cloned().unwrap_or_default();
+    let affected: Vec<String> = r
+        .table
+        .devices_in(org)
+        .into_iter()
+        .filter(|dev| {
+            set.contains(dev)
+                || r.proofs
+                    .get(dev)
+                    .and_then(|m| m.get(org))
+                    .is_some_and(|c| c.touches(|d| set.contains(&d.to_hex())))
+        })
+        .collect();
+    for dev in &affected {
+        r.table.kick(dev, org);
+        if let Some(m) = r.proofs.get_mut(dev) {
+            m.remove(org);
+        }
+        if let Some(conn) = r.conns.get(dev) {
+            send(
+                &conn.tx,
+                error("revoked", format!("{org}: device was removed")),
+            );
+        }
+    }
+    let online = r.table.online(org);
+    fan_out(r, &online, || Frame::Presence {
+        org: org.to_string(),
+        online: online.clone(),
+    });
 }
 
 /// Take one routed frame from `org`'s bucket.
@@ -465,13 +543,37 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
     match frame {
         Frame::Announce { orgs } => {
             for m in orgs {
-                let role = match check_membership(&m.org, d, &m.proof) {
-                    Ok(role) => role,
-                    Err(why) => {
-                        send(tx, error("bad-proof", format!("{}: {why}", m.org)));
-                        continue;
+                // Notices first: they may revoke this very device.
+                // (Pending devices, without a proof, do not feed the list.)
+                if !m.revoked.is_empty() && !m.proof.is_empty() {
+                    apply_revocations(r, &m.org, &m.revoked, tx);
+                }
+                let (role, chain) =
+                    match check_membership(&m.org, d, &m.proof, r.revoked.get(&m.org)) {
+                        Ok(x) => x,
+                        Err(why) => {
+                            let code = if why == "device was revoked" {
+                                "revoked"
+                            } else {
+                                "bad-proof"
+                            };
+                            send(tx, error(code, format!("{}: {why}", m.org)));
+                            continue;
+                        }
+                    };
+                match chain {
+                    Some(c) => {
+                        r.proofs
+                            .entry(d.to_string())
+                            .or_default()
+                            .insert(m.org.clone(), c);
                     }
-                };
+                    None => {
+                        if let Some(p) = r.proofs.get_mut(d) {
+                            p.remove(&m.org);
+                        }
+                    }
+                }
                 r.table.join_as(d, &m.org, role);
                 r.table
                     .set_always_on(d, m.always_on && role != Role::Pending);
@@ -630,6 +732,7 @@ mod tests {
                     org: org.into(),
                     proof,
                     always_on: false,
+                    revoked: vec![],
                 }],
             },
         )
@@ -641,6 +744,20 @@ mod tests {
         announce(ws, &org_id(root), proof(root, key, false)).await;
         // Our own join is announced to us as presence.
         assert!(matches!(next_frame(ws).await, Some(Frame::Presence { .. })));
+    }
+
+    /// Skip presence updates until the next error, and check its code.
+    async fn expect_error_after_presence(ws: &mut Ws, code: &str) {
+        loop {
+            match next_frame(ws).await {
+                Some(Frame::Presence { .. }) => continue,
+                other => return expect_error(other, code),
+            }
+        }
+    }
+
+    fn member_cert_hex(cert: &MembershipCert) -> String {
+        CertChain(vec![cert.clone()]).to_hex()
     }
 
     fn expect_error(f: Option<Frame>, code: &str) {
@@ -855,6 +972,111 @@ mod tests {
             send_frame(&mut ws, &f).await;
             expect_error(next_frame(&mut ws).await, "not-a-member");
         }
+    }
+
+    /// req: REQ-INV-004
+    #[tokio::test]
+    async fn a_signed_revocation_removes_the_device_and_keeps_it_out() {
+        use kith_core::membership::Revocation;
+        let url = start(Duration::from_secs(10)).await;
+        let (root, admin_key, member_key, own_key) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let (org, rid) = (org_id(&root), root.device_id());
+        let admin_chain = CertChain(vec![MembershipCert::issue(
+            &root,
+            rid,
+            admin_key.device_id(),
+            true,
+            1,
+        )]);
+        let member_cert = MembershipCert::issue(&root, rid, member_key.device_id(), false, 1);
+        // The member's own device is certified through the member.
+        let own_chain = CertChain(vec![
+            member_cert.clone(),
+            MembershipCert::issue_own(&member_key, rid, own_key.device_id(), 2),
+        ]);
+        let mut admin = login(&url, &admin_key).await;
+        join(&mut admin, &root, &admin_key).await;
+        let mut member = login(&url, &member_key).await;
+        join(&mut member, &root, &member_key).await;
+        assert!(matches!(
+            next_frame(&mut admin).await,
+            Some(Frame::Presence { .. })
+        ));
+        let mut own = login(&url, &own_key).await;
+        announce(&mut own, &org, own_chain.to_hex()).await;
+        assert!(matches!(
+            next_frame(&mut own).await,
+            Some(Frame::Presence { .. })
+        ));
+        assert!(matches!(
+            next_frame(&mut admin).await,
+            Some(Frame::Presence { .. })
+        ));
+        assert!(matches!(
+            next_frame(&mut member).await,
+            Some(Frame::Presence { .. })
+        ));
+
+        let announce_with = |notices: Vec<String>| Frame::Announce {
+            orgs: vec![Membership {
+                org: org.clone(),
+                proof: admin_chain.to_hex(),
+                always_on: false,
+                revoked: notices,
+            }],
+        };
+        // A notice from a plain member is refused and changes nothing.
+        let member_chain = CertChain(vec![member_cert.clone()]);
+        let forged = Revocation::issue(&member_key, member_chain, rid, admin_key.device_id(), 3);
+        send_frame(&mut admin, &announce_with(vec![forged.to_hex()])).await;
+        expect_error(next_frame(&mut admin).await, "bad-revocation");
+        // (The announce itself still goes through and refreshes presence.)
+        while !matches!(next_frame(&mut admin).await, Some(Frame::Presence { online, .. }) if online.len() == 3)
+        {
+        }
+
+        // The admin's notice removes the member and the device certified through it.
+        let notice = Revocation::issue(
+            &admin_key,
+            admin_chain.clone(),
+            rid,
+            member_key.device_id(),
+            4,
+        );
+        send_frame(&mut admin, &announce_with(vec![notice.to_hex()])).await;
+        expect_error_after_presence(&mut member, "revoked").await;
+        expect_error_after_presence(&mut own, "revoked").await;
+        loop {
+            match next_frame(&mut admin).await {
+                Some(Frame::Presence { online, .. }) if online.len() == 1 => break,
+                Some(Frame::Presence { .. }) => continue,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        // They are out of the org: nothing they send is routed.
+        send_frame(
+            &mut member,
+            &Frame::Broadcast {
+                org: org.clone(),
+                body: b"x".to_vec(),
+            },
+        )
+        .await;
+        expect_error_after_presence(&mut member, "not-a-member").await;
+        // Announcing again is refused, with or without the notice being repeated.
+        announce(&mut member, &org, member_cert_hex(&member_cert)).await;
+        expect_error_after_presence(&mut member, "revoked").await;
+        announce(&mut own, &org, own_chain.to_hex()).await;
+        expect_error_after_presence(&mut own, "revoked").await;
+        // A fresh device of the admin still joins.
+        let mut other = login(&url, &DeviceKey::generate()).await;
+        send_frame(&mut other, &announce_with(vec![])).await;
+        expect_error(next_frame(&mut other).await, "bad-proof");
     }
 
     /// req: REQ-ID-002

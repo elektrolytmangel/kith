@@ -12,8 +12,9 @@
 //!   The new device proves it knows the secret with [`Invite::claim_proof`] over
 //!   its MLS KeyPackage; both screens can show [`Invite::short_code`].
 //!
-//! Revocation is not expressed here (phase 6, policy object): a removed device
-//! keeps a valid certificate for the relay but cannot read anything (MLS).
+//! - **[`Revocation`]**: an admin-signed "device D was removed", which the relay
+//!   keeps in RAM and checks on `announce` (REQ-INV-004). Certificates themselves do
+//!   not expire.
 
 use sha2::{Digest, Sha256};
 
@@ -225,6 +226,127 @@ impl CertChain {
             .map(MembershipCert::decode)
             .collect::<Result<_, _>>()
             .map(Self)
+    }
+}
+
+// ---- revocation ----
+
+const REVOKE_DOMAIN: &[u8] = b"kith/revoke/v1\0";
+/// Encoded size of a revocation without its issuer chain.
+const REVOKE_LEN: usize = 32 * 3 + 8 + 64;
+
+/// "Device `device` is no longer a member of `org`", signed by an admin and
+/// checkable from the org ID alone (REQ-INV-004). The relay keeps these in RAM and
+/// refuses the device (and every device certified through it); admin and always-on
+/// clients hand them back after a relay restart. The policy object stays the source
+/// of truth for writes; this only closes the relay-level gap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Revocation {
+    /// The org (its root public key).
+    pub org: DeviceId,
+    /// The removed device.
+    pub device: DeviceId,
+    /// The admin device that signed.
+    pub issuer: DeviceId,
+    /// When it was signed (issuer's clock, informational).
+    pub issued_ms: u64,
+    /// Ed25519 signature by `issuer`.
+    pub signature: [u8; 64],
+    /// The issuer's membership chain, proving it is an admin.
+    pub chain: CertChain,
+}
+
+impl Revocation {
+    /// Sign a revocation of `device`. `chain` is the issuer's own admin chain.
+    pub fn issue(
+        issuer: &dyn Signer,
+        chain: CertChain,
+        org: DeviceId,
+        device: DeviceId,
+        issued_ms: u64,
+    ) -> Self {
+        let mut r = Self {
+            org,
+            device,
+            issuer: issuer.device_id(),
+            issued_ms,
+            signature: [0; 64],
+            chain,
+        };
+        r.signature = issuer.sign(&r.signed_bytes());
+        r
+    }
+
+    fn signed_bytes(&self) -> Vec<u8> {
+        let mut m = Vec::with_capacity(REVOKE_DOMAIN.len() + REVOKE_LEN);
+        m.extend_from_slice(REVOKE_DOMAIN);
+        m.extend_from_slice(&self.org.0);
+        m.extend_from_slice(&self.device.0);
+        m.extend_from_slice(&self.issuer.0);
+        m.extend_from_slice(&self.issued_ms.to_be_bytes());
+        m
+    }
+
+    /// Check the signature and that the issuer is an admin of `org`. No state needed.
+    pub fn verify(&self, org: &DeviceId) -> Result<(), MembershipError> {
+        if &self.org != org {
+            return Err(MembershipError::Invalid("revocation for another org"));
+        }
+        verify_signature(&self.issuer, &self.signed_bytes(), &self.signature)
+            .map_err(|_| MembershipError::BadSignature)?;
+        if !self.chain.verify(org, &self.issuer)?.admin {
+            return Err(MembershipError::Invalid(
+                "revocation issuer is not an admin",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Hex encoding (`Membership::revoked`).
+    pub fn to_hex(&self) -> String {
+        let mut b = Vec::with_capacity(REVOKE_LEN + CERT_LEN);
+        b.extend_from_slice(&self.org.0);
+        b.extend_from_slice(&self.device.0);
+        b.extend_from_slice(&self.issuer.0);
+        b.extend_from_slice(&self.issued_ms.to_be_bytes());
+        b.extend_from_slice(&self.signature);
+        for c in &self.chain.0 {
+            c.encode(&mut b);
+        }
+        hex::encode(b)
+    }
+
+    /// Parse [`Self::to_hex`].
+    pub fn from_hex(s: &str) -> Result<Self, MembershipError> {
+        let b = hex::decode(s).map_err(|_| MembershipError::Malformed("not hex"))?;
+        if b.len() < REVOKE_LEN + CERT_LEN
+            || !(b.len() - REVOKE_LEN).is_multiple_of(CERT_LEN)
+            || b.len() > REVOKE_LEN + 3 * CERT_LEN
+        {
+            return Err(MembershipError::Malformed("revocation length"));
+        }
+        let id = |r: std::ops::Range<usize>| DeviceId(b[r].try_into().expect("32 bytes"));
+        let chain = b[REVOKE_LEN..]
+            .chunks(CERT_LEN)
+            .map(MembershipCert::decode)
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            org: id(0..32),
+            device: id(32..64),
+            issuer: id(64..96),
+            issued_ms: u64::from_be_bytes(b[96..104].try_into().expect("8 bytes")),
+            signature: b[104..168].try_into().expect("64 bytes"),
+            chain: CertChain(chain),
+        })
+    }
+}
+
+impl CertChain {
+    /// True if any certificate in the chain is for a device in `revoked`: the device
+    /// itself, or a device through which it was certified (a removed member takes
+    /// its own devices with it).
+    pub fn touches(&self, revoked: impl Fn(&DeviceId) -> bool) -> bool {
+        self.0.iter().any(|c| revoked(&c.device))
     }
 }
 
@@ -441,6 +563,43 @@ mod tests {
 
     fn key() -> TestKey {
         TestKey(SigningKey::from_bytes(&crate::random_bytes()))
+    }
+
+    /// req: REQ-INV-004
+    #[test]
+    fn revocations_need_an_admin_and_round_trip() {
+        let (root, admin, member, gone) = (key(), key(), key(), key());
+        let org = root.device_id();
+        let admin_chain = CertChain(vec![MembershipCert::issue(
+            &root,
+            org,
+            admin.device_id(),
+            true,
+            1,
+        )]);
+        let r = Revocation::issue(&admin, admin_chain.clone(), org, gone.device_id(), 5);
+        assert_eq!(r.verify(&org), Ok(()));
+        assert_eq!(Revocation::from_hex(&r.to_hex()), Ok(r.clone()));
+        // Another org, a tampered target, a member as issuer, truncated data.
+        assert!(r.verify(&member.device_id()).is_err());
+        let mut forged = r.clone();
+        forged.device = member.device_id();
+        assert_eq!(forged.verify(&org), Err(MembershipError::BadSignature));
+        let member_chain = CertChain(vec![
+            admin_chain.0[0].clone(),
+            MembershipCert::issue(&admin, org, member.device_id(), false, 2),
+        ]);
+        let by_member = Revocation::issue(&member, member_chain, org, gone.device_id(), 5);
+        assert!(by_member.verify(&org).is_err());
+        assert!(Revocation::from_hex(&r.to_hex()[..100]).is_err());
+        // Own devices go with their member.
+        let own = CertChain(vec![
+            admin_chain.0[0].clone(),
+            MembershipCert::issue(&admin, org, member.device_id(), false, 2),
+            MembershipCert::issue_own(&member, org, gone.device_id(), 3),
+        ]);
+        assert!(own.touches(|d| d == &member.device_id()));
+        assert!(!own.touches(|d| d == &DeviceId([9; 32])));
     }
 
     /// req: REQ-RELAY-004

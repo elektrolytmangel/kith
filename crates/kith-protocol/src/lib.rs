@@ -122,6 +122,11 @@ pub struct Membership {
     /// (REQ-SYNC-006). Only honoured for certified members.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub always_on: bool,
+    /// Admin-signed revocation notices (`Revocation::to_hex`, REQ-INV-004). The relay
+    /// verifies and remembers them in RAM and refuses the revoked devices. Admins and
+    /// always-on clients repeat the ones they know on every announce.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<String>,
 }
 
 /// Encoding errors.

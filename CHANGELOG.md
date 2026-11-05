@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- Relay-level revocation (REQ-INV-004, [ADR 0013](docs/adr/0013-relay-revocation.md)): `remove_member` signs a
+  revocation notice that the relay verifies from the org ID, keeps in RAM and uses to drop the device (and its own
+  devices) and refuse it on `announce`. `Membership.revoked` in the protocol is optional, so older clients still work.
+
 ## [0.1.0-alpha.3] - 2026-11-05
 
 Web readiness, container images and format guards. Compatible with 0.1.0-alpha.2 (no format changes;
