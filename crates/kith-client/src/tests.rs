@@ -509,7 +509,11 @@ fn both_sides_receive_only_what_they_lack() {
     let f = net.devs[1].sync_request_frame(&ORG).unwrap();
     let events: Vec<Event> = net.send(1, vec![f]).into_iter().map(|(_, e)| e).collect();
     assert_eq!(net.ids(0), net.ids(1));
-    assert_eq!(net.ids(0).len(), 4, "3 notes + the policy genesis");
+    assert_eq!(
+        net.ids(0).len(),
+        5,
+        "3 notes + the policy genesis + member 1 named in the policy"
+    );
     // 0 answers the reconciliation; 1 learns it must send 1 and fetch 1.
     assert!(matches!(events[0], Event::SyncServed { .. }));
     assert!(matches!(
@@ -1811,4 +1815,94 @@ fn objects_lists_what_the_device_knows() {
         todo.body.object_id
     );
     assert!(c.objects(Some("nope")).unwrap().is_empty());
+}
+
+/// req: REQ-PERM-001
+#[test]
+fn the_root_holder_upgrades_an_older_policy_on_start() {
+    let mut net = Net::org(2);
+    let (d0, d1) = (net.devs[0].device_id(), net.devs[1].device_id());
+    // Rebuild device 0's store as an older version left it: a genesis signed by
+    // the device itself, and member 1 not named in the policy.
+    let old = std::mem::replace(&mut net.devs[0], client());
+    let key = DeviceKey::from_secret_bytes(&old.signer().secret_bytes());
+    let org_id = DeviceId::from_hex(&ORG).unwrap();
+    let root = DeviceKey::from_secret_bytes(&ROOT_SECRET);
+    let mut store = MemoryStore::new();
+    for meta in [MLS_STATE_KEY, ORGS_KEY] {
+        let v = old.store().get_meta(meta).unwrap().unwrap();
+        store.put_meta(meta, &v).unwrap();
+    }
+    let genesis = Change::sign(
+        UnsignedChange {
+            scope: Scope::org(&org_id),
+            object_id: policy_object_id(&org_id),
+            object_type: ObjectType::new(POLICY_TYPE),
+            parents: vec![],
+            timestamp_ms: 1,
+            payload: PolicyOp::Genesis {
+                admin: MembershipCert::issue(&root, org_id, d0, true, 1),
+            }
+            .encode(),
+        },
+        &key,
+    );
+    store.put(genesis).unwrap();
+    net.devs[0] = Client::new(key, store).unwrap();
+    let p = net.devs[0].policy(&ORG).unwrap();
+    assert_eq!(p.creator, Some(d0));
+    assert_eq!(p.role_of(&d1), Some(Role::Editor), "group member named");
+    assert!(net.devs[0].is_admin(&ORG));
+}
+
+/// req: REQ-PERM-002
+#[test]
+fn policy_changes_by_members_are_not_kept() {
+    let mut net = Net::org(2);
+    let org_id = DeviceId::from_hex(&ORG).unwrap();
+    let pid = policy_object_id(&org_id);
+    let sneaky = Change::sign(
+        UnsignedChange {
+            scope: Scope::org(&org_id),
+            object_id: pid,
+            object_type: ObjectType::new(POLICY_TYPE),
+            parents: net.devs[1].store().heads(&pid).unwrap(),
+            timestamp_ms: 1,
+            payload: PolicyOp::SetRule {
+                object_type: "note".into(),
+                write: Role::Viewer,
+            }
+            .encode(),
+        },
+        net.devs[1].signer(),
+    );
+    assert!(matches!(
+        net.devs[0].receive(sneaky.clone()),
+        Err(ClientError::Forbidden(_))
+    ));
+    assert!(
+        net.devs[0]
+            .store()
+            .get(&sneaky.change_id)
+            .unwrap()
+            .is_none()
+    );
+    // A key the policy does not name cannot write either.
+    let stranger = client();
+    let note = stranger.signer();
+    let c = Change::sign(
+        UnsignedChange {
+            scope: Scope::org(&org_id),
+            object_id: ObjectId::random(),
+            object_type: ObjectType::new("note"),
+            parents: vec![],
+            timestamp_ms: 1,
+            payload: b"x".to_vec(),
+        },
+        note,
+    );
+    assert!(matches!(
+        net.devs[0].receive(c),
+        Err(ClientError::Forbidden(_))
+    ));
 }

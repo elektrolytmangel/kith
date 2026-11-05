@@ -386,7 +386,9 @@ mod tests {
             _ => None,
         })
         .await;
-        assert_eq!(stored, 3, "2 changes + the policy genesis");
+        // 2 changes + the policy genesis, and the policy change naming b unless its
+        // broadcast arrived first.
+        assert!(matches!(stored, 3 | 4), "stored {stored}");
         assert_eq!(b.client().history(&oid).unwrap().len(), 2);
         a_task.abort();
     }

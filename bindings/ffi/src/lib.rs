@@ -973,11 +973,12 @@ mod tests {
         };
         assert_eq!(code, claim.code);
         let frames = sa.accept_claim(from).unwrap();
-        assert_eq!(frames.len(), 2, "commit + welcome");
+        assert_eq!(frames.len(), 3, "commit + welcome + b named in the policy");
         // The commit reaches b before it is a member; the Welcome then adds it.
         let _ = relay_to(a, sb, &frames[0]);
         let out = relay_to(a, sb, &frames[1]);
         assert!(matches!(out.event, Some(RelayEvent::Joined { .. })));
+        let _ = relay_to(a, sb, &frames[2]);
         assert!(b.is_member(org.clone()));
         assert_eq!(a.group_members(org).unwrap().len(), 2);
         assert_eq!(out.replies.len(), 2);
@@ -1119,16 +1120,17 @@ mod tests {
         assert!(
             matches!(
                 compared.event,
-                Some(RelayEvent::SyncCompared { wanting: 3, .. })
+                Some(RelayEvent::SyncCompared { wanting: 4, .. })
             ),
-            "2 notes + the policy genesis"
+            "2 notes + the policy genesis + b named in the policy (asked before it arrived)"
         );
         let asked = relay_to(&b, &sa, &compared.replies[0]);
         assert!(matches!(
             asked.event,
-            Some(RelayEvent::SyncReceived { requested: 3, .. })
+            Some(RelayEvent::SyncReceived { requested: 4, .. })
         ));
         let received = relay_to(&a, &sb, &asked.replies[0]);
+        // b already had the policy change naming it.
         assert!(matches!(
             received.event,
             Some(RelayEvent::SyncReceived { stored: 3, .. })

@@ -2,17 +2,21 @@
 //!
 //! Every org has one policy object (type [`POLICY_TYPE`], ID [`policy_object_id`]).
 //! Each of its changes carries one [`PolicyOp`]. [`Policy::fold`] turns the
-//! object's changes into the current [`Policy`] deterministically: changes are
-//! applied in causal order, concurrent ones by seniority (the org creator first,
-//! then admins in the order they became admins) and then change ID, and an op only
-//! counts if its author is an admin at that point. So every device that has the
-//! same policy changes reaches the same policy, whatever the arrival order.
+//! object's changes into the current [`Policy`] deterministically. The
+//! [`PolicyOp::Genesis`] signed by the org root key names the creator. The other
+//! changes are applied in causal order, concurrent ones by seniority (the creator
+//! first, then admins in the order they became admins) and then change ID, and an
+//! op only counts if its author is an admin at that point. So every device that
+//! has the same policy changes reaches the same policy, whatever the arrival order.
 //!
 //! Roles are fixed: [`Role::Viewer`] < [`Role::Editor`] < [`Role::Admin`]. Each
-//! object type has a minimum write role (default [`Role::Editor`]). Members not
-//! named in the policy are editors. Restricting a device (revoke or demote) keeps
-//! exactly the changes the admin had seen from it (the keep list); every other
-//! change by that device is judged by its new role ("revocation wins").
+//! object type has a minimum write role (default [`Role::Editor`]). Only devices
+//! the policy names (or links) have a role: admins name each device they admit.
+//! Restricting a device (revoke or demote) keeps exactly the changes the admin had
+//! seen from it (the keep list); every other change by that device is judged by its
+//! new role, and its policy changes the admin had not seen don't count ("revocation
+//! wins"). Only an admin at least as senior as the one who restricted a device may
+//! raise its role again.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -82,9 +86,11 @@ impl Role {
 /// One change of the policy object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolicyOp {
-    /// The first op: the org creator's root-signed admin certificate.
+    /// The first op: the org creator's root-signed admin certificate. The change
+    /// itself must be signed by the org root key (its author is the org ID), so no
+    /// other admin can write one. Without it no policy change counts.
     Genesis {
-        /// Root → creator admin certificate; its device must be the change's author.
+        /// Root → creator admin certificate; its device is the creator.
         admin: MembershipCert,
     },
     /// Give `device` a role. Making an admin needs the root-signed admin
@@ -124,8 +130,9 @@ pub enum PolicyOp {
         /// The new device.
         device: DeviceId,
     },
-    /// Revoke (`role: None`) or demote `device`. Its changes in `keep` (the ones the
-    /// admin had seen) stay valid; all others are judged by the new role.
+    /// Revoke (`role: None`) or demote `device` (`role` below its current one). Its
+    /// changes in `keep` (the ones the admin had seen) stay valid; all others are
+    /// judged by the new role.
     Restrict {
         /// The device.
         device: DeviceId,
@@ -330,12 +337,23 @@ impl PolicyOp {
     }
 }
 
+/// Is `cert` the root-signed admin certificate of `device` in `org`?
+fn root_admin(org: &DeviceId, cert: &MembershipCert, device: &DeviceId) -> bool {
+    cert.org == *org
+        && cert.issuer == *org
+        && cert.admin
+        && cert.device == *device
+        && crate::membership::CertChain(vec![cert.clone()])
+            .verify(org, device)
+            .is_ok()
+}
+
 /// The current permissions of an org.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Policy {
     /// The org creator (author of the accepted genesis), if known.
     pub creator: Option<DeviceId>,
-    /// Explicit roles; members not listed are editors.
+    /// Explicit roles. Devices neither listed nor linked have no role.
     pub roles: BTreeMap<DeviceId, Role>,
     /// Linked devices: device → the member device it was linked to (its user).
     pub links: BTreeMap<DeviceId, DeviceId>,
@@ -345,6 +363,9 @@ pub struct Policy {
     pub rules: BTreeMap<String, Role>,
     /// Changes kept valid by restrictions, per restricted device.
     pub kept: BTreeMap<DeviceId, HashSet<ChangeId>>,
+    /// Restricted devices → the admin who last restricted them. Only an admin at
+    /// least as senior may raise the device's role again.
+    pub restricted_by: BTreeMap<DeviceId, DeviceId>,
     /// Admins in the order they became admins (seniority; creator first).
     pub admin_order: Vec<DeviceId>,
     /// Subgroups: name → members.
@@ -367,10 +388,10 @@ impl Policy {
             return Some(*r);
         }
         // A linked device has its user's role, but is never made admin by the link.
-        match self.links.get(device) {
-            Some(primary) => self.role_of(primary).map(|r| r.min(Role::Editor)),
-            None => Some(Role::Editor),
-        }
+        self.links
+            .get(device)
+            .and_then(|primary| self.role_of(primary))
+            .map(|r| r.min(Role::Editor))
     }
 
     /// The devices linked to `device` (its user's other devices).
@@ -428,10 +449,62 @@ impl Policy {
         self.role_of(device) == Some(Role::Admin)
     }
 
+    /// May `author` raise the role of a device that `by` restricted?
+    fn may_override(&self, author: &DeviceId, by: &DeviceId) -> bool {
+        self.creator == Some(*author) || self.seniority(author) <= self.seniority(by)
+    }
+
     /// Compute the policy of `org` from its policy object's changes (any order).
     /// Changes that are not valid policy changes are ignored.
     pub fn fold(org: &DeviceId, changes: &[Change]) -> Policy {
+        // "Revocation wins": a restricted admin's policy changes that the
+        // restricting admin had not seen (concurrent ones, or ones built on old
+        // parents) don't count, even if the causal order applied them first. Fold
+        // again without them until nothing changes (the excluded set only grows).
+        let mut excluded = HashSet::new();
+        loop {
+            let p = Self::fold_excluding(org, changes, &excluded);
+            let late = p.unseen_ops_of_restricted(changes);
+            if late.is_empty() {
+                return p;
+            }
+            excluded.extend(late);
+        }
+    }
+
+    /// The creator named by `c`, if `c` is a genesis signed by the org root key.
+    fn root_genesis(org: &DeviceId, c: &Change) -> Option<DeviceId> {
+        if c.author != *org || !Self::in_policy_object(org, c) {
+            return None;
+        }
+        match PolicyOp::decode(&c.body.payload) {
+            Ok(PolicyOp::Genesis { admin }) if root_admin(org, &admin, &admin.device) => {
+                Some(admin.device)
+            }
+            _ => None,
+        }
+    }
+
+    fn in_policy_object(org: &DeviceId, c: &Change) -> bool {
+        c.body.object_type.as_str() == POLICY_TYPE
+            && c.body.object_id == policy_object_id(org)
+            && c.body.scope == crate::Scope::org(org)
+    }
+
+    fn fold_excluding(org: &DeviceId, changes: &[Change], excluded: &HashSet<ChangeId>) -> Policy {
         let mut p = Policy::default();
+        // The genesis is pinned: the root-signed one (lowest change ID if the root
+        // signed several). Every other genesis is ignored.
+        if let Some((g, creator)) = changes
+            .iter()
+            .filter_map(|c| Self::root_genesis(org, c).map(|d| (c.change_id, d)))
+            .min()
+        {
+            p.creator = Some(creator);
+            p.roles.insert(creator, Role::Admin);
+            p.admin_order.push(creator);
+            p.accepted.insert(g);
+        }
         let ids: HashSet<ChangeId> = changes.iter().map(|c| c.change_id).collect();
         // Kahn's algorithm over the parent links inside the policy object.
         let mut pending: Vec<&Change> = changes.iter().collect();
@@ -456,44 +529,70 @@ impl Policy {
                 .expect("non-empty");
             let c = pending.swap_remove(pick);
             done.insert(c.change_id);
-            if p.apply(org, c) {
+            if !excluded.contains(&c.change_id) && p.apply(org, c) {
                 p.accepted.insert(c.change_id);
             }
         }
         p
     }
 
+    /// Accepted policy changes by a device that an accepted `Restrict` took admin
+    /// rights from, which are neither ancestors nor descendants of that `Restrict`.
+    fn unseen_ops_of_restricted(&self, changes: &[Change]) -> HashSet<ChangeId> {
+        let parents: std::collections::HashMap<ChangeId, &[ChangeId]> = changes
+            .iter()
+            .map(|c| (c.change_id, c.body.parents.as_slice()))
+            .collect();
+        let ancestors = |start: ChangeId| {
+            let mut seen = HashSet::new();
+            let mut stack = vec![start];
+            while let Some(id) = stack.pop() {
+                for par in parents.get(&id).copied().unwrap_or_default() {
+                    if seen.insert(*par) {
+                        stack.push(*par);
+                    }
+                }
+            }
+            seen
+        };
+        let mut late = HashSet::new();
+        for r in changes
+            .iter()
+            .filter(|c| self.accepted.contains(&c.change_id))
+        {
+            let Ok(PolicyOp::Restrict { device, role, .. }) = PolicyOp::decode(&r.body.payload)
+            else {
+                continue;
+            };
+            if role == Some(Role::Admin) {
+                continue;
+            }
+            let seen = ancestors(r.change_id);
+            for o in changes {
+                if o.author == device
+                    && self.accepted.contains(&o.change_id)
+                    && !seen.contains(&o.change_id)
+                    && !ancestors(o.change_id).contains(&r.change_id)
+                {
+                    late.insert(o.change_id);
+                }
+            }
+        }
+        late
+    }
+
     /// Apply one policy change if it is valid at this point; returns whether it counted.
     fn apply(&mut self, org: &DeviceId, c: &Change) -> bool {
-        if c.body.object_type.as_str() != POLICY_TYPE
-            || c.body.object_id != policy_object_id(org)
-            || c.body.scope != crate::Scope::org(org)
-        {
+        if !Self::in_policy_object(org, c) {
             return false;
         }
         let Ok(op) = PolicyOp::decode(&c.body.payload) else {
             return false;
         };
         let author = c.author;
-        let root_admin = |cert: &MembershipCert, device: &DeviceId| {
-            cert.org == *org
-                && cert.issuer == *org
-                && cert.admin
-                && cert.device == *device
-                && crate::membership::CertChain(vec![cert.clone()])
-                    .verify(org, device)
-                    .is_ok()
-        };
         match op {
-            PolicyOp::Genesis { admin } => {
-                if self.creator.is_some() || !root_admin(&admin, &author) {
-                    return false;
-                }
-                self.creator = Some(author);
-                self.roles.insert(author, Role::Admin);
-                self.admin_order.push(author);
-                true
-            }
+            // The pinned genesis is applied before everything else (see `fold`).
+            PolicyOp::Genesis { .. } => false,
             _ if self.creator.is_none() => false,
             PolicyOp::LinkDevice { device } => {
                 // Any current member may link a device of its own. Not a device that
@@ -514,7 +613,7 @@ impl Policy {
             }
             _ if !self.is_admin(&author) => false,
             PolicyOp::SetRole { device, role, cert } => {
-                if role == Role::Admin && !cert.is_some_and(|c| root_admin(&c, &device)) {
+                if role == Role::Admin && !cert.is_some_and(|c| root_admin(org, &c, &device)) {
                     return false;
                 }
                 // Taking rights away goes through Restrict (it needs a keep list).
@@ -524,6 +623,15 @@ impl Policy {
                 if self.creator == Some(device) {
                     return false;
                 }
+                // Undoing a restriction: seniority wins, as for Restrict itself.
+                if self
+                    .restricted_by
+                    .get(&device)
+                    .is_some_and(|by| !self.may_override(&author, by))
+                {
+                    return false;
+                }
+                self.restricted_by.remove(&device);
                 self.revoked.remove(&device);
                 self.roles.insert(device, role);
                 if role == Role::Admin && !self.admin_order.contains(&device) {
@@ -553,15 +661,21 @@ impl Policy {
                 {
                     return false;
                 }
+                // Restrict only lowers a role; raising one goes through SetRole.
+                if let Some(r) = role
+                    && self.role_of(&device).is_none_or(|old| r >= old)
+                {
+                    return false;
+                }
                 match role {
                     None => {
                         self.revoked.insert(device);
                     }
                     Some(r) => {
-                        self.revoked.remove(&device);
                         self.roles.insert(device, r);
                     }
                 }
+                self.restricted_by.insert(device, author);
                 if role != Some(Role::Admin) {
                     self.admin_order.retain(|d| *d != device);
                 }
@@ -625,6 +739,19 @@ mod tests {
                 by,
             )
         }
+    }
+
+    /// `by` names `who` with `role` (as an admin does when admitting a device).
+    fn name(org: &Org, by: &K, parent: &Change, who: &K, role: Role) -> Change {
+        org.op(
+            by,
+            vec![parent.change_id],
+            PolicyOp::SetRole {
+                device: who.device_id(),
+                role,
+                cert: None,
+            },
+        )
     }
 
     fn data(by: &K, ty: &str) -> Change {
@@ -691,7 +818,7 @@ mod tests {
         let org = Org::new();
         let (creator, editor, viewer) = (key(), key(), key());
         let g = org.op(
-            &creator,
+            &org.root,
             vec![],
             PolicyOp::Genesis {
                 admin: org.admin_cert(&creator),
@@ -705,17 +832,31 @@ mod tests {
                 write: Role::Admin,
             },
         );
+        let ed = name(&org, &creator, &rule, &editor, Role::Editor);
+        let vw = name(&org, &creator, &ed, &viewer, Role::Editor);
         let demote = org.op(
             &creator,
-            vec![rule.change_id],
+            vec![vw.change_id],
             PolicyOp::Restrict {
                 device: viewer.device_id(),
                 role: Some(Role::Viewer),
                 keep: vec![],
             },
         );
-        let p = Policy::fold(&org.id, &[demote.clone(), g.clone(), rule.clone()]);
-        assert_eq!(p.accepted.len(), 3);
+        let p = Policy::fold(
+            &org.id,
+            &[
+                demote.clone(),
+                g.clone(),
+                vw.clone(),
+                rule.clone(),
+                ed.clone(),
+            ],
+        );
+        assert_eq!(p.accepted.len(), 5);
+        // Devices the policy does not name have no role.
+        assert_eq!(p.role_of(&key().device_id()), None);
+        assert!(!p.allows(&data(&key(), "note")));
         assert!(p.allows(&data(&editor, "note")));
         assert!(!p.allows(&data(&editor, "config")));
         assert!(p.allows(&data(&creator, "config")));
@@ -731,7 +872,14 @@ mod tests {
         );
         let p2 = Policy::fold(
             &org.id,
-            &[g.clone(), rule.clone(), demote.clone(), sneaky.clone()],
+            &[
+                g.clone(),
+                rule.clone(),
+                ed,
+                vw,
+                demote.clone(),
+                sneaky.clone(),
+            ],
         );
         assert!(!p2.accepted.contains(&sneaky.change_id));
         assert_eq!(p2.write_rule("note"), Role::Editor);
@@ -744,6 +892,24 @@ mod tests {
             },
         );
         assert!(Policy::fold(&org.id, &[fake]).creator.is_none());
+        // Nor does one with a root-signed admin certificate, unless the root signed
+        // the change itself.
+        let not_root = org.op(
+            &editor,
+            vec![],
+            PolicyOp::Genesis {
+                admin: org.admin_cert(&editor),
+            },
+        );
+        assert!(
+            Policy::fold(&org.id, std::slice::from_ref(&not_root))
+                .creator
+                .is_none()
+        );
+        assert_eq!(
+            Policy::fold(&org.id, &[g.clone(), not_root]).creator,
+            Some(creator.device_id())
+        );
     }
 
     /// req: REQ-PERM-004
@@ -754,7 +920,7 @@ mod tests {
         let seen = data(&bob, "note");
         let offline = data(&bob, "note");
         let g = org.op(
-            &creator,
+            &org.root,
             vec![],
             PolicyOp::Genesis {
                 admin: org.admin_cert(&creator),
@@ -782,7 +948,7 @@ mod tests {
         let org = Org::new();
         let (creator, a1, a2) = (key(), key(), key());
         let g = org.op(
-            &creator,
+            &org.root,
             vec![],
             PolicyOp::Genesis {
                 admin: org.admin_cert(&creator),
@@ -879,7 +1045,7 @@ mod tests {
         let org = Org::new();
         let (creator, alice, bob) = (key(), key(), key());
         let g = org.op(
-            &creator,
+            &org.root,
             vec![],
             PolicyOp::Genesis {
                 admin: org.admin_cert(&creator),
@@ -891,7 +1057,8 @@ mod tests {
             keep: vec![],
         };
         assert_eq!(PolicyOp::decode(&make.encode()).unwrap(), make);
-        let sg = org.op(&creator, vec![g.change_id], make);
+        let al = name(&org, &creator, &g, &alice, Role::Editor);
+        let sg = org.op(&creator, vec![al.change_id], make);
         let in_sub = |by: &K| {
             Change::sign(
                 UnsignedChange {
@@ -905,7 +1072,7 @@ mod tests {
                 by,
             )
         };
-        let p = Policy::fold(&org.id, &[g.clone(), sg.clone()]);
+        let p = Policy::fold(&org.id, &[g.clone(), al.clone(), sg.clone()]);
         assert_eq!(p.subgroup_owners.get("finance"), Some(&creator.device_id()));
         let by_alice = in_sub(&alice);
         assert!(p.allows(&by_alice));
@@ -920,7 +1087,7 @@ mod tests {
                 keep: vec![by_alice.change_id],
             },
         );
-        let p = Policy::fold(&org.id, &[g, sg, rm]);
+        let p = Policy::fold(&org.id, &[g, al, sg, rm]);
         assert!(p.allows(&by_alice));
         assert!(!p.allows(&in_sub(&alice)));
         assert_eq!(p.subgroup("finance").map(|m| m.len()), Some(1));
@@ -941,21 +1108,13 @@ mod tests {
         let org = Org::new();
         let (creator, alice, phone, bob, other) = (key(), key(), key(), key(), key());
         let g = org.op(
-            &creator,
+            &org.root,
             vec![],
             PolicyOp::Genesis {
                 admin: org.admin_cert(&creator),
             },
         );
-        let viewer = org.op(
-            &creator,
-            vec![g.change_id],
-            PolicyOp::Restrict {
-                device: alice.device_id(),
-                role: Some(Role::Viewer),
-                keep: vec![],
-            },
-        );
+        let viewer = name(&org, &creator, &g, &alice, Role::Viewer);
         // Alice (a viewer, not an admin) links her phone: same role.
         let link = org.op(
             &alice,
@@ -1036,5 +1195,273 @@ mod tests {
         assert!(p5.allows(&by_phone), "kept change of the linked device");
         assert!(!p5.allows(&data(&phone, "note")));
         assert!(PolicyOp::decode(&[1, 5, 1, 2]).is_err());
+    }
+
+    fn op_ts(org: &Org, by: &K, parents: Vec<ChangeId>, op: PolicyOp, ts: u64) -> Change {
+        Change::sign(
+            UnsignedChange {
+                scope: crate::Scope::org(&org.id),
+                object_id: policy_object_id(&org.id),
+                object_type: ObjectType::new(POLICY_TYPE),
+                parents,
+                timestamp_ms: ts,
+                payload: op.encode(),
+            },
+            by,
+        )
+    }
+
+    /// Creator, plus `admin` made an admin by the creator.
+    fn org_with_admin(org: &Org, creator: &K, admin: &K) -> (Change, Change) {
+        let g = org.op(
+            &org.root,
+            vec![],
+            PolicyOp::Genesis {
+                admin: org.admin_cert(creator),
+            },
+        );
+        let a = org.op(
+            creator,
+            vec![g.change_id],
+            PolicyOp::SetRole {
+                device: admin.device_id(),
+                role: Role::Admin,
+                cert: Some(org.admin_cert(admin)),
+            },
+        );
+        (g, a)
+    }
+
+    /// req: REQ-PERM-004
+    #[test]
+    fn only_the_root_signed_genesis_names_the_creator() {
+        let org = Org::new();
+        let (creator, x) = (key(), key());
+        let (g, add) = org_with_admin(&org, &creator, &x);
+        let rev = org.op(
+            &creator,
+            vec![add.change_id],
+            PolicyOp::Restrict {
+                device: x.device_id(),
+                role: None,
+                keep: vec![],
+            },
+        );
+        // x (root-certified admin, then revoked) tries rival genesis ops, including
+        // ones with a lower change ID than the real one.
+        let rivals: Vec<Change> = (0u64..)
+            .map(|ts| {
+                op_ts(
+                    &org,
+                    &x,
+                    vec![],
+                    PolicyOp::Genesis {
+                        admin: org.admin_cert(&x),
+                    },
+                    ts,
+                )
+            })
+            .filter(|c| c.change_id < g.change_id)
+            .take(2)
+            .collect();
+        let mut all = vec![g, add, rev];
+        all.extend(rivals.iter().cloned());
+        let p = Policy::fold(&org.id, &all);
+        assert_eq!(p.creator, Some(creator.device_id()));
+        assert_eq!(p.role_of(&creator.device_id()), Some(Role::Admin));
+        assert_eq!(p.role_of(&x.device_id()), None);
+        assert!(rivals.iter().all(|r| !p.accepted.contains(&r.change_id)));
+    }
+
+    /// req: REQ-PERM-002
+    #[test]
+    fn unnamed_devices_cannot_write_or_link_members() {
+        let org = Org::new();
+        let (creator, member, viewer, stranger) = (key(), key(), key(), key());
+        let g = org.op(
+            &org.root,
+            vec![],
+            PolicyOp::Genesis {
+                admin: org.admin_cert(&creator),
+            },
+        );
+        let m = name(&org, &creator, &g, &member, Role::Editor);
+        let v = name(&org, &creator, &m, &viewer, Role::Viewer);
+        let p = Policy::fold(&org.id, &[g.clone(), m.clone(), v.clone()]);
+        assert!(!p.allows(&data(&stranger, "note")), "unknown key");
+        assert!(p.allows(&data(&member, "note")));
+        // Linking a named member's device does not count, and neither does a
+        // stranger linking anything.
+        let link = org.op(
+            &viewer,
+            vec![v.change_id],
+            PolicyOp::LinkDevice {
+                device: member.device_id(),
+            },
+        );
+        let by_stranger = org.op(
+            &stranger,
+            vec![v.change_id],
+            PolicyOp::LinkDevice {
+                device: key().device_id(),
+            },
+        );
+        let p = Policy::fold(&org.id, &[g, m, v, link.clone(), by_stranger.clone()]);
+        assert!(!p.accepted.contains(&link.change_id));
+        assert!(!p.accepted.contains(&by_stranger.change_id));
+        assert_eq!(p.role_of(&member.device_id()), Some(Role::Editor));
+    }
+
+    /// req: REQ-PERM-004
+    #[test]
+    fn only_a_senior_admin_lifts_a_restriction() {
+        let org = Org::new();
+        let (creator, junior, bad) = (key(), key(), key());
+        let (g, j) = org_with_admin(&org, &creator, &junior);
+        let b = name(&org, &creator, &j, &bad, Role::Editor);
+        let r = org.op(
+            &creator,
+            vec![b.change_id],
+            PolicyOp::Restrict {
+                device: bad.device_id(),
+                role: None,
+                keep: vec![],
+            },
+        );
+        let base = vec![g, j, b, r.clone()];
+        // The junior admin can't undo the creator's revocation, by either op.
+        for op in [
+            PolicyOp::SetRole {
+                device: bad.device_id(),
+                role: Role::Editor,
+                cert: None,
+            },
+            PolicyOp::Restrict {
+                device: bad.device_id(),
+                role: Some(Role::Viewer),
+                keep: vec![],
+            },
+        ] {
+            let u = org.op(&junior, vec![r.change_id], op);
+            let mut all = base.clone();
+            all.push(u.clone());
+            let p = Policy::fold(&org.id, &all);
+            assert!(!p.accepted.contains(&u.change_id));
+            assert_eq!(p.role_of(&bad.device_id()), None);
+        }
+        // The creator can.
+        let u = name(&org, &creator, &r, &bad, Role::Editor);
+        let mut all = base;
+        all.push(u);
+        let p = Policy::fold(&org.id, &all);
+        assert_eq!(p.role_of(&bad.device_id()), Some(Role::Editor));
+        assert!(!p.restricted_by.contains_key(&bad.device_id()));
+    }
+
+    /// req: REQ-PERM-001
+    #[test]
+    fn restrict_never_raises_a_role() {
+        let org = Org::new();
+        let (creator, admin, member) = (key(), key(), key());
+        let (g, a) = org_with_admin(&org, &creator, &admin);
+        let m = name(&org, &creator, &a, &member, Role::Editor);
+        // An admin can't make an admin without the root's certificate by "restricting".
+        let up = org.op(
+            &admin,
+            vec![m.change_id],
+            PolicyOp::Restrict {
+                device: member.device_id(),
+                role: Some(Role::Admin),
+                keep: vec![],
+            },
+        );
+        let p = Policy::fold(&org.id, &[g, a, m, up.clone()]);
+        assert!(!p.accepted.contains(&up.change_id));
+        assert_eq!(p.role_of(&member.device_id()), Some(Role::Editor));
+    }
+
+    /// req: REQ-PERM-004
+    #[test]
+    fn a_revoked_admin_cannot_backdate_policy_changes() {
+        let org = Org::new();
+        let (creator, x, victim) = (key(), key(), key());
+        let (g, add) = org_with_admin(&org, &creator, &x);
+        let v = name(&org, &creator, &add, &victim, Role::Editor);
+        // The creator revokes x, having seen v.
+        let rev = org.op(
+            &creator,
+            vec![v.change_id],
+            PolicyOp::Restrict {
+                device: x.device_id(),
+                role: None,
+                keep: vec![],
+            },
+        );
+        // Later, x writes ops on the old parent v: they are concurrent with the
+        // revocation, and the creator never saw them.
+        let backdated = org.op(
+            &x,
+            vec![v.change_id],
+            PolicyOp::Restrict {
+                device: victim.device_id(),
+                role: None,
+                keep: vec![],
+            },
+        );
+        let rule = org.op(
+            &x,
+            vec![backdated.change_id],
+            PolicyOp::SetRule {
+                object_type: "note".into(),
+                write: Role::Admin,
+            },
+        );
+        let all = [g, add, v, rev.clone(), backdated.clone(), rule.clone()];
+        let p = Policy::fold(&org.id, &all);
+        assert!(p.accepted.contains(&rev.change_id));
+        assert!(!p.accepted.contains(&backdated.change_id));
+        assert!(!p.accepted.contains(&rule.change_id));
+        assert_eq!(p.role_of(&victim.device_id()), Some(Role::Editor));
+        assert_eq!(p.write_rule("note"), Role::Editor);
+        let mut rev_order = all.to_vec();
+        rev_order.reverse();
+        assert_eq!(Policy::fold(&org.id, &rev_order), p);
+    }
+
+    /// req: REQ-PERM-004
+    #[test]
+    fn an_admin_restored_by_the_creator_acts_again() {
+        let org = Org::new();
+        let (creator, x) = (key(), key());
+        let (g, add) = org_with_admin(&org, &creator, &x);
+        let rev = org.op(
+            &creator,
+            vec![add.change_id],
+            PolicyOp::Restrict {
+                device: x.device_id(),
+                role: None,
+                keep: vec![],
+            },
+        );
+        let back = org.op(
+            &creator,
+            vec![rev.change_id],
+            PolicyOp::SetRole {
+                device: x.device_id(),
+                role: Role::Admin,
+                cert: Some(org.admin_cert(&x)),
+            },
+        );
+        let rule = org.op(
+            &x,
+            vec![back.change_id],
+            PolicyOp::SetRule {
+                object_type: "note".into(),
+                write: Role::Viewer,
+            },
+        );
+        let p = Policy::fold(&org.id, &[g, add, rev, back, rule.clone()]);
+        assert!(p.accepted.contains(&rule.change_id), "built on the restore");
+        assert_eq!(p.write_rule("note"), Role::Viewer);
     }
 }
