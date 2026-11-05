@@ -4,6 +4,8 @@
 //! - `KITH_RELAY_ADDR`: listen address, default `0.0.0.0:8080`
 //! - `KITH_RELAY_AUTH_TIMEOUT_SECS`: seconds a connection has to authenticate, default `10`
 //! - abuse limits (REQ-RELAY-006), see [`Limits::from_env`]
+//! - `KITH_RELAY_ALLOWED_ORGS`: org IDs (hex root public keys, separated by commas or
+//!   whitespace) this relay serves (REQ-RELAY-008). Unset or empty: every org is served.
 //! - `RUST_LOG`: log filter, default `info`
 //!
 //! Connection: `hello` -> relay `challenge` -> `auth` (signature over
@@ -162,6 +164,8 @@ pub struct Relay {
     /// Certificate chains of announced devices: device -> org -> chain, so a
     /// revocation also removes devices certified through the revoked one.
     proofs: HashMap<String, HashMap<String, CertChain>>,
+    /// Orgs this relay serves (REQ-RELAY-008); `None` serves every org.
+    allowed_orgs: Option<HashSet<String>>,
 }
 
 /// Revoked devices remembered per org at most (memory bound).
@@ -200,7 +204,25 @@ pub fn new_state_with(auth_timeout: Duration, limits: Limits) -> Shared {
         org_buckets: HashMap::new(),
         revoked: HashMap::new(),
         proofs: HashMap::new(),
+        allowed_orgs: None,
     }))
+}
+
+/// Parse an org list as given in `KITH_RELAY_ALLOWED_ORGS`: org IDs separated by commas
+/// or whitespace, compared case-insensitively. No entries means no restriction (`None`).
+pub fn parse_allowed_orgs(list: &str) -> Option<HashSet<String>> {
+    let orgs: HashSet<String> = list
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    (!orgs.is_empty()).then_some(orgs)
+}
+
+/// Restrict the relay to `orgs` (`None` serves every org). It applies to announces made
+/// afterwards; devices already announced for a removed org stay until they reconnect.
+pub fn set_allowed_orgs(state: &Shared, orgs: Option<HashSet<String>>) {
+    state.lock().unwrap().allowed_orgs = orgs;
 }
 
 /// Counts an open connection for as long as it lives.
@@ -543,6 +565,18 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
     match frame {
         Frame::Announce { orgs } => {
             for m in orgs {
+                if let Some(allowed) = &r.allowed_orgs
+                    && !allowed.contains(&m.org.to_ascii_lowercase())
+                {
+                    send(
+                        tx,
+                        error(
+                            "org-not-allowed",
+                            format!("{}: this relay does not serve this organization", m.org),
+                        ),
+                    );
+                    continue;
+                }
                 // Notices first: they may revoke this very device.
                 // (Pending devices, without a proof, do not feed the list.)
                 if !m.revoked.is_empty() && !m.proof.is_empty() {
@@ -804,6 +838,51 @@ mod tests {
             }
             other => panic!("expected deliver, got {other:?}"),
         }
+    }
+
+    /// req: REQ-RELAY-008
+    #[tokio::test]
+    async fn only_allowed_orgs_are_served() {
+        let state = new_state(Duration::from_secs(10));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+        let served = state.clone();
+        tokio::spawn(async move { axum::serve(listener, app(served)).await.unwrap() });
+        let (ok_root, other_root) = (DeviceKey::generate(), DeviceKey::generate());
+        let (ka, kb) = (DeviceKey::generate(), DeviceKey::generate());
+        // Written in upper case: the list is case-insensitive.
+        let list = format!("  {}, bogus\n", org_id(&ok_root).to_ascii_uppercase());
+        set_allowed_orgs(&state, parse_allowed_orgs(&list));
+
+        let mut a = login(&url, &ka).await;
+        join(&mut a, &ok_root, &ka).await;
+
+        // A valid proof for another org is still refused, and the device cannot route there.
+        let mut b = login(&url, &kb).await;
+        announce(&mut b, &org_id(&other_root), proof(&other_root, &kb, true)).await;
+        expect_error(next_frame(&mut b).await, "org-not-allowed");
+        send_frame(
+            &mut b,
+            &Frame::Broadcast {
+                org: org_id(&other_root),
+                body: vec![1],
+            },
+        )
+        .await;
+        expect_error(next_frame(&mut b).await, "not-a-member");
+
+        // Lifting the restriction serves the org again.
+        set_allowed_orgs(&state, parse_allowed_orgs(""));
+        join(&mut b, &other_root, &kb).await;
+    }
+
+    #[test]
+    fn allowed_org_lists_parse() {
+        assert_eq!(parse_allowed_orgs(""), None);
+        assert_eq!(parse_allowed_orgs(" , \n"), None);
+        let set = parse_allowed_orgs("AB,cd ef\n12").unwrap();
+        assert_eq!(set.len(), 4);
+        assert!(set.contains("ab") && set.contains("12"));
     }
 
     /// req: REQ-RELAY-004

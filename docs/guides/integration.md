@@ -366,6 +366,7 @@ docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 80
 | `KITH_RELAY_MAX_CONNECTIONS` | `10000` | more are refused with HTTP 503 |
 | `KITH_RELAY_MAX_MESSAGE_BYTES` | `4194304` | larger WebSocket messages close the connection |
 | `KITH_RELAY_MAX_REFUSED` | `200` | refused frames in a row before the relay closes the connection |
+| `KITH_RELAY_ALLOWED_ORGS` | unset | org IDs (hex root public keys; commas or whitespace) the relay serves; any other org's `announce` gets `org-not-allowed`. Unset serves every org |
 | `RUST_LOG` | `info` | log filter |
 
 Devices authenticate by signing a challenge with their key (`hello` → `challenge` →
