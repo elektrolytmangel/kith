@@ -1906,3 +1906,122 @@ fn policy_changes_by_members_are_not_kept() {
         Err(ClientError::Forbidden(_))
     ));
 }
+
+// ---- Welcome checks (ADR 0016) ----
+
+fn welcome_to(
+    net: &mut Net,
+    victim: usize,
+    from: &str,
+    welcome: Vec<u8>,
+    chain: String,
+) -> Handled {
+    net.devs[victim]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from: from.into(),
+            body: sync::outer_body(&Outer::Welcome { welcome, chain }),
+        })
+        .unwrap()
+}
+
+/// req: REQ-ENC-001
+#[test]
+fn outsiders_cannot_ask_for_a_key_package() {
+    let mut net = Net::org(2);
+    let outsider = hex(&client());
+    let h = net.devs[1]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from: outsider,
+            body: sync::outer_body(&Outer::ReaddNeeded { group: ORG.clone() }),
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert!(h.replies.is_empty(), "no KeyPackage leaves");
+}
+
+/// req: REQ-ENC-001
+#[test]
+fn an_unrequested_welcome_does_not_replace_the_group() {
+    let mut net = Net::org(2);
+    let victim = 1;
+    let mut atk = client();
+    let atk_hex = hex(&atk);
+    atk.groups.create_group(&atk.key, &ORG).unwrap();
+    // Even with one of the victim's KeyPackages (however obtained).
+    let v = &mut net.devs[victim];
+    let kp = v.groups.key_package(&v.key).unwrap();
+    let added = atk.groups.add_member(&atk.key, &ORG, &kp).unwrap();
+    let before = net.devs[victim].group_members(&ORG).unwrap();
+    let h = welcome_to(&mut net, victim, &atk_hex, added.welcome, String::new());
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert_eq!(net.devs[victim].group_members(&ORG).unwrap(), before);
+    // The victim's next write stays unreadable for the attacker.
+    let c = net.devs[victim]
+        .create(ObjectType::new("note"), b"secret".to_vec())
+        .unwrap();
+    let Frame::Broadcast { body, .. } = net.devs[victim].broadcast_frame(&ORG, &c).unwrap() else {
+        panic!("broadcast expected")
+    };
+    let Ok(Outer::App(ct)) = sync::parse_outer(&body) else {
+        panic!("app message expected")
+    };
+    assert!(atk.groups.decrypt(&ORG, &ct).is_err());
+}
+
+/// req: REQ-ENC-004
+#[test]
+fn a_requested_welcome_must_not_add_outsiders() {
+    let mut net = Net::org(3);
+    let (victim, peer) = (1, 2);
+    let peer_hex = hex(&net.devs[peer]);
+    // The victim asks member 2 to re-add it (as after a lost fork)...
+    let frame = net.devs[victim]
+        .readd_request_frame(&ORG, &ORG, &peer_hex)
+        .unwrap();
+    let Frame::Direct { body, .. } = frame else {
+        panic!("direct expected")
+    };
+    let Ok(Outer::KeyPackage { key_package, .. }) = sync::parse_outer(&body) else {
+        panic!("KeyPackage expected")
+    };
+    // ...and member 2 answers with a group of its own that includes an outsider.
+    let mut outsider = client();
+    let outsider_kp = outsider.groups.key_package(&outsider.key).unwrap();
+    let mut rogue = Groups::new();
+    rogue.create_group(&net.devs[peer].key, &ORG).unwrap();
+    rogue
+        .add_member(&net.devs[peer].key, &ORG, &outsider_kp)
+        .unwrap();
+    let added = rogue
+        .add_member(&net.devs[peer].key, &ORG, &key_package)
+        .unwrap();
+    let before = net.devs[victim].group_members(&ORG).unwrap();
+    let h = welcome_to(&mut net, victim, &peer_hex, added.welcome, String::new());
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert_eq!(net.devs[victim].group_members(&ORG).unwrap(), before);
+}
+
+/// req: REQ-INV-002
+#[test]
+fn a_first_welcome_needs_the_adders_certificate() {
+    let mut net = Net::org(2);
+    let mut newbie = client();
+    let link = net.devs[0]
+        .create_invite(&ORG, "ws://relay/v1/ws", 60_000)
+        .unwrap();
+    let _claim = newbie.claim_invite(&link).unwrap();
+    // Member 1 (not the admin) adds the newcomer to a group it made, with a chain
+    // that does not prove the newcomer.
+    let kp = newbie.groups.key_package(&newbie.key).unwrap();
+    let mut rogue = Groups::new();
+    rogue.create_group(&net.devs[1].key, &ORG).unwrap();
+    let added = rogue.add_member(&net.devs[1].key, &ORG, &kp).unwrap();
+    let chain = net.devs[1].membership_proof(&ORG);
+    net.devs.push(newbie);
+    let from = hex(&net.devs[1]);
+    let h = welcome_to(&mut net, 2, &from, added.welcome, chain);
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert!(!net.devs[2].is_member(&ORG));
+}
