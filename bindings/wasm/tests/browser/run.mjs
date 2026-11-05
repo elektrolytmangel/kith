@@ -227,6 +227,13 @@ await test("two browsers sync through the relay and reconnect after a relay rest
     [invite],
   );
   await hasEvent(b, "joined");
+  // Broadcasts reach B once the relay has B's certificate (B re-announces after
+  // joining); presence then lists both. Earlier changes arrive through catch-up.
+  await b.waitForFunction(
+    () => window.t.events.some((e) => e.type === "presence" && e.online?.length === 2),
+    null,
+    { timeout: 20000 },
+  );
 
   // A live change reaches B.
   const obj = await a.evaluate(() => window.t.c.create("acme.note", new TextEncoder().encode("one")));
