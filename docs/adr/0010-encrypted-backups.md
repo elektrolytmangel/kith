@@ -27,7 +27,8 @@ phase 8. A device's state is its key, its changes and file chunks, its org state
   restoring.
 - The always-on client exports and restores data directories
   (`--export-backup`, `--restore-backup ... --relay URL`, passphrase in
-  `KITH_BACKUP_PASSPHRASE`). It holds everything, so its backup is the org's.
+  `KITH_BACKUP_PASSPHRASE_FILE`, or `KITH_BACKUP_PASSPHRASE`). It holds everything,
+  so its backup is the org's.
 
 ## Consequences
 

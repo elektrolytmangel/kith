@@ -30,7 +30,7 @@ services:
       - caddy-data:/data
 
   # Not started by default. First run (joins an org, needs an invite link):
-  #   docker compose run --rm always-on --join '<invite link>'
+  #   docker compose run --rm always-on --join -   (paste the link at the prompt)
   # Then keep it running:
   #   docker compose --profile always-on up -d
   always-on:

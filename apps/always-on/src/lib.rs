@@ -72,15 +72,32 @@ fn device_key(dir: &Path) -> Result<DeviceKey, Error> {
             .map_err(|_| Error::Config(format!("{} must hold 32 bytes", p.display())))?;
         return Ok(DeviceKey::from_secret_bytes(&seed));
     }
-    std::fs::create_dir_all(dir)?;
+    create_data_dir(dir)?;
     let key = DeviceKey::generate();
-    std::fs::write(&p, key.secret_bytes())?;
+    // Created with mode 0600 from the start (no window in which others can read it);
+    // `create_new` fails if another process wrote a key meanwhile: use that one.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(&p) {
+        Ok(mut f) => {
+            std::io::Write::write_all(&mut f, &key.secret_bytes())?;
+            f.sync_all()?;
+            Ok(key)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => device_key(dir),
+        Err(e) => Err(e.into()),
     }
-    Ok(key)
+}
+
+/// Create the data directory, accessible by its owner only (mode 0700 on Unix).
+fn create_data_dir(dir: &Path) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(dir)
 }
 
 fn open_client(dir: &Path) -> Result<Client<Store>, Error> {
@@ -209,9 +226,30 @@ async fn serve(
             _ = tick.tick() => live.catch_up().await?,
             ev = live.next_event() => match ev? {
                 None => return Ok(false),
-                Some(ev) => tracing::debug!(?ev, "event"),
+                Some(ev) => log_event(&ev),
             },
         }
+    }
+}
+
+/// Log an event without the data it carries: a received change is logged by ID,
+/// never with its (decrypted) payload.
+fn log_event(ev: &Event) {
+    match ev {
+        Event::Received {
+            org,
+            from,
+            change,
+            is_new,
+        } => tracing::debug!(
+            %org,
+            %from,
+            change = %change.change_id.to_hex(),
+            object = %change.body.object_id.to_hex(),
+            is_new,
+            "received a change"
+        ),
+        ev => tracing::debug!(?ev, "event"),
     }
 }
 
@@ -256,7 +294,7 @@ pub fn restore_backup(
             dir.display()
         )));
     }
-    std::fs::create_dir_all(dir)?;
+    create_data_dir(dir)?;
     let store = SqliteStore::open(path(dir, "kith.db"))?;
     let client = Client::import_backup(backup, passphrase, store)?;
     let org = client

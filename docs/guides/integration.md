@@ -330,7 +330,8 @@ catch up from it (REQ-SYNC-006):
 
 ```sh
 # First run: an admin creates an invite; compare the printed short code with the admin's screen.
-kith-always-on --data /var/lib/kith --join 'kith://invite/v1?...'
+# --join - reads the link from stdin (keeps it out of `ps` and the shell history).
+kith-always-on --data /var/lib/kith --join -
 # Later runs (e.g. as a systemd service):
 kith-always-on --data /var/lib/kith
 ```
@@ -338,9 +339,14 @@ kith-always-on --data /var/lib/kith
 It keeps its device key and all data in `--data`, announces itself as always-on so the
 relay hands it catch-up requests first, reconnects on its own, catches up every 10
 minutes (`--catch-up-secs`) and rotates its group key weekly (`--rotate-days`). It
-holds everything the org can read, so protect the data directory like the device key.
-Back it up with `KITH_BACKUP_PASSPHRASE=... kith-always-on --data DIR --export-backup FILE`
-and restore with `--restore-backup FILE --relay URL` into an empty directory.
+holds everything the org can read, so protect the data directory like the device key
+(it creates the directory and its key and database files readable by its user only,
+and logs received changes by ID, never their contents).
+Back it up with `KITH_BACKUP_PASSPHRASE_FILE=/run/secrets/backup kith-always-on --data DIR --export-backup FILE`
+and restore with `--restore-backup FILE --relay URL` into an empty directory. The
+passphrase file holds the passphrase (one trailing newline is ignored);
+`KITH_BACKUP_PASSPHRASE` still works but is visible to anyone who can inspect the
+process or container.
 Binaries are release assets (`kith-always-on-<target>.tar.gz`); in Rust, use the
 `kith_always_on` crate (`join`, `run`, `export_backup`, `restore_backup`).
 

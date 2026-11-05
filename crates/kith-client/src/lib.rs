@@ -39,6 +39,7 @@ pub use kith_merge::{Materialized, MergeError, Merger};
 pub use kith_store::{MemoryStore, Store, StoreError};
 
 use kith_crypto::CommitOutcome;
+use kith_crypto::sealed;
 use kith_protocol::Frame;
 use sync::Outer;
 
@@ -104,6 +105,13 @@ pub enum ClientError {
     /// A document's JSON or merge patch is invalid (not JSON, or not an object).
     #[error("invalid document: {0}")]
     InvalidDocument(String),
+    /// The secrets in the store can't be read with this device key (ADR 0021).
+    #[error("stored state: {0}")]
+    StoredState(String),
+}
+
+fn stored_state(e: kith_crypto::sealed::SealError) -> ClientError {
+    ClientError::StoredState(e.to_string())
 }
 
 /// Connection to the relay (or a direct peer). Implemented per platform:
@@ -393,6 +401,8 @@ fn direct(org: &str, to: &str, body: Vec<u8>) -> Frame {
 /// A device's view of the organizations it belongs to.
 pub struct Client<S: Store, K: Signer = DeviceKey> {
     key: K,
+    /// Seals the org and MLS state before they reach the store (ADR 0021).
+    storage_key: [u8; 32],
     store: S,
     groups: Groups,
     /// Per org: the epoch at which we last asked to be re-added after losing a
@@ -438,7 +448,16 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Create a client from a signer and a store. Loads the MLS group state from
     /// the store if there is one.
     pub fn new(key: K, store: S) -> Result<Self, ClientError> {
-        let groups = match store.get_meta(MLS_STATE_KEY)? {
+        let storage_key = sealed::storage_key(&key).map_err(stored_state)?;
+        let open = |name: &str| -> Result<Option<Vec<u8>>, ClientError> {
+            match store.get_meta(name)? {
+                Some(v) => Ok(Some(
+                    sealed::open(&storage_key, name, &v).map_err(stored_state)?,
+                )),
+                None => Ok(None),
+            }
+        };
+        let groups = match open(MLS_STATE_KEY)? {
             Some(bytes) => Groups::from_bytes(&bytes)?,
             None => Groups::new(),
         };
@@ -449,12 +468,13 @@ impl<S: Store, K: Signer> Client<S, K> {
                 .collect(),
             None => vec![],
         };
-        let orgs = match store.get_meta(ORGS_KEY)? {
+        let orgs = match open(ORGS_KEY)? {
             Some(bytes) => org::Orgs::from_bytes(&bytes).map_err(GroupError::Corrupt)?,
             None => org::Orgs::default(),
         };
         Self {
             key,
+            storage_key,
             store,
             groups,
             readd_asked: Default::default(),
@@ -1338,7 +1358,8 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 
     fn save_orgs(&mut self) -> Result<(), ClientError> {
-        Ok(self.store.put_meta(ORGS_KEY, &self.orgs.to_bytes())?)
+        let sealed = sealed::seal(&self.storage_key, ORGS_KEY, &self.orgs.to_bytes());
+        Ok(self.store.put_meta(ORGS_KEY, &sealed)?)
     }
 
     /// Store `chain` as our proof for `org` if it proves exactly that.
@@ -1723,9 +1744,8 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 
     fn save_groups(&mut self) -> Result<(), ClientError> {
-        Ok(self
-            .store
-            .put_meta(MLS_STATE_KEY, &self.groups.to_bytes())?)
+        let sealed = sealed::seal(&self.storage_key, MLS_STATE_KEY, &self.groups.to_bytes());
+        Ok(self.store.put_meta(MLS_STATE_KEY, &sealed)?)
     }
 
     /// Handle a frame from the relay: decrypt it, validate and store peers'

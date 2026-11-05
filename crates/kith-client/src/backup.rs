@@ -159,9 +159,15 @@ impl<S: Store> Client<S, DeviceKey> {
         if !r.0.is_empty() {
             return Err(ClientError::InvalidBackup("trailing bytes".into()));
         }
-        store.put_meta(ORGS_KEY, &orgs)?;
+        let key = DeviceKey::from_secret_bytes(&seed);
+        let storage_key = sealed::storage_key(&key).map_err(stored_state)?;
+        store.put_meta(ORGS_KEY, &sealed::seal(&storage_key, ORGS_KEY, &orgs))?;
         // No MLS state: the device gets fresh keys through a re-add.
-        store.put_meta(MLS_STATE_KEY, &Groups::new().to_bytes())?;
-        Client::new(DeviceKey::from_secret_bytes(&seed), store)
+        let groups = Groups::new().to_bytes();
+        store.put_meta(
+            MLS_STATE_KEY,
+            &sealed::seal(&storage_key, MLS_STATE_KEY, &groups),
+        )?;
+        Client::new(key, store)
     }
 }

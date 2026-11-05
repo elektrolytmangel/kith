@@ -22,6 +22,7 @@ version, a rule for changing it, and a test that fails when it changes by accide
 | Relay auth, invite claim/code, membership, policy, orgs, file chunk | domain tags `…/v1` | respective modules | unit tests |
 | MLS state in the store | `kith/mls-state/v2` | `kith-crypto/src/group.rs` | unit tests |
 | Backup file | magic `kith-backup/v1` | `kith-client/src/backup.rs` | unit tests |
+| Secrets in the store (org, MLS state) | magic `kith/sealed/v1` | `kith-crypto/src/sealed.rs` | unit tests |
 
 ## Decision
 

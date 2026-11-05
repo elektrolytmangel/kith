@@ -8,7 +8,8 @@
 //! later fails (quota, user clearing data) the error is logged to the console.
 //! Changes are append-only rows with auto-increment keys, so the load order
 //! is the arrival order. Named blobs (`Store::put_meta`, the MLS state) live in a
-//! second object store, `meta`, and are written through the same way.
+//! second object store, `meta`, and are written through the same way. The client
+//! encrypts the secret ones (org and MLS state) before they get here (ADR 0021).
 
 use js_sys::{Promise, Reflect, Uint8Array};
 use kith_client::{Change, ChangeId, MemoryStore, ObjectId, Scope, Store, StoreError};

@@ -56,10 +56,14 @@ around. It needs a volume for its key and data, and an invite link from an
 admin (create it in your app).
 
 ```sh
-# first run: joins the org, prints a short code to compare with the admin's screen
+# first run: paste the invite link at the prompt; it joins the org and prints a
+# short code to compare with the admin's screen
 docker run -it --name kith-always-on -v kith-always-on:/data \
-  ghcr.io/elektrolytmangel/kith-always-on:<version> --join '<invite link>'
+  ghcr.io/elektrolytmangel/kith-always-on:<version> --join -
 ```
+
+`--join -` reads the link from stdin, so it stays out of the process list and the
+shell history (the invite is a secret until it is used).
 
 The first run keeps running after it is admitted. Stop it with `docker stop`.
 Later starts need no arguments:
@@ -68,11 +72,12 @@ Later starts need no arguments:
 docker start kith-always-on
 ```
 
-Or with Compose: `docker compose -f deploy/docker-compose.yml run --rm always-on --join '<link>'`,
+Or with Compose: `docker compose -f deploy/docker-compose.yml run --rm always-on --join -`,
 then `docker compose -f deploy/docker-compose.yml --profile always-on up -d`.
 
 Lose the volume and the member is gone: back it up with `--export-backup`
-(`KITH_BACKUP_PASSPHRASE` set; see [integration.md](integration.md)) or re-invite.
+(passphrase in a file named by `KITH_BACKUP_PASSPHRASE_FILE`, e.g. a Docker secret;
+see [integration.md](integration.md)) or re-invite.
 
 ## Publishing the images (maintainers)
 

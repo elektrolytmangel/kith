@@ -54,7 +54,9 @@ function request(req) {
  * The 32-byte device secret key of `name`, created on first use with `generate`
  * (pass `generateSecretKey` from the bindings) and kept in IndexedDB *encrypted* with
  * a non-extractable AES-GCM `CryptoKey`. A copy of the IndexedDB files, a backup of the
- * browser profile or a stray dump then contains no usable device key. It does not
+ * browser profile or a stray dump then contains no usable device key. The client
+ * encrypts the secrets in its data database (org root key, group keys) with a key
+ * derived from the device key, so those are not usable from such a copy either. It does not
  * protect against script running in your page (XSS can ask for the key as the app
  * does): keep a strict Content-Security-Policy.
  *

@@ -77,3 +77,12 @@ through `KithClient.open`. The web package uses IndexedDB
 
 Storage must sit behind a trait so platforms (e.g. IndexedDB on web) and apps
 can provide their own backend.
+
+### REQ-STORE-003: Stored secrets are encrypted
+
+- **Priority:** must | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** ADR-0021
+
+Secrets the client keeps in its store (the org state, which can hold the org root
+key, and the MLS group state) must be encrypted with a key only the device key can
+produce, so a copy of the store alone reveals no key. Files the native store creates
+must be readable by their owner only.
