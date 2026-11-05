@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use kith_relay_server::{
     Limits, app, new_state_with, parse_allowed_orgs,
-    state::{StateStore, StaticState, refresh_allowlist, spawn_allowlist_refresh},
+    state::{
+        StateStore, StaticState, load_revocations, refresh_allowlist, spawn_allowlist_refresh,
+        spawn_revocation_writer,
+    },
 };
 
 #[tokio::main]
@@ -27,6 +30,27 @@ async fn main() {
     if let Err(e) = refresh_allowlist(&state, store.as_ref()).await {
         tracing::error!(error = %e, "cannot read the allowed organizations");
         std::process::exit(1);
+    }
+    if std::env::var("KITH_RELAY_PERSIST_REVOCATIONS")
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+    {
+        if !store.keeps_revocations() {
+            tracing::error!(
+                "KITH_RELAY_PERSIST_REVOCATIONS needs the Azure Table state (KITH_RELAY_AZURE_STORAGE_*)"
+            );
+            std::process::exit(1);
+        }
+        match store.revocations().await {
+            Ok(records) => {
+                let n = load_revocations(&state, &records);
+                tracing::info!(revoked = n, "loaded stored revocation notices");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "cannot read the stored revocation notices");
+                std::process::exit(1);
+            }
+        }
+        spawn_revocation_writer(&state, store.clone());
     }
     let refresh = std::env::var("KITH_RELAY_ALLOWLIST_REFRESH_SECS")
         .ok()

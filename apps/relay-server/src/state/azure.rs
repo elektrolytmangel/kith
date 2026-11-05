@@ -20,7 +20,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-use super::{BoxFuture, StateStore};
+use super::{BoxFuture, RevocationRecord, StateStore};
 
 const API_VERSION: &str = "2020-12-06";
 const PARTITION: &str = "org";
@@ -47,6 +47,8 @@ pub struct AzureTables {
     account: String,
     auth: Auth,
     table: String,
+    /// Table for revocation notices (ADR 0014).
+    revocations_table: String,
 }
 
 impl AzureTables {
@@ -54,8 +56,11 @@ impl AzureTables {
     pub fn from_env() -> Result<Option<Self>, String> {
         let table = std::env::var("KITH_RELAY_AZURE_ALLOWED_ORGS_TABLE")
             .unwrap_or_else(|_| "allowedorgs".into());
+        let revocations = std::env::var("KITH_RELAY_AZURE_REVOCATIONS_TABLE")
+            .unwrap_or_else(|_| "revocations".into());
         if let Ok(cs) = std::env::var("KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING") {
-            return Self::from_connection_string(&cs, &table).map(Some);
+            return Self::from_connection_string(&cs, &table)
+                .map(|t| Some(t.with_revocations_table(&revocations)));
         }
         let Ok(account) = std::env::var("KITH_RELAY_AZURE_STORAGE_ACCOUNT") else {
             return Ok(None);
@@ -77,6 +82,7 @@ impl AzureTables {
                 cached: Mutex::new(None),
             },
             table,
+            revocations_table: revocations,
         }))
     }
 
@@ -108,12 +114,24 @@ impl AzureTables {
             account,
             auth: Auth::Key(key),
             table: table.to_string(),
+            revocations_table: "revocations".to_string(),
         })
+    }
+
+    /// Use another table name for revocation notices.
+    pub fn with_revocations_table(mut self, name: &str) -> Self {
+        self.revocations_table = name.to_string();
+        self
     }
 
     /// Create the table if it does not exist (Bicep creates it in Azure; this is for Azurite).
     pub async fn ensure_table(&self) -> Result<(), String> {
-        let body = serde_json::json!({ "TableName": self.table });
+        self.create_table(&self.table).await?;
+        self.create_table(&self.revocations_table).await
+    }
+
+    async fn create_table(&self, name: &str) -> Result<(), String> {
+        let body = serde_json::json!({ "TableName": name });
         let url = format!("{}/Tables", self.endpoint);
         let resp = self
             .request(self.http.post(&url).json(&body))
@@ -178,15 +196,73 @@ impl AzureTables {
 
     /// Every approved org (follows continuation tokens).
     pub async fn list(&self) -> Result<HashSet<String>, String> {
-        let mut orgs = HashSet::new();
+        let rows = self.query(&self.table, "RowKey").await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r["RowKey"].as_str())
+            .map(str::to_ascii_lowercase)
+            .collect())
+    }
+
+    /// The stored revocation notices.
+    pub async fn list_revocations(&self) -> Result<Vec<RevocationRecord>, String> {
+        let rows = self.query(&self.revocations_table, "RowKey,Notice").await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(RevocationRecord {
+                    org: r["PartitionKey"].as_str()?.to_string(),
+                    device: r["RowKey"].as_str()?.to_string(),
+                    notice: r["Notice"].as_str()?.to_string(),
+                })
+            })
+            .collect())
+    }
+
+    /// Store a revocation notice, replacing an earlier one for the same device.
+    pub async fn put_revocation(&self, rec: &RevocationRecord) -> Result<(), String> {
+        let (org, device) = (
+            rec.org.to_ascii_lowercase(),
+            rec.device.to_ascii_lowercase(),
+        );
+        let url = format!(
+            "{}/{}(PartitionKey='{}',RowKey='{}')",
+            self.endpoint,
+            self.revocations_table,
+            org.replace('\'', "''"),
+            device.replace('\'', "''")
+        );
+        let body =
+            serde_json::json!({ "PartitionKey": org, "RowKey": device, "Notice": rec.notice });
+        let resp = self
+            .request(self.http.put(&url).json(&body))
+            .await?
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        match resp.status().as_u16() {
+            200..=299 => Ok(()),
+            s => Err(format!(
+                "store revocation: HTTP {s}: {}",
+                resp.text().await.unwrap_or_default()
+            )),
+        }
+    }
+
+    /// All rows of `table` (follows continuation tokens). The allowed-orgs table is filtered to
+    /// its partition; the revocations table has one partition per org, so it is read whole.
+    async fn query(&self, table: &str, select: &str) -> Result<Vec<serde_json::Value>, String> {
+        let mut rows = Vec::new();
         let mut next: Option<(String, String)> = None;
         loop {
-            let mut url = reqwest::Url::parse(&format!("{}/{}()", self.endpoint, self.table))
+            let mut url = reqwest::Url::parse(&format!("{}/{table}()", self.endpoint))
                 .map_err(|e| e.to_string())?;
             {
                 let mut q = url.query_pairs_mut();
-                q.append_pair("$filter", &format!("PartitionKey eq '{PARTITION}'"));
-                q.append_pair("$select", "RowKey");
+                if table == self.table {
+                    q.append_pair("$filter", &format!("PartitionKey eq '{PARTITION}'"));
+                }
+                q.append_pair("$select", &format!("PartitionKey,{select}"));
                 if let Some((p, r)) = &next {
                     q.append_pair("NextPartitionKey", p);
                     q.append_pair("NextRowKey", r);
@@ -200,11 +276,11 @@ impl AzureTables {
                 .map_err(|e| e.to_string())?;
             let status = resp.status();
             if status.as_u16() == 404 {
-                return Err(format!("table {} does not exist", self.table));
+                return Err(format!("table {table} does not exist"));
             }
             if !status.is_success() {
                 return Err(format!(
-                    "list orgs: HTTP {status}: {}",
+                    "read {table}: HTTP {status}: {}",
                     resp.text().await.unwrap_or_default()
                 ));
             }
@@ -221,14 +297,10 @@ impl AzureTables {
                 )
             });
             let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-            for row in json["value"].as_array().into_iter().flatten() {
-                if let Some(id) = row["RowKey"].as_str() {
-                    orgs.insert(id.to_ascii_lowercase());
-                }
-            }
+            rows.extend(json["value"].as_array().cloned().unwrap_or_default());
             match cont {
                 Some(c) => next = Some(c),
-                None => return Ok(orgs),
+                None => return Ok(rows),
             }
         }
     }
@@ -316,6 +388,21 @@ impl StateStore for AzureTables {
     fn allowed_orgs(&self) -> BoxFuture<'_, Result<Option<HashSet<String>>, String>> {
         // An empty table approves nobody (fail closed), unlike an unset env list.
         Box::pin(async move { self.list().await.map(Some) })
+    }
+
+    fn keeps_revocations(&self) -> bool {
+        true
+    }
+
+    fn revocations(&self) -> BoxFuture<'_, Result<Vec<RevocationRecord>, String>> {
+        Box::pin(self.list_revocations())
+    }
+
+    fn save_revocation<'a>(
+        &'a self,
+        rec: &'a RevocationRecord,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(self.put_revocation(rec))
     }
 }
 

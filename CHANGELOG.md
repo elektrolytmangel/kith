@@ -15,6 +15,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
   The list is re-read every 30 s (`KITH_RELAY_ALLOWLIST_REFRESH_SECS`), so approving an org needs no restart, and
   devices of an org removed from the list (also from `KITH_RELAY_ALLOWED_ORGS`) are dropped from it. An empty table
   approves nobody. New `StateStore` trait in `kith_relay_server::state`.
+- Relay: optional persistence of revocation notices (`KITH_RELAY_PERSIST_REVOCATIONS=true`, Azure Table `revocations`,
+  [ADR 0014](docs/adr/0014-optional-revocation-persistence.md)); notices are verified again on load, so a restart no
+  longer lets a removed device back in. Off by default (the relay then stores nothing, as before). Bicep parameter
+  `persistRevocations`.
 
 ## [0.1.0-alpha.3] - 2026-11-05
 

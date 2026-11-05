@@ -371,6 +371,7 @@ docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 80
 | `KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING` | unset | same, with an account key (Azurite, local use) |
 | `KITH_RELAY_AZURE_ALLOWED_ORGS_TABLE` | `allowedorgs` | table name |
 | `KITH_RELAY_ALLOWLIST_REFRESH_SECS` | `30` | how often the table is re-read |
+| `KITH_RELAY_PERSIST_REVOCATIONS` | unset | `true`: store accepted revocation notices in the Azure table `revocations` (`KITH_RELAY_AZURE_REVOCATIONS_TABLE`) and reload them at start. Needs the Azure state; the relay then stores device IDs of removed devices ([ADR 0014](../adr/0014-optional-revocation-persistence.md)) |
 | `RUST_LOG` | `info` | log filter |
 
 Devices authenticate by signing a challenge with their key (`hello` → `challenge` →

@@ -72,6 +72,9 @@ az containerapp hostname bind -g kith-rg -n kith-relay --hostname relay.example.
 - **Cost:** one replica at 0.5 vCPU / 1 GiB is always on (Container Apps cannot scale a WebSocket relay to zero without
   dropping connections), plus Log Analytics ingestion and a few cents of storage. Check the
   [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/) for your region.
-- **Not covered:** revocation notices are still held in RAM only ([ADR 0013](../adr/0013-relay-revocation.md)); a relay
-  restart forgets them until the issuing admin reconnects. The managed identity path was written against the
+- **Revocation notices** are held in RAM by default ([ADR 0013](../adr/0013-relay-revocation.md)): a relay restart
+  forgets them until the issuing admin reconnects. Set `persistRevocations = true` to keep them in the `revocations`
+  table ([ADR 0014](../adr/0014-optional-revocation-persistence.md)); the relay then stores the IDs of removed devices
+  and their signed notices, and re-verifies them at start.
+- **Not covered:** the managed identity path was written against the
   documented Container Apps endpoint and is verified against the Azurite emulator only for the table calls.

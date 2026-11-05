@@ -9,6 +9,8 @@
 //! - `KITH_RELAY_AZURE_STORAGE_ACCOUNT` / `KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING`
 //!   (feature `azure-state`): read the approved orgs from an Azure Table instead, re-read
 //!   every `KITH_RELAY_ALLOWLIST_REFRESH_SECS` (default 30). See [`state`].
+//! - `KITH_RELAY_PERSIST_REVOCATIONS=true` (with the Azure state): keep revocation notices in a table
+//!   and reload them at start (ADR 0014).
 //! - `RUST_LOG`: log filter, default `info`
 //!
 //! Connection: `hello` -> relay `challenge` -> `auth` (signature over
@@ -171,6 +173,8 @@ pub struct Relay {
     proofs: HashMap<String, HashMap<String, CertChain>>,
     /// Orgs this relay serves (REQ-RELAY-008); `None` serves every org.
     allowed_orgs: Option<HashSet<String>>,
+    /// Newly accepted revocation notices go here when persistence is on ([`state`]).
+    persist: Option<mpsc::UnboundedSender<state::RevocationRecord>>,
 }
 
 /// Revoked devices remembered per org at most (memory bound).
@@ -210,6 +214,7 @@ pub fn new_state_with(auth_timeout: Duration, limits: Limits) -> Shared {
         revoked: HashMap::new(),
         proofs: HashMap::new(),
         allowed_orgs: None,
+        persist: None,
     }))
 }
 
@@ -504,6 +509,33 @@ fn check_membership(
     Ok((role, Some(chain)))
 }
 
+/// Verify one notice and remember its device as revoked; `Ok(true)` if it was new.
+/// New notices are handed to the persistence writer when it is on.
+fn remember_revocation(
+    r: &mut Relay,
+    org: &str,
+    org_key: &DeviceId,
+    notice: &str,
+) -> Result<bool, String> {
+    let rev = Revocation::from_hex(notice)
+        .and_then(|rev| rev.verify(org_key).map(|_| rev))
+        .map_err(|e| e.to_string())?;
+    let device = rev.device.to_hex();
+    let set = r.revoked.entry(org.to_string()).or_default();
+    if set.len() >= MAX_REVOKED_PER_ORG && !set.contains(&device) {
+        return Ok(false);
+    }
+    let new = set.insert(device.clone());
+    if new && let Some(tx) = &r.persist {
+        let _ = tx.send(state::RevocationRecord {
+            org: org.to_string(),
+            device,
+            notice: notice.to_string(),
+        });
+    }
+    Ok(new)
+}
+
 /// Verify and remember the revocation notices of an announce, then remove every
 /// online device of `org` they affect (the revoked ones and devices certified
 /// through them). Bad notices are ignored with an error to `tx`.
@@ -513,16 +545,9 @@ fn apply_revocations(r: &mut Relay, org: &str, notices: &[String], tx: &Tx) {
     };
     let mut added = false;
     for n in notices.iter().take(MAX_NOTICES_PER_ANNOUNCE) {
-        let rev = match Revocation::from_hex(n).and_then(|rev| rev.verify(&org_key).map(|_| rev)) {
-            Ok(rev) => rev,
-            Err(e) => {
-                send(tx, error("bad-revocation", format!("{org}: {e}")));
-                continue;
-            }
-        };
-        let set = r.revoked.entry(org.to_string()).or_default();
-        if set.len() < MAX_REVOKED_PER_ORG || set.contains(&rev.device.to_hex()) {
-            added |= set.insert(rev.device.to_hex());
+        match remember_revocation(r, org, &org_key, n) {
+            Ok(new) => added |= new,
+            Err(e) => send(tx, error("bad-revocation", format!("{org}: {e}"))),
         }
     }
     if !added {
@@ -1224,6 +1249,101 @@ mod tests {
         let mut other = login(&url, &DeviceKey::generate()).await;
         send_frame(&mut other, &announce_with(vec![])).await;
         expect_error(next_frame(&mut other).await, "bad-proof");
+    }
+
+    /// req: REQ-INV-004
+    #[tokio::test]
+    async fn stored_revocations_survive_a_relay_restart() {
+        use crate::state::{
+            BoxFuture, RevocationRecord, StateStore, load_revocations, spawn_revocation_writer,
+        };
+        use kith_core::membership::Revocation;
+        #[derive(Default)]
+        struct Mem(Mutex<Vec<RevocationRecord>>);
+        impl StateStore for Mem {
+            fn allowed_orgs(&self) -> BoxFuture<'_, Result<Option<HashSet<String>>, String>> {
+                Box::pin(async { Ok(None) })
+            }
+            fn keeps_revocations(&self) -> bool {
+                true
+            }
+            fn save_revocation<'a>(
+                &'a self,
+                rec: &'a RevocationRecord,
+            ) -> BoxFuture<'a, Result<(), String>> {
+                self.0.lock().unwrap().push(rec.clone());
+                Box::pin(async { Ok(()) })
+            }
+        }
+        let serve = |state: Shared| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+            url
+        };
+        let (root, admin_key, member_key) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let (org, rid) = (org_id(&root), root.device_id());
+        let admin_chain = CertChain(vec![MembershipCert::issue(
+            &root,
+            rid,
+            admin_key.device_id(),
+            true,
+            1,
+        )]);
+        let member_cert = MembershipCert::issue(&root, rid, member_key.device_id(), false, 1);
+        let notice = Revocation::issue(
+            &admin_key,
+            admin_chain.clone(),
+            rid,
+            member_key.device_id(),
+            4,
+        );
+
+        // Relay 1 accepts the notice and hands it to the store.
+        let store = Arc::new(Mem::default());
+        let state1 = new_state(Duration::from_secs(10));
+        spawn_revocation_writer(&state1, store.clone());
+        let url1 = serve(state1).await;
+        let mut admin = login(&url1, &admin_key).await;
+        send_frame(
+            &mut admin,
+            &Frame::Announce {
+                orgs: vec![Membership {
+                    org: org.clone(),
+                    proof: admin_chain.to_hex(),
+                    always_on: false,
+                    revoked: vec![notice.to_hex()],
+                }],
+            },
+        )
+        .await;
+        for _ in 0..50 {
+            if !store.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let records = store.0.lock().unwrap().clone();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].device, member_key.device_id().to_hex());
+
+        // A new relay that loads the records refuses the device without any admin online.
+        let state2 = new_state(Duration::from_secs(10));
+        assert_eq!(load_revocations(&state2, &records), 1);
+        // A forged record is skipped.
+        let bogus = RevocationRecord {
+            notice: "00".into(),
+            ..records[0].clone()
+        };
+        assert_eq!(load_revocations(&state2, &[bogus]), 0);
+        let url2 = serve(state2).await;
+        let mut member = login(&url2, &member_key).await;
+        announce(&mut member, &org, member_cert_hex(&member_cert)).await;
+        expect_error(next_frame(&mut member).await, "revoked");
     }
 
     /// req: REQ-ID-002
