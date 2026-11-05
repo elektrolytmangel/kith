@@ -471,7 +471,52 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     fn with_policies(mut self) -> Result<Self, ClientError> {
         self.refresh_policies()?;
+        self.upgrade_policies()?;
         Ok(self)
+    }
+
+    /// Orgs created before the genesis had to be signed by the root key have a
+    /// policy without a valid genesis, and before that, members were not named in
+    /// the policy. The device holding the root key upgrades them: it adds the
+    /// root-signed genesis and names the current group members as editors. The new
+    /// changes reach the others through catch-up.
+    fn upgrade_policies(&mut self) -> Result<(), ClientError> {
+        let legacy: Vec<(String, [u8; 32])> = self
+            .orgs
+            .0
+            .iter()
+            .filter_map(|(org, st)| Some((org.clone(), st.root?)))
+            .filter(|(org, _)| self.policies.get(org).is_some_and(|p| p.creator.is_none()))
+            .collect();
+        for (org, root) in legacy {
+            let root = DeviceKey::from_secret_bytes(&root);
+            let genesis = PolicyOp::Genesis {
+                admin: MembershipCert::issue(
+                    &root,
+                    root.device_id(),
+                    self.device_id(),
+                    true,
+                    now_ms(),
+                ),
+            };
+            self.policy_commit_by(&org, genesis, Some(&root))?;
+            let members = self.groups.members(&org).unwrap_or_default();
+            for m in members {
+                let unnamed = self
+                    .policies
+                    .get(&org)
+                    .is_some_and(|p| p.role_of(&m).is_none() && !p.revoked.contains(&m));
+                if unnamed {
+                    let op = PolicyOp::SetRole {
+                        device: m,
+                        role: Role::Editor,
+                        cert: None,
+                    };
+                    self.policy_commit(&org, op)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// This device's ID.
@@ -588,14 +633,24 @@ impl<S: Store, K: Signer> Client<S, K> {
         }
         let full = self.quarantined.get(&change.author).copied().unwrap_or(0) >= MAX_QUARANTINE;
         if change.body.object_type.as_str() == POLICY_TYPE {
-            // Policy changes by non-admins never count; past the cap they are not even kept.
-            let admin = change
-                .body
-                .scope
-                .org_id()
+            // Policy changes by non-admins never count (members only link their own
+            // devices). Once we have the org's policy, others are not kept (each
+            // kept one re-folds the policy), except the root-signed genesis; before
+            // that, up to the cap. A refused one comes again with the next catch-up.
+            let org_id = change.body.scope.org_id();
+            let policy = org_id
                 .and_then(|o| self.policies.get(&o.to_hex()))
-                .is_some_and(|p| p.role_of(&change.author) == Some(Role::Admin));
-            if full && !admin {
+                .filter(|p| p.creator.is_some());
+            let link = matches!(
+                PolicyOp::decode(&change.body.payload),
+                Ok(PolicyOp::LinkDevice { .. })
+            );
+            let admin = policy.is_some_and(|p| match p.role_of(&change.author) {
+                Some(Role::Admin) => true,
+                Some(_) => link,
+                None => false,
+            }) || org_id.is_some_and(|o| o == change.author);
+            if (full || policy.is_some()) && !admin {
                 return Err(ClientError::Forbidden(
                     "too many rejected changes from this device".into(),
                 ));
@@ -707,8 +762,8 @@ impl<S: Store, K: Signer> Client<S, K> {
         self.policies.get(org)
     }
 
-    /// A device's role in `org` (`None`: revoked). Devices the policy does not
-    /// name are editors.
+    /// A device's role in `org` (`None`: revoked or not a member). Devices the
+    /// policy does not name have no role; without a policy everyone is an editor.
     pub fn role_of(&self, org: &str, device: &str) -> Result<Option<Role>, ClientError> {
         let d = DeviceId::from_hex(device)?;
         Ok(self
@@ -920,6 +975,21 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Append `op` to `org`'s policy object. Fails unless the op counts (we are an
     /// admin and it is valid), so a refused op never leaves the device.
     fn policy_commit(&mut self, org: &str, op: PolicyOp) -> Result<Change, ClientError> {
+        self.policy_commit_by(org, op, None)
+    }
+
+    /// [`Self::policy_commit`], signed by the org root key `root` if given (the
+    /// genesis), else by this device.
+    fn policy_commit_by(
+        &mut self,
+        org: &str,
+        op: PolicyOp,
+        root: Option<&DeviceKey>,
+    ) -> Result<Change, ClientError> {
+        let signer: &dyn Signer = match root {
+            Some(r) => r,
+            None => &self.key,
+        };
         let org_id = DeviceId::from_hex(org)?;
         let pid = policy_object_id(&org_id);
         let parents = self.store.heads(&pid)?;
@@ -932,7 +1002,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 timestamp_ms: now_ms(),
                 payload: op.encode(),
             },
-            &self.key,
+            signer,
         );
         let mut hist = self.store.history(&pid)?;
         hist.push(change.clone());
@@ -978,11 +1048,12 @@ impl<S: Store, K: Signer> Client<S, K> {
         );
         self.save_groups()?;
         self.save_orgs()?;
-        // The policy object starts with our root-signed admin certificate.
+        // The policy object starts with our root-signed admin certificate, in a
+        // change signed by the root key itself (no other admin can make one).
         let genesis = PolicyOp::Genesis {
             admin: MembershipCert::issue(&root, org_id, self.device_id(), true, now_ms()),
         };
-        self.policy_commit(&org, genesis)?;
+        self.policy_commit_by(&org, genesis, Some(&root))?;
         Ok(org)
     }
 
@@ -1162,10 +1233,21 @@ impl<S: Store, K: Signer> Client<S, K> {
             ));
         }
         // The policy learns that the new device is ours (refused, with nothing
-        // changed, if the device already has a role or link).
+        // changed, if the device already has a role or link), or, for an admin's
+        // admission, names it as an editor: devices the policy does not name have
+        // no role. Refused if a more senior admin revoked the device.
+        let d = DeviceId::from_hex(device)?;
         let link = if own {
-            let op = PolicyOp::LinkDevice {
-                device: DeviceId::from_hex(device)?,
+            Some(self.policy_commit(org, PolicyOp::LinkDevice { device: d })?)
+        } else if self
+            .policies
+            .get(org)
+            .is_some_and(|p| p.creator.is_some() && p.role_of(&d).is_none())
+        {
+            let op = PolicyOp::SetRole {
+                device: d,
+                role: Role::Editor,
+                cert: None,
             };
             Some(self.policy_commit(org, op)?)
         } else {

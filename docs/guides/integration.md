@@ -100,13 +100,14 @@ device that created it is online. `catchUp()` also catches up the subgroups.
 ### Roles and write permissions
 
 Every org has a policy that all devices enforce on every change
-([ADR 0006](../adr/0006-policy-object-roles-revocation.md)). Roles are `viewer`,
-`editor` (the default for members) and `admin`:
+([ADR 0006](../adr/0006-policy-object-roles-revocation.md), [ADR 0015](../adr/0015-policy-genesis-and-named-members.md)).
+Roles are `viewer`, `editor` (what an admin gives the devices it admits) and `admin`. A device the
+policy does not name has no role:
 
 ```ts
 client.setWriteRule("config", "admin");   // only admins write objects of type "config"
 client.setRole(deviceId, "viewer");      // read-only; earlier changes stay valid
-client.roleOf(org, deviceId);            // "viewer" | "editor" | "admin" | undefined (revoked)
+client.roleOf(org, deviceId);            // "viewer" | "editor" | "admin" | undefined (revoked or not a member)
 client.removeMember(deviceId);           // out of the group and revoked
 ```
 
