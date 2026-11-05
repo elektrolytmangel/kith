@@ -1259,6 +1259,33 @@ fn one_store_holds_two_orgs_without_mixing_them() {
     assert!(!net.devs[1].store().contains(&in_b.change_id).unwrap());
 }
 
+/// req: REQ-DATA-004
+#[test]
+fn parents_from_another_object_are_refused() {
+    let mut net = Net::org(2);
+    let a = net.devs[0]
+        .create(ObjectType::new("note"), b"a".to_vec())
+        .unwrap();
+    net.devs[1].receive(a.clone()).unwrap();
+    // A change in another object that names a's change as its parent.
+    let c = Change::sign(
+        UnsignedChange {
+            scope: a.body.scope.clone(),
+            object_id: ObjectId::random(),
+            object_type: ObjectType::new("note"),
+            parents: vec![a.change_id],
+            timestamp_ms: 1,
+            payload: b"b".to_vec(),
+        },
+        net.devs[0].signer(),
+    );
+    assert!(matches!(
+        net.devs[1].receive(c.clone()),
+        Err(ClientError::Forbidden(_))
+    ));
+    assert!(!net.devs[1].store().contains(&c.change_id).unwrap());
+}
+
 #[test]
 fn local_data_stays_local_and_edits_keep_their_scope() {
     let mut net = Net::new(1);

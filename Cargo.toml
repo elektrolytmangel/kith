@@ -46,6 +46,8 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # Range-based set reconciliation for catch-up (REQ-SYNC-002); sans-IO, no dependencies.
 negentropy = "0.5"
+# Bounded inflate check of compressed Automerge changes; same features as automerge's own.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 # Keys are created from getrandom bytes (kith_core::random_bytes), so no RNG trait
 # crate is needed and rand_core majors in ed25519-dalek do not affect us.
 ed25519-dalek = "3"

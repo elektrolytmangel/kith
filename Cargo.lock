@@ -1741,6 +1741,7 @@ name = "kith-merge"
 version = "0.1.0-alpha.3"
 dependencies = [
  "automerge",
+ "flate2",
  "getrandom 0.4.3",
  "kith-client",
  "kith-core",

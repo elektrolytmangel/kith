@@ -639,6 +639,16 @@ impl<S: Store, K: Signer> Client<S, K> {
                 "object belongs to another scope".into(),
             ));
         }
+        // Parents are changes of the same object.
+        for p in &change.body.parents {
+            if let Some(parent) = self.store.get(p)?
+                && parent.body.object_id != change.body.object_id
+            {
+                return Err(ClientError::Forbidden(format!(
+                    "parent {p} belongs to another object"
+                )));
+            }
+        }
         let full = self.quarantined.get(&change.author).copied().unwrap_or(0) >= MAX_QUARANTINE;
         if change.body.object_type.as_str() == POLICY_TYPE {
             // Policy changes by non-admins never count (members only link their own
