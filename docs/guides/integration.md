@@ -66,7 +66,9 @@ or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-cer
    devices claim the same link, only the first one accepted gets in, and `acceptClaim`
    fails once the invite has expired.
 5. The new device gets `joined` with its membership certificate, announces itself
-   to the relay with it, and downloads the history from a peer on its own.
+   to the relay with it, and downloads the history from a peer on its own. Live
+   changes reach it once the relay has that announce (its `presence` lists it);
+   changes made in between arrive with the history download.
 
 A member (not only an admin) can add **another device of its own** with
 `createOwnDeviceInvite(org, relayUrl, ttlSeconds)`; the flow is the same (the member gets

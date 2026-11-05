@@ -375,7 +375,10 @@ mod tests {
         let oid = created.body.object_id;
         seed.edit(oid, b"v2".to_vec()).unwrap();
         let link = seed.create_invite(&org, &url, 60_000).unwrap();
-        let a_task = serve(LiveClient::connect(&url, &org, seed).await.unwrap());
+        let mut a = LiveClient::connect(&url, &org, seed).await.unwrap();
+        // The relay routes the claim to admins it has registered: wait until `a` is.
+        online(&mut a, 1).await;
+        let a_task = serve(a);
 
         let mut b = LiveClient::connect(&url, &org, new_client()).await.unwrap();
         b.claim(&link).await.unwrap();
