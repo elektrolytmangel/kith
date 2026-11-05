@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-05 (Azure plan: steps 1, 2, 4, 5, 6 done; 3 waits for the user)
+- **Last updated:** 2026-11-05 (Azure plan complete; optional revocation persistence)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
   allowlist (#57). Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
 - **State of `main` (16e991b, #57 merged):** CI green on all 12 jobs on #57. Locally checked: fmt, clippy (incl. wasm32),
@@ -51,7 +51,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | A device added by the losing side of an MLS fork needs a new invite | Rare (two admins at once) | ADR 0004 |
 | A device added as a member's own device cannot add devices itself; subgroups list devices, not users | Link from the original device; admin lists linked devices | ADR 0011 |
 | Restoring a backup while the original device still runs makes them re-add each other | Restore only when the original is gone | ADR 0010 |
-| A removed device is refused by the relay only while the relay remembers the signed notice (RAM). After a relay restart it can connect again until the issuing admin reconnects; other admins and the always-on client do not repeat notices yet | Share notices with other admins | ADR 0013 |
+| A removed device is refused by the relay only while the relay remembers the signed notice. By default that is RAM: after a restart it can connect again until the issuing admin reconnects (opt-in persistence in Azure Table: ADR 0014). Other admins and the always-on client do not repeat notices yet | Turn on persistence; share notices with other admins | ADR 0013, 0014 |
 | Subgroup membership changes need the subgroup's owner device online; ownership cannot move | ADR 0008 | REQ-PERM-003 |
 | Sync needs another member online | Run the always-on client (`kith-always-on`) | REQ-SYNC-006 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
@@ -190,8 +190,7 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-- **Azure plan (user said "start" 2026-11-05; steps 1-2 done).** Before step 3 confirm: persisting revocation notices
-  reverses part of ADR 0013 ("RAM only", the user's choice earlier the same day). Steps 2 and 4-6 do not depend on it.
+- **Azure plan:** all six steps done. Never deployed to real Azure (managed identity path, Bicep): the first deploy is the test.
   Step 2 used the defaults: allowlist in an Azure Table (live reload every 30 s), Table over Blob.
 
 ### Plan: approved orgs, durable relay state, Azure Container Apps + Bicep
@@ -215,8 +214,7 @@ Apps runs the relay with min = max = 1 replica (it is one in-memory router).
    CI job `relay azure state` runs the integration test against Azurite (`tests/azure.rs`, incl. paging).
    Not yet tried against real Azure (managed identity path is untested; step 4/6 deployment will exercise it).
    The `revocations` table is not built (step 3).
-3. [ ] **Revocation notices persisted** (amends ADR 0013 after the user confirms; new ADR 0014): load on start, write on
-   accept; still verified on load. Closes the "restart forgets notices" gap in *Not usable yet*.
+3. [x] **Revocation notices persisted, optional** (PR `feat/persist-revocations`, ADR 0014; user asked 2026-11-05 for an opt-in): `KITH_RELAY_PERSIST_REVOCATIONS=true` + Azure Table `revocations`; verified again on load; off by default so ADR 0013's RAM-only stays the default. Bicep `persistRevocations`.
 4. [x] **Bicep** in `deploy/azure/` (PR `feat/azure-bicep`; lint + build verified locally with `az bicep`, never deployed; custom domain / managed certificate left out of the template because DNS validation must precede the binding: do it in the guide with `az containerapp hostname add/bind`) (`main.bicep` + `main.bicepparam` example): Log Analytics, Container Apps
    environment, the app (image `ghcr.io/elektrolytmangel/kith-relay:<version>`, port 8080, external ingress, min=max=1,
    env limits), Storage account (Table), **user-assigned managed identity** with role *Storage Table Data Contributor*
@@ -245,6 +243,7 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Revocation persistence is an opt-in relay feature (`KITH_RELAY_PERSIST_REVOCATIONS`, Azure Table); default stays RAM-only | User request (2026-11-05) | ADR 0014 |
 | Relay revocation: admin-signed notices, held in RAM only, repeated by the issuing admin on announce (not short-lived certificates, no on-disk list) | User choice (2026-11-05) | ADR 0013 |
 | Format freeze point = the first beta (`0.2.0-beta.1`, after the security review and device verification): from then on a release reads the previous release's data and speaks the previous protocol. Alphas may keep breaking | User decision (2026-11-04) | ADR 0012 |
 | Push wake-ups (REQ-RELAY-007) stay unplanned: only background apps need them | User decision (2026-11-04) | Road to a release |
@@ -389,3 +388,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-05**: Azure plan step 2: `StateStore`, Azure Table allowlist with live reload and eviction, Azurite CI job (PR `feat/relay-state-store`). Next: step 4 (Bicep); step 3 waits for the user's OK on amending ADR 0013.
 - **2026-11-05**: #59 merged (StateStore). Bicep template + lint CI (PR `feat/azure-bicep`). Next: step 6 (Azure guide); step 3 waits for the user's OK.
 - **2026-11-05**: #60 merged (Bicep + lint CI). Azure guide `docs/guides/deployment-azure.md`. Next: user deploys and confirms ADR 0013 amendment (step 3); otherwise road step 4 gaps (REQ-SYNC-005) or step 1 security review prep.
+- **2026-11-05**: #61 merged. User asked for step 3 as an opt-in: revocation persistence (ADR 0014, PR `feat/persist-revocations`). Azure plan complete. Next: road step 4 gaps (REQ-SYNC-005), security review prep, or the user's first real Azure deploy.

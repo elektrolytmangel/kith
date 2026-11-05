@@ -1,6 +1,6 @@
 # 0013: Relay-level revocation
 
-- **Status:** accepted
+- **Status:** accepted (RAM-only default; optional persistence: [ADR 0014](0014-optional-revocation-persistence.md))
 - **Date:** 2026-11-05
 - **Requirements:** REQ-INV-004, REQ-RELAY-001, REQ-RELAY-004
 

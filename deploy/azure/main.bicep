@@ -21,6 +21,9 @@ param registryPassword string = ''
 @description('Table that holds the approved org IDs (one row per org: PartitionKey "org", RowKey = org ID).')
 param allowedOrgsTable string = 'allowedorgs'
 
+@description('Keep revocation notices in a table so a relay restart does not forget them (ADR 0014). Off: RAM only.')
+param persistRevocations bool = false
+
 @description('How often the relay re-reads the table, in seconds.')
 param allowlistRefreshSecs int = 30
 
@@ -79,6 +82,11 @@ resource allowedOrgs 'Microsoft.Storage/storageAccounts/tableServices/tables@202
   name: allowedOrgsTable
 }
 
+resource revocations 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = if (persistRevocations) {
+  parent: tables
+  name: 'revocations'
+}
+
 resource relayCanUseTables 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: storage
   name: guid(storage.id, identity.id, tableContributor)
@@ -112,13 +120,14 @@ var relayEnv = [
   { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
 ]
 
+var persistEnv = persistRevocations ? [{ name: 'KITH_RELAY_PERSIST_REVOCATIONS', value: 'true' }] : []
 var extraEnv = [for item in items(relaySettings): { name: item.key, value: item.value }]
 
 resource relay 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${name}-relay'
   location: location
   // The table role must exist before the relay starts, or its first read fails and it exits.
-  dependsOn: [relayCanUseTables, allowedOrgs]
+  dependsOn: [relayCanUseTables, allowedOrgs, revocations]
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: { '${identity.id}': {} }
@@ -155,7 +164,7 @@ resource relay 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'relay'
           image: image
           resources: { cpu: json(cpu), memory: memory }
-          env: concat(relayEnv, extraEnv)
+          env: concat(relayEnv, persistEnv, extraEnv)
           probes: [
             {
               type: 'Liveness'

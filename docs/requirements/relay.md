@@ -77,3 +77,6 @@ Alternatively the list lives in an Azure Table (feature `azure-state`; `KITH_REL
 which the relay re-reads every `KITH_RELAY_ALLOWLIST_REFRESH_SECS` (default 30). Orgs
 removed from the list lose their online devices (`org-not-allowed`). An empty or
 missing table approves nobody; a failed read keeps the last list.
+
+With `KITH_RELAY_PERSIST_REVOCATIONS=true` the relay also keeps accepted revocation notices
+(REQ-INV-004) in that store and reloads them, verified again, at start (ADR 0014).

@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use kith_relay_server::state::{StateStore, azure::AzureTables};
+use kith_relay_server::state::{RevocationRecord, StateStore, azure::AzureTables};
 
 /// req: REQ-RELAY-008
 #[tokio::test]
@@ -36,4 +36,19 @@ async fn the_allowlist_lives_in_a_table() {
     t.disallow("ab12").await.unwrap();
     t.disallow("ab12").await.unwrap();
     assert!(!t.list().await.unwrap().contains("ab12"));
+
+    // Revocation notices (ADR 0014): stored per device, replaced on a repeat, paged.
+    assert!(t.revocations().await.unwrap().is_empty());
+    let rec = |i: usize, notice: &str| RevocationRecord {
+        org: "aabb".into(),
+        device: format!("{i:04x}"),
+        notice: notice.into(),
+    };
+    for i in 0..1100 {
+        t.save_revocation(&rec(i, "n1")).await.unwrap();
+    }
+    t.save_revocation(&rec(0, "n2")).await.unwrap();
+    let all = t.revocations().await.unwrap();
+    assert_eq!(all.len(), 1100);
+    assert!(all.contains(&rec(0, "n2")));
 }
