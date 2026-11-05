@@ -1451,17 +1451,24 @@ impl<S: Store, K: Signer> Client<S, K> {
         let revocation = self.revoke(org, device)?;
         // The relay hears of it too (REQ-INV-004): a signed notice, repeated on
         // every announce, so it refuses the device and the ones it certified.
-        let chain = self
-            .chain(org)
-            .cloned()
-            .ok_or_else(|| ClientError::NotAdmin(org.into()))?;
-        self.revocations.push(Revocation::issue(
-            &self.key,
-            chain,
-            DeviceId::from_hex(org)?,
-            primary,
-            now_ms(),
-        ));
+        // Signed by the root key when we hold it: only that removes an admin at the
+        // relay, and it stays valid whatever happens to our own admin rights.
+        let root = self.orgs.0.get(org).and_then(|s| s.root);
+        let notice = match root {
+            Some(root) => {
+                Revocation::issue_by_root(&DeviceKey::from_secret_bytes(&root), primary, now_ms())
+            }
+            None => Revocation::issue(
+                &self.key,
+                self.chain(org)
+                    .cloned()
+                    .ok_or_else(|| ClientError::NotAdmin(org.into()))?,
+                DeviceId::from_hex(org)?,
+                primary,
+                now_ms(),
+            ),
+        };
+        self.revocations.push(notice);
         self.save_revocations()?;
         let mut frames = vec![];
         let mut gone = vec![primary];
@@ -1722,9 +1729,12 @@ impl<S: Store, K: Signer> Client<S, K> {
     pub fn handle_frame(&mut self, frame: Frame) -> Result<Handled, ClientError> {
         let handled = match frame {
             Frame::Deliver { org, from, body } => {
-                let mut h = self.handle_deliver(org, from, &body)?;
+                let mut h = self.handle_deliver(org, from, &body, false)?;
                 h.replies.extend(self.subgroup_tasks()?);
                 h
+            }
+            Frame::ClaimDeliver { org, from, body } => {
+                self.handle_deliver(org, from, &body, true)?
             }
             Frame::Presence { org, online } => {
                 let replies = self.rejoin_if_needed(&org, &online)?;
@@ -1743,11 +1753,14 @@ impl<S: Store, K: Signer> Client<S, K> {
         Ok(handled)
     }
 
+    /// `claim`: it came as a [`Frame::ClaimDeliver`], from a device that may not be
+    /// a member. Only claims are taken from it, and claims only from it.
     fn handle_deliver(
         &mut self,
         org: String,
         from: String,
         body: &[u8],
+        claim: bool,
     ) -> Result<Handled, ClientError> {
         let rejected = |reason: String| {
             Handled::event(Event::Rejected {
@@ -1760,6 +1773,13 @@ impl<S: Store, K: Signer> Client<S, K> {
             Ok(m) => m,
             Err(e) => return Ok(rejected(e)),
         };
+        if claim != matches!(outer, Outer::Claim { .. }) {
+            return Ok(rejected(if claim {
+                "only an invite claim can come from a claiming device".into()
+            } else {
+                "an invite claim must come as a claim".into()
+            }));
+        }
         match outer {
             Outer::App(ct) => {
                 let Some(group) = self.group_in(&org, &ct) else {

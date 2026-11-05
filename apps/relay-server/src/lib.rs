@@ -18,8 +18,11 @@
 //! has proven it owns its key. Then `announce` lists orgs with membership proofs
 //! (certificate chains, ADR 0005), checked against the org ID, which is the org's
 //! root public key (REQ-RELAY-004). A device announcing an org without a proof is
-//! *pending*: it may only send `invite-claim` (routed to the org's online admins)
-//! and receive `direct` messages.
+//! *pending*: it may only send `invite-claim` (routed to the org's online admins,
+//! or the named member, as `claim-deliver`) and receive `direct` messages. Revoked
+//! devices can't be pending. Org IDs are compared in canonical (lower-case) form.
+//! Revocation notices count only from an admin's announce; removing an admin needs
+//! a root-signed notice, and an admin the root removed revokes nobody (ADR 0018).
 
 pub mod state;
 
@@ -166,8 +169,9 @@ pub struct Relay {
     limits: Limits,
     open: Arc<AtomicUsize>,
     org_buckets: HashMap<String, Bucket>,
-    /// Revoked devices per org (REQ-INV-004). RAM only; admins repeat them on announce.
-    revoked: HashMap<String, HashSet<String>>,
+    /// Revoked devices per org (REQ-INV-004), with who revoked them. RAM (and
+    /// optionally stored, ADR 0014); admins repeat them on announce.
+    revoked: HashMap<String, HashMap<String, Revoked>>,
     /// Certificate chains of announced devices: device -> org -> chain, so a
     /// revocation also removes devices certified through the revoked one.
     proofs: HashMap<String, HashMap<String, CertChain>>,
@@ -175,6 +179,29 @@ pub struct Relay {
     allowed_orgs: Option<HashSet<String>>,
     /// Newly accepted revocation notices go here when persistence is on ([`state`]).
     persist: Option<mpsc::UnboundedSender<state::RevocationRecord>>,
+}
+
+/// How a device was revoked (ADR 0018).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Revoked {
+    /// Signed by the org root key. Only such a notice removes an admin.
+    by_root: bool,
+    /// The notice's time (issuer's clock).
+    issued_ms: u64,
+}
+
+/// Does a revocation in `set` reach `chain`? A certificate's device counts as
+/// revoked if a notice names it, but an admin only through a root-signed one.
+fn chain_revoked(chain: &CertChain, set: &HashMap<String, Revoked>) -> bool {
+    chain.0.iter().any(|c| {
+        set.get(&c.device.to_hex())
+            .is_some_and(|e| e.by_root || !c.admin)
+    })
+}
+
+/// The canonical form of an org ID (lower-case hex of the root key).
+fn canonical_org(org: &str) -> Option<String> {
+    DeviceId::from_hex(org).ok().map(|d| d.to_hex())
 }
 
 /// Revoked devices remembered per org at most (memory bound).
@@ -487,10 +514,14 @@ fn check_membership(
     org: &str,
     device: &str,
     proof: &str,
-    revoked: Option<&HashSet<String>>,
+    revoked: Option<&HashMap<String, Revoked>>,
 ) -> Result<(Role, Option<CertChain>), &'static str> {
     let org_key = DeviceId::from_hex(org).map_err(|_| "org ID must be the hex org root key")?;
     if proof.is_empty() {
+        // A revoked device does not come back as a newcomer.
+        if revoked.is_some_and(|set| set.contains_key(device)) {
+            return Err("device was revoked");
+        }
         return Ok((Role::Pending, None));
     }
     let device = DeviceId::from_hex(device).map_err(|_| "bad device")?;
@@ -498,7 +529,7 @@ fn check_membership(
     let proven = chain
         .verify(&org_key, &device)
         .map_err(|_| "membership proof does not verify")?;
-    if revoked.is_some_and(|set| chain.touches(|d| set.contains(&d.to_hex()))) {
+    if revoked.is_some_and(|set| chain_revoked(&chain, set)) {
         return Err("device was revoked");
     }
     let role = if proven.admin {
@@ -509,23 +540,41 @@ fn check_membership(
     Ok((role, Some(chain)))
 }
 
-/// Verify one notice and remember its device as revoked; `Ok(true)` if it was new.
-/// New notices are handed to the persistence writer when it is on.
-fn remember_revocation(
+/// Verify one notice and remember its device as revoked; `Ok(true)` if it changed
+/// anything. A notice by an admin the root revoked does not count (when `loading`
+/// stored notices: unless it is older than that revocation). New notices are
+/// handed to the persistence writer when it is on.
+pub(crate) fn remember_revocation(
     r: &mut Relay,
     org: &str,
     org_key: &DeviceId,
     notice: &str,
+    loading: bool,
 ) -> Result<bool, String> {
     let rev = Revocation::from_hex(notice)
         .and_then(|rev| rev.verify(org_key).map(|_| rev))
         .map_err(|e| e.to_string())?;
     let device = rev.device.to_hex();
     let set = r.revoked.entry(org.to_string()).or_default();
-    if set.len() >= MAX_REVOKED_PER_ORG && !set.contains(&device) {
-        return Ok(false);
+    if !rev.by_root()
+        && let Some(e) = set.get(&rev.issuer.to_hex()).filter(|e| e.by_root)
+        && !(loading && rev.issued_ms < e.issued_ms)
+    {
+        return Err("the issuer was revoked".into());
     }
-    let new = set.insert(device.clone());
+    let entry = Revoked {
+        by_root: rev.by_root(),
+        issued_ms: rev.issued_ms,
+    };
+    let new = match set.get(&device) {
+        Some(e) if e.by_root || !entry.by_root => false,
+        None if set.len() >= MAX_REVOKED_PER_ORG => false,
+        // New, or a root notice for a device only an admin had revoked.
+        _ => {
+            set.insert(device.clone(), entry);
+            true
+        }
+    };
     if new && let Some(tx) = &r.persist {
         let _ = tx.send(state::RevocationRecord {
             org: org.to_string(),
@@ -545,7 +594,7 @@ fn apply_revocations(r: &mut Relay, org: &str, notices: &[String], tx: &Tx) {
     };
     let mut added = false;
     for n in notices.iter().take(MAX_NOTICES_PER_ANNOUNCE) {
-        match remember_revocation(r, org, &org_key, n) {
+        match remember_revocation(r, org, &org_key, n, false) {
             Ok(new) => added |= new,
             Err(e) => send(tx, error("bad-revocation", format!("{org}: {e}"))),
         }
@@ -559,11 +608,11 @@ fn apply_revocations(r: &mut Relay, org: &str, notices: &[String], tx: &Tx) {
         .devices_in(org)
         .into_iter()
         .filter(|dev| {
-            set.contains(dev)
-                || r.proofs
-                    .get(dev)
-                    .and_then(|m| m.get(org))
-                    .is_some_and(|c| c.touches(|d| set.contains(&d.to_hex())))
+            match r.proofs.get(dev).and_then(|m| m.get(org)) {
+                Some(c) => chain_revoked(c, &set),
+                // Pending devices have no chain.
+                None => set.contains_key(dev),
+            }
         })
         .collect();
     for dev in &affected {
@@ -595,6 +644,20 @@ fn org_allows(r: &mut Relay, org: &str) -> bool {
 }
 
 fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
+    // One spelling per org, so revocations and routing see the same org.
+    let frame = match canonical_frame(frame) {
+        Ok(f) => f,
+        Err(org) => {
+            send(
+                tx,
+                error(
+                    "bad-org",
+                    format!("{org}: org ID must be the hex org root key"),
+                ),
+            );
+            return;
+        }
+    };
     let member =
         |r: &Relay, org: &str| matches!(r.table.role(org, d), Some(Role::Member | Role::Admin));
     let routed_org = match &frame {
@@ -632,24 +695,44 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
                     );
                     continue;
                 }
-                // Notices first: they may revoke this very device.
-                // (Pending devices, without a proof, do not feed the list.)
-                if !m.revoked.is_empty() && !m.proof.is_empty() {
-                    apply_revocations(r, &m.org, &m.revoked, tx);
-                }
+                let refuse = |why: &str| {
+                    let code = if why == "device was revoked" {
+                        "revoked"
+                    } else {
+                        "bad-proof"
+                    };
+                    send(tx, error(code, format!("{}: {why}", m.org)));
+                };
+                // The announcer proves its membership first; only an admin's
+                // announce feeds revocation notices, and they may revoke the
+                // announcer itself.
                 let (role, chain) =
                     match check_membership(&m.org, d, &m.proof, r.revoked.get(&m.org)) {
                         Ok(x) => x,
                         Err(why) => {
-                            let code = if why == "device was revoked" {
-                                "revoked"
-                            } else {
-                                "bad-proof"
-                            };
-                            send(tx, error(code, format!("{}: {why}", m.org)));
+                            refuse(why);
                             continue;
                         }
                     };
+                if !m.revoked.is_empty() {
+                    if role != Role::Admin {
+                        send(
+                            tx,
+                            error(
+                                "bad-revocation",
+                                format!("{}: only admins send revocation notices", m.org),
+                            ),
+                        );
+                    } else {
+                        apply_revocations(r, &m.org, &m.revoked, tx);
+                        if let Err(why) =
+                            check_membership(&m.org, d, &m.proof, r.revoked.get(&m.org))
+                        {
+                            refuse(why);
+                            continue;
+                        }
+                    }
+                }
                 match chain {
                     Some(c) => {
                         r.proofs
@@ -692,7 +775,19 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
                 Some(to) => r.table.member(&org, &to),
                 None => r.table.admins(&org),
             };
-            deliver(r, route, tx, org, d, body);
+            // Its own frame type: the receiver takes nothing but a claim from it.
+            let delivered = match route {
+                Route::To(devs) => {
+                    fan_out(r, &devs, || Frame::ClaimDeliver {
+                        org: org.clone(),
+                        from: d.into(),
+                        body: body.clone(),
+                    });
+                    devs
+                }
+                Route::Dropped => vec![],
+            };
+            send(tx, Frame::Receipt { delivered });
         }
         Frame::Broadcast { org, .. }
         | Frame::Direct { org, .. }
@@ -706,6 +801,49 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
         ),
         other => send(tx, error("unsupported", format!("{other:?}"))),
     }
+}
+
+/// `frame` with its org IDs in canonical form; `Err(org)` for an invalid one.
+fn canonical_frame(frame: Frame) -> Result<Frame, String> {
+    let canon = |org: String| canonical_org(&org).ok_or(org);
+    Ok(match frame {
+        Frame::Announce { orgs } => Frame::Announce {
+            orgs: orgs
+                .into_iter()
+                .map(|m| {
+                    Ok(kith_protocol::Membership {
+                        org: canon(m.org)?,
+                        ..m
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        },
+        Frame::Broadcast { org, body } => Frame::Broadcast {
+            org: canon(org)?,
+            body,
+        },
+        Frame::Direct { org, to, body } => Frame::Direct {
+            org: canon(org)?,
+            to,
+            body,
+        },
+        Frame::SyncRequest { org, body } => Frame::SyncRequest {
+            org: canon(org)?,
+            body,
+        },
+        Frame::InviteClaim {
+            org,
+            token,
+            body,
+            to,
+        } => Frame::InviteClaim {
+            org: canon(org)?,
+            token,
+            body,
+            to,
+        },
+        other => other,
+    })
 }
 
 fn deliver(r: &Relay, route: Route, tx: &Tx, org: String, from: &str, body: Vec<u8>) {
@@ -1125,7 +1263,7 @@ mod tests {
         announce(&mut ws, &org, proof(&key, &key, true)).await;
         expect_error(next_frame(&mut ws).await, "bad-proof");
         announce(&mut ws, "my-org", proof(&root, &key, false)).await;
-        expect_error(next_frame(&mut ws).await, "bad-proof");
+        expect_error(next_frame(&mut ws).await, "bad-org");
         for f in [
             Frame::Broadcast {
                 org: org.clone(),
@@ -1376,7 +1514,7 @@ mod tests {
             matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.len() == 1)
         );
         assert!(
-            matches!(next_frame(&mut member).await, Some(Frame::Deliver { body, .. }) if body == b"claim")
+            matches!(next_frame(&mut member).await, Some(Frame::ClaimDeliver { body, .. }) if body == b"claim")
         );
         // A pending or unknown device is not a target.
         send_frame(&mut new, &claim(new_key.device_id().to_hex())).await;
@@ -1433,7 +1571,7 @@ mod tests {
             matches!(next_frame(&mut new).await, Some(Frame::Receipt { delivered }) if delivered.len() == 1)
         );
         match next_frame(&mut admin).await {
-            Some(Frame::Deliver { from, body, .. }) => {
+            Some(Frame::ClaimDeliver { from, body, .. }) => {
                 assert_eq!(from, new_key.device_id().to_hex());
                 assert_eq!(body, b"claim");
             }
@@ -1683,5 +1821,169 @@ mod tests {
             .await;
         let (_, closed) = drain(&mut ws, Duration::from_secs(2)).await;
         assert!(closed);
+    }
+
+    // ---- revocation rules (ADR 0018) ----
+
+    fn ann(org: &str, proof: String, revoked: Vec<String>) -> Frame {
+        Frame::Announce {
+            orgs: vec![Membership {
+                org: org.into(),
+                proof,
+                always_on: false,
+                revoked,
+            }],
+        }
+    }
+
+    /// req: REQ-INV-004
+    #[tokio::test]
+    async fn only_the_root_removes_admins_and_revoked_admins_revoke_nobody() {
+        let url = start(Duration::from_secs(10)).await;
+        let root = DeviceKey::generate();
+        let rid = root.device_id();
+        let org = org_id(&root);
+        let (ka, kb, km) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let chain_a = CertChain(vec![MembershipCert::issue(
+            &root,
+            rid,
+            ka.device_id(),
+            true,
+            1,
+        )]);
+        let chain_b = CertChain(vec![MembershipCert::issue(
+            &root,
+            rid,
+            kb.device_id(),
+            true,
+            1,
+        )]);
+        let mut b = login(&url, &kb).await;
+        send_frame(&mut b, &ann(&org, chain_b.to_hex(), vec![])).await;
+        assert!(matches!(
+            next_frame(&mut b).await,
+            Some(Frame::Presence { .. })
+        ));
+        // An admin's notice against another admin does not remove it.
+        let mut a = login(&url, &ka).await;
+        let a_on_b = Revocation::issue(&ka, chain_a.clone(), rid, kb.device_id(), 2);
+        send_frame(&mut a, &ann(&org, chain_a.to_hex(), vec![a_on_b.to_hex()])).await;
+        let mut b2 = login(&url, &kb).await;
+        send_frame(&mut b2, &ann(&org, chain_b.to_hex(), vec![])).await;
+        assert!(matches!(
+            next_frame(&mut b2).await,
+            Some(Frame::Presence { .. })
+        ));
+        // The root removes A.
+        let root_on_a = Revocation::issue_by_root(&root, ka.device_id(), 3);
+        send_frame(
+            &mut b2,
+            &ann(&org, chain_b.to_hex(), vec![root_on_a.to_hex()]),
+        )
+        .await;
+        let mut a2 = login(&url, &ka).await;
+        send_frame(&mut a2, &ann(&org, chain_a.to_hex(), vec![])).await;
+        expect_error(next_frame(&mut a2).await, "revoked");
+        // A's notices no longer count, even sent by someone else's announce.
+        let mut m = login(&url, &km).await;
+        join(&mut m, &root, &km).await;
+        let a_on_m = Revocation::issue(&ka, chain_a, rid, km.device_id(), 4);
+        send_frame(&mut b2, &ann(&org, chain_b.to_hex(), vec![a_on_m.to_hex()])).await;
+        expect_error_after_presence(&mut b2, "bad-revocation").await;
+        // A revoked device does not come back as a newcomer either.
+        let mut a3 = login(&url, &ka).await;
+        send_frame(&mut a3, &ann(&org, String::new(), vec![])).await;
+        expect_error(next_frame(&mut a3).await, "revoked");
+    }
+
+    /// req: REQ-INV-004
+    #[tokio::test]
+    async fn only_admins_send_revocation_notices() {
+        let url = start(Duration::from_secs(10)).await;
+        let root = DeviceKey::generate();
+        let org = org_id(&root);
+        let (km, kx) = (DeviceKey::generate(), DeviceKey::generate());
+        let mut m = login(&url, &km).await;
+        join(&mut m, &root, &km).await;
+        // A member hands on a valid root notice: refused, nothing changes.
+        let notice = Revocation::issue_by_root(&root, kx.device_id(), 1);
+        send_frame(
+            &mut m,
+            &ann(&org, proof(&root, &km, false), vec![notice.to_hex()]),
+        )
+        .await;
+        expect_error(next_frame(&mut m).await, "bad-revocation");
+        let mut x = login(&url, &kx).await;
+        join(&mut x, &root, &kx).await;
+    }
+
+    /// req: REQ-RELAY-004
+    #[tokio::test]
+    async fn claims_arrive_as_claims_and_org_ids_have_one_spelling() {
+        let url = start(Duration::from_secs(10)).await;
+        let root = DeviceKey::generate();
+        let (km, kx) = (DeviceKey::generate(), DeviceKey::generate());
+        let mut m = login(&url, &km).await;
+        join(&mut m, &root, &km).await;
+        let mut x = login(&url, &kx).await;
+        // Upper case is the same org.
+        announce(&mut x, &org_id(&root).to_uppercase(), String::new()).await;
+        send_frame(
+            &mut x,
+            &Frame::InviteClaim {
+                org: org_id(&root).to_uppercase(),
+                token: String::new(),
+                body: b"anything".to_vec(),
+                to: Some(km.device_id().to_hex()),
+            },
+        )
+        .await;
+        match next_frame(&mut m).await {
+            Some(Frame::ClaimDeliver { org, body, .. }) => {
+                assert_eq!(body, b"anything");
+                assert_eq!(org, org_id(&root));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// req: REQ-INV-004
+    #[test]
+    fn stored_notices_of_a_removed_admin_count_only_from_before_its_removal() {
+        let root = DeviceKey::generate();
+        let rid = root.device_id();
+        let org = org_id(&root);
+        let (ka, m_old, m_new) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let chain_a = CertChain(vec![MembershipCert::issue(
+            &root,
+            rid,
+            ka.device_id(),
+            true,
+            1,
+        )]);
+        let rec = |r: &Revocation| state::RevocationRecord {
+            org: org.to_uppercase(),
+            device: r.device.to_hex(),
+            notice: r.to_hex(),
+        };
+        let before = Revocation::issue(&ka, chain_a.clone(), rid, m_old.device_id(), 5);
+        let after = Revocation::issue(&ka, chain_a, rid, m_new.device_id(), 20);
+        let removal = Revocation::issue_by_root(&root, ka.device_id(), 10);
+        // Stored order does not matter: the root's notice is applied first.
+        let shared = new_state(Duration::from_secs(10));
+        state::load_revocations(&shared, &[rec(&before), rec(&after), rec(&removal)]);
+        let r = shared.lock().unwrap();
+        let set = r.revoked.get(&org).expect("canonical org");
+        assert!(set.contains_key(&m_old.device_id().to_hex()));
+        assert!(!set.contains_key(&m_new.device_id().to_hex()));
+        assert!(set[&ka.device_id().to_hex()].by_root);
     }
 }

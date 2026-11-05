@@ -97,6 +97,16 @@ pub enum Frame {
         /// Opaque ciphertext.
         body: Vec<u8>,
     },
+    /// Relay -> client: an invite claim ([`Frame::InviteClaim`]) from a device that
+    /// may not be a member yet. Clients accept nothing but a claim from it.
+    ClaimDeliver {
+        /// Organization.
+        org: OrgId,
+        /// Claiming device.
+        from: DeviceIdHex,
+        /// The opaque claim.
+        body: Vec<u8>,
+    },
     /// Relay -> sender: which devices received a message.
     Receipt {
         /// Devices the message was handed to.
@@ -175,7 +185,8 @@ fn body_len(f: &Frame) -> Option<usize> {
         | Frame::Direct { body, .. }
         | Frame::SyncRequest { body, .. }
         | Frame::InviteClaim { body, .. }
-        | Frame::Deliver { body, .. } => Some(body.len()),
+        | Frame::Deliver { body, .. }
+        | Frame::ClaimDeliver { body, .. } => Some(body.len()),
         _ => None,
     }
 }

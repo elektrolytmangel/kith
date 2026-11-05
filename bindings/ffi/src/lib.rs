@@ -933,17 +933,20 @@ mod tests {
     /// Deliver a frame one session sent to the other, as the relay would.
     fn relay_to(from: &KithClient, to: &RelaySession, frame: &[u8]) -> SessionOutput {
         use kith_protocol::Frame;
-        let (Frame::SyncRequest { org, body }
-        | Frame::Broadcast { org, body }
-        | Frame::Direct { org, body, .. }
-        | Frame::InviteClaim { org, body, .. }) = kith_protocol::decode(frame).unwrap()
-        else {
-            panic!("frame with a body expected")
-        };
-        let deliver = Frame::Deliver {
-            org,
-            from: from.device_id(),
-            body,
+        let deliver = match kith_protocol::decode(frame).unwrap() {
+            Frame::InviteClaim { org, body, .. } => Frame::ClaimDeliver {
+                org,
+                from: from.device_id(),
+                body,
+            },
+            Frame::SyncRequest { org, body }
+            | Frame::Broadcast { org, body }
+            | Frame::Direct { org, body, .. } => Frame::Deliver {
+                org,
+                from: from.device_id(),
+                body,
+            },
+            _ => panic!("frame with a body expected"),
         };
         to.receive(kith_protocol::encode(&deliver).unwrap())
             .unwrap()
