@@ -23,6 +23,11 @@ The relay speaks plain WebSocket. Put TLS in front of it: clients should use
 `wss://`. Limits are set through `KITH_RELAY_*` variables
 (see the README).
 
+**Serve only approved organizations:** set `KITH_RELAY_ALLOWED_ORGS` to the org IDs
+(each org's root public key, hex; your app shows it as the org ID), separated by
+commas. Without it the relay serves any org that presents a valid certificate chain.
+Read at start: changing the list means restarting the relay.
+
 ### With TLS: Docker Compose
 
 [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) runs the relay

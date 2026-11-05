@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use kith_relay_server::{Limits, app, new_state_with};
+use kith_relay_server::{Limits, app, new_state_with, parse_allowed_orgs, set_allowed_orgs};
 
 #[tokio::main]
 async fn main() {
@@ -17,15 +17,21 @@ async fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .map_or(Duration::from_secs(10), Duration::from_secs);
+    let state = new_state_with(auth_timeout, Limits::from_env());
+    let allowed = std::env::var("KITH_RELAY_ALLOWED_ORGS")
+        .ok()
+        .and_then(|list| parse_allowed_orgs(&list));
+    match &allowed {
+        Some(orgs) => tracing::info!(orgs = orgs.len(), "serving only the allowed organizations"),
+        None => tracing::warn!("KITH_RELAY_ALLOWED_ORGS is not set: serving every organization"),
+    }
+    set_allowed_orgs(&state, allowed);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     tracing::info!(%addr, version = kith_protocol::PROTOCOL_VERSION, "kith relay listening");
-    axum::serve(
-        listener,
-        app(new_state_with(auth_timeout, Limits::from_env())),
-    )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await
-    .expect("server");
+    axum::serve(listener, app(state))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .expect("server");
 }

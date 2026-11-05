@@ -8,6 +8,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Relay-level revocation (REQ-INV-004, [ADR 0013](docs/adr/0013-relay-revocation.md)): `remove_member` signs a
   revocation notice that the relay verifies from the org ID, keeps in RAM and uses to drop the device (and its own
   devices) and refuse it on `announce`. `Membership.revoked` in the protocol is optional, so older clients still work.
+- Relay: `KITH_RELAY_ALLOWED_ORGS` restricts a relay to approved organizations (REQ-RELAY-008); other orgs get
+  `org-not-allowed` on `announce`. Unset keeps today's behaviour (every org).
 
 ## [0.1.0-alpha.3] - 2026-11-05
 

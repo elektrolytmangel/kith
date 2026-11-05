@@ -60,3 +60,15 @@ disconnecting persistent abusers. Clients cap quarantined changes per author
 - **Priority:** should | **Phase:** 7 | **Status:** proposed | **Verify:** manual | **Source:** design §Push
 
 The relay should be able to send content-free APNs/FCM pushes to wake phones.
+
+### REQ-RELAY-008: Approved organizations only
+
+- **Priority:** should | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** operator request (2026-11-05)
+
+A relay operator must be able to restrict a relay to a list of approved
+organizations. An `announce` for any other org is refused with `org-not-allowed`,
+pending devices included, so nobody can route there. Unset or empty serves every
+org (local use, tests).
+
+`KITH_RELAY_ALLOWED_ORGS`: org IDs (hex root public keys) separated by commas or
+whitespace. Read at start; a durable, live-reloaded list is planned (see PLAN.md).
