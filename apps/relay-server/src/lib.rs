@@ -23,11 +23,14 @@
 //! devices can't be pending. Org IDs are compared in canonical (lower-case) form.
 //! Revocation notices count only from an admin's announce; removing an admin needs
 //! a root-signed notice, and an admin the root removed revokes nobody (ADR 0018).
+//! Outboxes, idle connections, connections per address and relay state are
+//! bounded (ADR 0019).
 
 pub mod state;
 
 use std::{
     collections::{HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -36,12 +39,12 @@ use std::{
 };
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{
-        State,
+        ConnectInfo, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -49,19 +52,70 @@ use kith_core::membership::{CertChain, Revocation};
 use kith_core::{DeviceId, verify_signature};
 use kith_protocol::{Frame, PROTOCOL_VERSION, auth_message, decode, encode};
 use kith_relay::{Role, Route, RoutingTable};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
-/// What a connection's writer task is asked to do.
-enum Out {
-    Frame(Frame),
-    /// Close the connection (for example because the device reconnected).
-    Close,
+/// Frames queued for one connection at most (besides the byte budget).
+const MAX_QUEUED_FRAMES: usize = 1024;
+
+/// A connection's outbox: a bounded queue of frames with a byte budget, plus a
+/// close signal that works even when the queue is full.
+#[derive(Clone)]
+struct Tx {
+    q: mpsc::Sender<(Frame, usize)>,
+    queued: Arc<AtomicUsize>,
+    budget: usize,
+    close: Arc<Notify>,
 }
 
-type Tx = mpsc::UnboundedSender<Out>;
+impl Tx {
+    fn new(budget: usize) -> (Self, mpsc::Receiver<(Frame, usize)>) {
+        let (q, rx) = mpsc::channel(MAX_QUEUED_FRAMES);
+        let tx = Self {
+            q,
+            queued: Arc::new(AtomicUsize::new(0)),
+            budget,
+            close: Arc::new(Notify::new()),
+        };
+        (tx, rx)
+    }
 
+    /// Ask the connection to close (for example because the device reconnected).
+    fn close(&self) {
+        self.close.notify_one();
+    }
+}
+
+/// Queue `frame` (dropped if the connection's outbox is full).
 fn send(tx: &Tx, frame: Frame) {
-    let _ = tx.send(Out::Frame(frame));
+    queue(tx, frame);
+}
+
+/// Queue `frame`; `false` if the connection's outbox is full, so the frame was
+/// dropped. One frame always fits into an empty outbox.
+fn queue(tx: &Tx, frame: Frame) -> bool {
+    let n = approx_size(&frame);
+    let before = tx.queued.fetch_add(n, Ordering::Relaxed);
+    if (before > 0 && before + n > tx.budget) || tx.q.try_send((frame, n)).is_err() {
+        tx.queued.fetch_sub(n, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+/// Roughly the memory a queued frame holds.
+fn approx_size(f: &Frame) -> usize {
+    256 + match f {
+        Frame::Broadcast { body, .. }
+        | Frame::Direct { body, .. }
+        | Frame::SyncRequest { body, .. }
+        | Frame::InviteClaim { body, .. }
+        | Frame::Deliver { body, .. }
+        | Frame::ClaimDeliver { body, .. } => body.len(),
+        Frame::Presence { online, .. } => online.len() * 80,
+        Frame::Receipt { delivered } => delivered.len() * 80,
+        Frame::Error { message, .. } => message.len(),
+        _ => 0,
+    }
 }
 
 struct Conn {
@@ -87,6 +141,23 @@ pub struct Limits {
     pub max_message_bytes: usize,
     /// Close a connection after this many refused frames in a row.
     pub max_refused: u32,
+    /// Frames per second per org from its *pending* devices together (invite claims);
+    /// they do not use the org's own budget. Bursts up to twice this.
+    pub pending_frames_per_sec: f64,
+    /// Bytes queued for one connection at most; frames for a device whose outbox is
+    /// full are dropped (and left out of the sender's receipt).
+    pub max_queued_bytes: usize,
+    /// A connection whose socket takes longer than this to accept a frame is closed.
+    pub write_timeout: Duration,
+    /// A connection that sends nothing (not even a pong to the relay's pings) for this
+    /// long is closed. The relay pings every third of it. Zero: no idle timeout.
+    pub idle_timeout: Duration,
+    /// Open connections per client address at most (IPv6: per /64). Zero: no limit.
+    /// Needs the server to provide connection info (the binary does).
+    pub max_connections_per_ip: usize,
+    /// Take the client address from this header (last entry), set by a trusted proxy in
+    /// front of the relay (for example `x-forwarded-for`). Unset: the TCP peer address.
+    pub client_ip_header: Option<String>,
 }
 
 impl Default for Limits {
@@ -99,6 +170,12 @@ impl Default for Limits {
             max_connections: 10_000,
             max_message_bytes: 4 * 1024 * 1024,
             max_refused: 200,
+            pending_frames_per_sec: 10.0,
+            max_queued_bytes: 16 * 1024 * 1024,
+            write_timeout: Duration::from_secs(10),
+            idle_timeout: Duration::from_secs(120),
+            max_connections_per_ip: 100,
+            client_ip_header: None,
         }
     }
 }
@@ -107,7 +184,10 @@ impl Limits {
     /// Defaults, overridden by `KITH_RELAY_DEVICE_FRAMES_PER_SEC`,
     /// `KITH_RELAY_DEVICE_BURST`, `KITH_RELAY_DEVICE_BYTES_PER_SEC`,
     /// `KITH_RELAY_ORG_FRAMES_PER_SEC`, `KITH_RELAY_MAX_CONNECTIONS`,
-    /// `KITH_RELAY_MAX_MESSAGE_BYTES`, `KITH_RELAY_MAX_REFUSED`.
+    /// `KITH_RELAY_MAX_MESSAGE_BYTES`, `KITH_RELAY_MAX_REFUSED`,
+    /// `KITH_RELAY_PENDING_FRAMES_PER_SEC`, `KITH_RELAY_MAX_QUEUED_BYTES`,
+    /// `KITH_RELAY_WRITE_TIMEOUT_SECS`, `KITH_RELAY_IDLE_TIMEOUT_SECS`,
+    /// `KITH_RELAY_MAX_CONNECTIONS_PER_IP`, `KITH_RELAY_CLIENT_IP_HEADER`.
     pub fn from_env() -> Self {
         fn var<T: std::str::FromStr>(name: &str, default: T) -> T {
             std::env::var(name)
@@ -124,6 +204,27 @@ impl Limits {
             max_connections: var("KITH_RELAY_MAX_CONNECTIONS", d.max_connections),
             max_message_bytes: var("KITH_RELAY_MAX_MESSAGE_BYTES", d.max_message_bytes),
             max_refused: var("KITH_RELAY_MAX_REFUSED", d.max_refused),
+            pending_frames_per_sec: var(
+                "KITH_RELAY_PENDING_FRAMES_PER_SEC",
+                d.pending_frames_per_sec,
+            ),
+            max_queued_bytes: var("KITH_RELAY_MAX_QUEUED_BYTES", d.max_queued_bytes),
+            write_timeout: Duration::from_secs(var(
+                "KITH_RELAY_WRITE_TIMEOUT_SECS",
+                d.write_timeout.as_secs(),
+            )),
+            idle_timeout: Duration::from_secs(var(
+                "KITH_RELAY_IDLE_TIMEOUT_SECS",
+                d.idle_timeout.as_secs(),
+            )),
+            max_connections_per_ip: var(
+                "KITH_RELAY_MAX_CONNECTIONS_PER_IP",
+                d.max_connections_per_ip,
+            ),
+            client_ip_header: std::env::var("KITH_RELAY_CLIENT_IP_HEADER")
+                .ok()
+                .map(|h| h.trim().to_ascii_lowercase())
+                .filter(|h| !h.is_empty()),
         }
     }
 }
@@ -146,11 +247,15 @@ impl Bucket {
         }
     }
 
-    fn take(&mut self, n: f64) -> bool {
+    fn refill(&mut self) {
         let now = Instant::now();
         self.tokens =
             (self.tokens + now.duration_since(self.last).as_secs_f64() * self.rate).min(self.burst);
         self.last = now;
+    }
+
+    fn take(&mut self, n: f64) -> bool {
+        self.refill();
         if self.tokens >= n {
             self.tokens -= n;
             true
@@ -169,6 +274,13 @@ pub struct Relay {
     limits: Limits,
     open: Arc<AtomicUsize>,
     org_buckets: HashMap<String, Bucket>,
+    /// Per org, the budget its pending devices share (invite claims).
+    pending_buckets: HashMap<String, Bucket>,
+    /// Open connections per client address (see [`Limits::max_connections_per_ip`]).
+    /// Its own lock, so counting needs no relay lock.
+    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    /// Revoked devices remembered, all orgs together.
+    revoked_total: usize,
     /// Revoked devices per org (REQ-INV-004), with who revoked them. RAM (and
     /// optionally stored, ADR 0014); admins repeat them on announce.
     revoked: HashMap<String, HashMap<String, Revoked>>,
@@ -206,8 +318,15 @@ fn canonical_org(org: &str) -> Option<String> {
 
 /// Revoked devices remembered per org at most (memory bound).
 const MAX_REVOKED_PER_ORG: usize = 10_000;
-/// Revocation notices read from one announce at most.
+/// Revoked devices remembered at most, all orgs together (memory bound). Notices
+/// beyond it are refused and logged; serve only approved orgs to stay clear of it.
+const MAX_REVOKED_TOTAL: usize = 200_000;
+/// Revocation notices read from one announce at most (all its orgs together).
 const MAX_NOTICES_PER_ANNOUNCE: usize = 256;
+/// Orgs in one announce at most; a larger announce is refused as a whole.
+const MAX_ORGS_PER_ANNOUNCE: usize = 64;
+/// Orgs one device may be announced in at the same time.
+const MAX_ORGS_PER_DEVICE: usize = 64;
 
 /// Shared relay state (routing table and live connections).
 pub type Shared = Arc<Mutex<Relay>>;
@@ -238,6 +357,9 @@ pub fn new_state_with(auth_timeout: Duration, limits: Limits) -> Shared {
         limits,
         open: Arc::new(AtomicUsize::new(0)),
         org_buckets: HashMap::new(),
+        pending_buckets: HashMap::new(),
+        per_ip: Arc::new(Mutex::new(HashMap::new())),
+        revoked_total: 0,
         revoked: HashMap::new(),
         proofs: HashMap::new(),
         allowed_orgs: None,
@@ -284,6 +406,7 @@ pub fn set_allowed_orgs(state: &Shared, orgs: Option<HashSet<String>>) {
                 );
             }
         }
+        forget_if_empty(&mut r, &org);
     }
 }
 
@@ -304,10 +427,30 @@ pub fn app(state: Shared) -> Router {
         .with_state(state)
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> Response {
-    let (open, limits) = {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Shared>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+) -> Response {
+    let (open, limits, per_ip) = {
         let r = state.lock().unwrap();
-        (r.open.clone(), r.limits.clone())
+        (r.open.clone(), r.limits.clone(), r.per_ip.clone())
+    };
+    let ip = peer.and_then(|Extension(ConnectInfo(addr))| {
+        client_ip(addr.ip(), &headers, limits.client_ip_header.as_deref())
+    });
+    let ip_guard = match ip {
+        Some(ip) if limits.max_connections_per_ip > 0 => {
+            let mut m = per_ip.lock().unwrap();
+            let n = m.entry(ip).or_default();
+            if *n >= limits.max_connections_per_ip {
+                return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response();
+            }
+            *n += 1;
+            Some(IpGuard(per_ip.clone(), ip))
+        }
+        _ => None,
     };
     if open.fetch_add(1, Ordering::Relaxed) >= limits.max_connections {
         open.fetch_sub(1, Ordering::Relaxed);
@@ -317,9 +460,47 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> Respon
     ws.max_message_size(limits.max_message_bytes)
         .max_frame_size(limits.max_message_bytes)
         .on_upgrade(move |socket| async move {
-            let _guard = guard;
+            let _guards = (guard, ip_guard);
             connection(socket, state, limits).await
         })
+}
+
+/// The address a connection is counted under: the TCP peer, or the last entry of
+/// `header` (set by a trusted proxy) when configured. IPv6 addresses count per /64.
+fn client_ip(peer: IpAddr, headers: &HeaderMap, header: Option<&str>) -> Option<IpAddr> {
+    let ip = match header {
+        Some(h) => headers
+            .get_all(h)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .next_back()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(peer),
+        None => peer,
+    };
+    Some(match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+        v4 => v4,
+    })
+}
+
+/// Counts a connection for its client address for as long as it lives.
+struct IpGuard(Arc<Mutex<HashMap<IpAddr, usize>>>, IpAddr);
+
+impl Drop for IpGuard {
+    fn drop(&mut self) {
+        let mut m = self.0.lock().unwrap();
+        if let Some(n) = m.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.1);
+            }
+        }
+    }
 }
 
 async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
@@ -329,7 +510,7 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
         limits.device_bytes_per_sec * 4.0,
     );
     let mut refused = 0u32;
-    let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
+    let (tx, mut rx) = Tx::new(limits.max_queued_bytes);
     let (conn_id, auth_timeout) = {
         let r = state.lock().unwrap();
         (r.next_conn.fetch_add(1, Ordering::Relaxed), r.auth_timeout)
@@ -337,24 +518,57 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
     let mut session = Session::New;
     let deadline = tokio::time::sleep(auth_timeout);
     tokio::pin!(deadline);
+    let idle = limits.idle_timeout;
+    let mut ping = tokio::time::interval(if idle.is_zero() {
+        Duration::from_secs(3600)
+    } else {
+        idle / 3
+    });
+    ping.tick().await; // the first tick is immediate
+    let mut last_heard = Instant::now();
+    let write = limits.write_timeout;
+    let close = tx.close.clone();
 
     loop {
         let authed = matches!(session, Session::Authed(_));
         tokio::select! {
             out = rx.recv() => match out {
-                Some(Out::Frame(f)) => {
+                Some((f, n)) => {
+                    tx.queued.fetch_sub(n, Ordering::Relaxed);
                     let Ok(bytes) = encode(&f) else { continue };
-                    if socket.send(Message::Binary(bytes.into())).await.is_err() { break; }
+                    // A device that does not read is closed, not buffered for.
+                    if !matches!(
+                        tokio::time::timeout(write, socket.send(Message::Binary(bytes.into()))).await,
+                        Ok(Ok(()))
+                    ) {
+                        tracing::debug!("write failed or timed out; closing");
+                        break;
+                    }
                 }
-                Some(Out::Close) | None => break,
+                None => break,
             },
+            () = close.notified() => break,
             () = &mut deadline, if !authed => {
                 tracing::debug!("authentication timed out");
-                send_now(&mut socket, error("auth-timeout", "authenticate within the time limit".into())).await;
+                send_now(&mut socket, error("auth-timeout", "authenticate within the time limit".into()), write).await;
                 break;
+            }
+            _ = ping.tick(), if !idle.is_zero() => {
+                if last_heard.elapsed() >= idle {
+                    tracing::debug!("idle timeout");
+                    send_now(&mut socket, error("idle-timeout", "nothing received; closing".into()), write).await;
+                    break;
+                }
+                if !matches!(
+                    tokio::time::timeout(write, socket.send(Message::Ping(Vec::new().into()))).await,
+                    Ok(Ok(()))
+                ) {
+                    break;
+                }
             }
             msg = socket.recv() => {
                 let Some(Ok(msg)) = msg else { break };
+                last_heard = Instant::now();
                 let raw = match msg {
                     Message::Binary(b) => b.to_vec(),
                     Message::Text(t) => t.as_bytes().to_vec(),
@@ -365,7 +579,7 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
                 if !(frames.take(1.0) && bytes.take(raw.len() as f64)) {
                     refused += 1;
                     if refused >= limits.max_refused {
-                        send_now(&mut socket, error("rate-limited", "too many frames; closing".into())).await;
+                        send_now(&mut socket, error("rate-limited", "too many frames; closing".into()), write).await;
                         break;
                     }
                     if refused.is_power_of_two() {
@@ -376,29 +590,49 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
                 refused = 0;
                 match decode(&raw) {
                     Ok(frame) => {
-                        if handle(frame, &mut session, conn_id, &tx, &state) == Flow::Close {
+                        // Signatures are checked here, without the relay lock; an
+                        // announce (many signatures) on the blocking pool.
+                        let checked = if matches!(frame, Frame::Announce { .. }) {
+                            let device = match &session {
+                                Session::Authed(d) => Some(d.clone()),
+                                _ => None,
+                            };
+                            match tokio::task::spawn_blocking(move || check_frame(frame, None, device.as_deref())).await {
+                                Ok(c) => c,
+                                Err(_) => break,
+                            }
+                        } else {
+                            check_frame(frame, Some(&session), None)
+                        };
+                        if handle(checked, &mut session, conn_id, &tx, &state) == Flow::Close {
                             // Flush the queued error frame, then hang up.
-                            while let Ok(Out::Frame(f)) = rx.try_recv() {
-                                send_now(&mut socket, f).await;
+                            while let Ok((f, _)) = rx.try_recv() {
+                                send_now(&mut socket, f, write).await;
                             }
                             break;
                         }
                     }
-                    Err(e) => send(&tx, error("bad-frame", e.to_string())),
+                    Err(e) => {
+                        send(&tx, error("bad-frame", e.to_string()));
+                    }
                 }
             }
         }
     }
 
     // Say goodbye properly so clients see a clean close, not a reset.
-    let _ = socket.send(Message::Close(None)).await;
+    let _ = tokio::time::timeout(write, socket.send(Message::Close(None))).await;
 
     if let Session::Authed(d) = session {
         let mut r = state.lock().unwrap();
         // A newer connection of the same device may have replaced this one; only
         // clean up if this connection still owns the device's slot.
         if r.conns.get(&d).is_some_and(|c| c.id == conn_id) {
+            let orgs = r.table.orgs_of(&d);
             r.table.disconnect(&d);
+            for org in orgs {
+                forget_if_empty(&mut r, &org);
+            }
             r.proofs.remove(&d);
             r.conns.remove(&d);
             tracing::debug!(device = %d, "disconnected");
@@ -406,9 +640,9 @@ async fn connection(mut socket: WebSocket, state: Shared, limits: Limits) {
     }
 }
 
-async fn send_now(socket: &mut WebSocket, frame: Frame) {
+async fn send_now(socket: &mut WebSocket, frame: Frame, write: Duration) {
     if let Ok(bytes) = encode(&frame) {
-        let _ = socket.send(Message::Binary(bytes.into())).await;
+        let _ = tokio::time::timeout(write, socket.send(Message::Binary(bytes.into()))).await;
     }
 }
 
@@ -418,11 +652,93 @@ enum Flow {
     Close,
 }
 
-fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Shared) -> Flow {
+/// A frame with its signatures checked. Checking needs no shared state, so it
+/// happens before the relay lock is taken.
+enum Checked {
+    /// `auth`, with whether its signature matches the challenged key.
+    Auth(bool),
+    /// `announce`, each org's proof and notices checked.
+    Announce(Vec<CheckedOrg>),
+    /// Refused as a whole with this error.
+    Refuse(Frame),
+    /// Any other frame, unchanged.
+    Frame(Frame),
+}
+
+/// One org of an announce, its signatures checked.
+struct CheckedOrg {
+    /// Canonical org ID.
+    org: String,
+    always_on: bool,
+    /// The role the proof gives (signatures only; revocations are checked under the lock).
+    proof: Result<(Role, Option<CertChain>), &'static str>,
+    /// Whether the announce carried revocation notices for this org.
+    sent_notices: bool,
+    /// The notices, verified, with their hex form (only for an admin's proof).
+    notices: Vec<Result<(Revocation, String), String>>,
+}
+
+/// Check the signatures in `frame`: an `auth` against the challenge in `session`,
+/// an `announce` by the authenticated `device`.
+fn check_frame(frame: Frame, session: Option<&Session>, device: Option<&str>) -> Checked {
+    match (frame, session, device) {
+        (Frame::Auth { signature }, Some(Session::Challenged { device, nonce }), _) => {
+            let sig = hex::decode(&signature)
+                .ok()
+                .and_then(|b| <[u8; 64]>::try_from(b).ok());
+            Checked::Auth(sig.is_some_and(|s| {
+                verify_signature(device, &auth_message(&device.to_hex(), nonce), &s).is_ok()
+            }))
+        }
+        (frame @ Frame::Announce { .. }, _, Some(d)) => {
+            let orgs = match canonical_frame(frame) {
+                Ok(Frame::Announce { orgs }) => orgs,
+                Ok(other) => return Checked::Frame(other),
+                Err(org) => return Checked::Refuse(bad_org(&org)),
+            };
+            if orgs.len() > MAX_ORGS_PER_ANNOUNCE {
+                return Checked::Refuse(error(
+                    "too-many-orgs",
+                    format!("announce at most {MAX_ORGS_PER_ANNOUNCE} orgs at a time"),
+                ));
+            }
+            let mut budget = MAX_NOTICES_PER_ANNOUNCE;
+            let checked = orgs
+                .into_iter()
+                .map(|m| {
+                    let proof = verify_proof(&m.org, d, &m.proof);
+                    let mut notices = vec![];
+                    if matches!(proof, Ok((Role::Admin, _))) {
+                        let org_key = DeviceId::from_hex(&m.org).expect("canonical");
+                        let take = m.revoked.len().min(budget);
+                        budget -= take;
+                        notices = m
+                            .revoked
+                            .iter()
+                            .take(take)
+                            .map(|n| verify_notice(&org_key, n).map(|rev| (rev, n.clone())))
+                            .collect();
+                    }
+                    CheckedOrg {
+                        sent_notices: !m.revoked.is_empty(),
+                        org: m.org,
+                        always_on: m.always_on,
+                        proof,
+                        notices,
+                    }
+                })
+                .collect();
+            Checked::Announce(checked)
+        }
+        (frame, _, _) => Checked::Frame(frame),
+    }
+}
+
+fn handle(checked: Checked, session: &mut Session, conn_id: u64, tx: &Tx, state: &Shared) -> Flow {
     let mut r = state.lock().unwrap();
     // Handshake first: nothing else is accepted before the device is authenticated.
-    match (&*session, frame) {
-        (Session::New, Frame::Hello { version, device }) => {
+    match (&*session, checked) {
+        (Session::New, Checked::Frame(Frame::Hello { version, device })) => {
             if version != PROTOCOL_VERSION {
                 send(
                     tx,
@@ -450,14 +766,7 @@ fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Sh
             *session = Session::Challenged { device: id, nonce };
             Flow::Continue
         }
-        (Session::Challenged { device, nonce }, Frame::Auth { signature }) => {
-            let sig = hex::decode(&signature)
-                .ok()
-                .and_then(|b| <[u8; 64]>::try_from(b).ok());
-            let device_hex = device.to_hex();
-            let ok = sig.is_some_and(|s| {
-                verify_signature(device, &auth_message(&device_hex, nonce), &s).is_ok()
-            });
+        (Session::Challenged { device, .. }, Checked::Auth(ok)) => {
             if !ok {
                 send(
                     tx,
@@ -468,6 +777,7 @@ fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Sh
                 );
                 return Flow::Close;
             }
+            let device_hex = device.to_hex();
             // A reconnecting device replaces its old connection, which is closed.
             if let Some(old) = r.conns.insert(
                 device_hex.clone(),
@@ -476,17 +786,26 @@ fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Sh
                     tx: tx.clone(),
                 },
             ) {
-                let _ = old.tx.send(Out::Close);
+                old.tx.close();
             }
             tracing::debug!(device = %device_hex, "authenticated");
             *session = Session::Authed(device_hex);
             Flow::Continue
         }
-        (Session::Authed(_), Frame::Hello { .. } | Frame::Auth { .. }) => {
+        (Session::Authed(_), Checked::Frame(Frame::Hello { .. } | Frame::Auth { .. })) => {
             send(tx, error("unsupported", "already authenticated".into()));
             Flow::Continue
         }
-        (Session::Authed(d), frame) => {
+        (Session::Authed(d), Checked::Announce(orgs)) => {
+            let d = d.clone();
+            announce(orgs, &d, tx, &mut r);
+            Flow::Continue
+        }
+        (Session::Authed(_), Checked::Refuse(f)) => {
+            send(tx, f);
+            Flow::Continue
+        }
+        (Session::Authed(d), Checked::Frame(frame)) => {
             let d = d.clone();
             route(frame, &d, tx, &mut r);
             Flow::Continue
@@ -495,7 +814,7 @@ fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Sh
             send(tx, error("unauthenticated", "send hello first".into()));
             Flow::Continue
         }
-        (Session::Challenged { .. }, _) => {
+        (Session::Challenged { .. } | Session::Authed(_), _) => {
             send(
                 tx,
                 error(
@@ -508,20 +827,15 @@ fn handle(frame: Frame, session: &mut Session, conn_id: u64, tx: &Tx, state: &Sh
     }
 }
 
-/// The role a membership proof gives `device` in `org` (REQ-RELAY-004). An empty
-/// proof means "joining": pending.
-fn check_membership(
+/// The role a membership proof gives `device` in `org` (REQ-RELAY-004), from its
+/// signatures alone. An empty proof means "joining": pending.
+fn verify_proof(
     org: &str,
     device: &str,
     proof: &str,
-    revoked: Option<&HashMap<String, Revoked>>,
 ) -> Result<(Role, Option<CertChain>), &'static str> {
     let org_key = DeviceId::from_hex(org).map_err(|_| "org ID must be the hex org root key")?;
     if proof.is_empty() {
-        // A revoked device does not come back as a newcomer.
-        if revoked.is_some_and(|set| set.contains_key(device)) {
-            return Err("device was revoked");
-        }
         return Ok((Role::Pending, None));
     }
     let device = DeviceId::from_hex(device).map_err(|_| "bad device")?;
@@ -529,9 +843,6 @@ fn check_membership(
     let proven = chain
         .verify(&org_key, &device)
         .map_err(|_| "membership proof does not verify")?;
-    if revoked.is_some_and(|set| chain_revoked(&chain, set)) {
-        return Err("device was revoked");
-    }
     let role = if proven.admin {
         Role::Admin
     } else {
@@ -540,24 +851,48 @@ fn check_membership(
     Ok((role, Some(chain)))
 }
 
-/// Verify one notice and remember its device as revoked; `Ok(true)` if it changed
+/// Refuse a device a revocation reaches: through its chain, or, pending (no
+/// chain), by name. A revoked device does not come back as a newcomer.
+fn not_revoked(
+    device: &str,
+    chain: Option<&CertChain>,
+    revoked: Option<&HashMap<String, Revoked>>,
+) -> Result<(), &'static str> {
+    let hit = revoked.is_some_and(|set| match chain {
+        Some(c) => chain_revoked(c, set),
+        None => set.contains_key(device),
+    });
+    if hit {
+        Err("device was revoked")
+    } else {
+        Ok(())
+    }
+}
+
+/// Parse and verify one revocation notice against the org key.
+pub(crate) fn verify_notice(org_key: &DeviceId, notice: &str) -> Result<Revocation, String> {
+    Revocation::from_hex(notice)
+        .and_then(|rev| rev.verify(org_key).map(|_| rev))
+        .map_err(|e| e.to_string())
+}
+
+/// Remember a verified notice's device as revoked; `Ok(true)` if it changed
 /// anything. A notice by an admin the root revoked does not count (when `loading`
 /// stored notices: unless it is older than that revocation). New notices are
 /// handed to the persistence writer when it is on.
-pub(crate) fn remember_revocation(
+pub(crate) fn remember_verified(
     r: &mut Relay,
     org: &str,
-    org_key: &DeviceId,
+    rev: &Revocation,
     notice: &str,
     loading: bool,
 ) -> Result<bool, String> {
-    let rev = Revocation::from_hex(notice)
-        .and_then(|rev| rev.verify(org_key).map(|_| rev))
-        .map_err(|e| e.to_string())?;
     let device = rev.device.to_hex();
-    let set = r.revoked.entry(org.to_string()).or_default();
+    let set = r.revoked.get(org);
     if !rev.by_root()
-        && let Some(e) = set.get(&rev.issuer.to_hex()).filter(|e| e.by_root)
+        && let Some(e) = set
+            .and_then(|s| s.get(&rev.issuer.to_hex()))
+            .filter(|e| e.by_root)
         && !(loading && rev.issued_ms < e.issued_ms)
     {
         return Err("the issuer was revoked".into());
@@ -566,37 +901,53 @@ pub(crate) fn remember_revocation(
         by_root: rev.by_root(),
         issued_ms: rev.issued_ms,
     };
-    let new = match set.get(&device) {
+    let new = match set.and_then(|s| s.get(&device)) {
         Some(e) if e.by_root || !entry.by_root => false,
-        None if set.len() >= MAX_REVOKED_PER_ORG => false,
-        // New, or a root notice for a device only an admin had revoked.
-        _ => {
-            set.insert(device.clone(), entry);
+        // A root notice for a device only an admin had revoked.
+        Some(_) => true,
+        None if set.map_or(0, HashMap::len) >= MAX_REVOKED_PER_ORG => false,
+        None if r.revoked_total >= MAX_REVOKED_TOTAL => {
+            tracing::warn!(%org, "the relay's revocation list is full; a notice was not kept");
+            return Err("the relay's revocation list is full".into());
+        }
+        None => {
+            r.revoked_total += 1;
             true
         }
     };
-    if new && let Some(tx) = &r.persist {
+    if !new {
+        return Ok(false);
+    }
+    r.revoked
+        .entry(org.to_string())
+        .or_default()
+        .insert(device.clone(), entry);
+    if let Some(tx) = &r.persist {
         let _ = tx.send(state::RevocationRecord {
             org: org.to_string(),
             device,
             notice: notice.to_string(),
         });
     }
-    Ok(new)
+    Ok(true)
 }
 
 /// Verify and remember the revocation notices of an announce, then remove every
 /// online device of `org` they affect (the revoked ones and devices certified
 /// through them). Bad notices are ignored with an error to `tx`.
-fn apply_revocations(r: &mut Relay, org: &str, notices: &[String], tx: &Tx) {
-    let Ok(org_key) = DeviceId::from_hex(org) else {
-        return;
-    };
+fn apply_revocations(
+    r: &mut Relay,
+    org: &str,
+    notices: Vec<Result<(Revocation, String), String>>,
+    tx: &Tx,
+) {
     let mut added = false;
-    for n in notices.iter().take(MAX_NOTICES_PER_ANNOUNCE) {
-        match remember_revocation(r, org, &org_key, n, false) {
+    for n in notices {
+        match n.and_then(|(rev, hex)| remember_verified(r, org, &rev, &hex, false)) {
             Ok(new) => added |= new,
-            Err(e) => send(tx, error("bad-revocation", format!("{org}: {e}"))),
+            Err(e) => {
+                send(tx, error("bad-revocation", format!("{org}: {e}")));
+            }
         }
     }
     if !added {
@@ -627,6 +978,7 @@ fn apply_revocations(r: &mut Relay, org: &str, notices: &[String], tx: &Tx) {
             );
         }
     }
+    forget_if_empty(r, org);
     let online = r.table.online(org);
     fan_out(r, &online, || Frame::Presence {
         org: org.to_string(),
@@ -634,13 +986,124 @@ fn apply_revocations(r: &mut Relay, org: &str, notices: &[String], tx: &Tx) {
     });
 }
 
-/// Take one routed frame from `org`'s bucket.
-fn org_allows(r: &mut Relay, org: &str) -> bool {
-    let rate = r.limits.org_frames_per_sec;
-    r.org_buckets
-        .entry(org.to_string())
+/// Take one routed frame from `org`'s bucket, or its pending devices' bucket.
+fn org_allows(r: &mut Relay, org: &str, pending: bool) -> bool {
+    let (map, rate) = if pending {
+        (&mut r.pending_buckets, r.limits.pending_frames_per_sec)
+    } else {
+        (&mut r.org_buckets, r.limits.org_frames_per_sec)
+    };
+    map.entry(org.to_string())
         .or_insert_with(|| Bucket::new(rate, rate * 2.0))
         .take(1.0)
+}
+
+/// Drop an org's rate buckets once none of its devices is online. Buckets exist only
+/// for orgs with devices online, so their number stays bounded.
+fn forget_if_empty(r: &mut Relay, org: &str) {
+    if r.table.devices_in(org).is_empty() {
+        r.org_buckets.remove(org);
+        r.pending_buckets.remove(org);
+    }
+}
+
+fn bad_org(org: &str) -> Frame {
+    error(
+        "bad-org",
+        format!("{org}: org ID must be the hex org root key"),
+    )
+}
+
+/// Apply an announce whose signatures are checked: join each org with the role its
+/// proof gives, unless a revocation reaches the device. Only an admin's announce
+/// feeds revocation notices, and they may revoke the announcer itself.
+fn announce(orgs: Vec<CheckedOrg>, d: &str, tx: &Tx, r: &mut Relay) {
+    for m in orgs {
+        if let Some(allowed) = &r.allowed_orgs
+            && !allowed.contains(&m.org)
+        {
+            send(
+                tx,
+                error(
+                    "org-not-allowed",
+                    format!("{}: this relay does not serve this organization", m.org),
+                ),
+            );
+            continue;
+        }
+        let refuse = |why: &str| {
+            let code = if why == "device was revoked" {
+                "revoked"
+            } else {
+                "bad-proof"
+            };
+            send(tx, error(code, format!("{}: {why}", m.org)));
+        };
+        if r.table.role(&m.org, d).is_none() && r.table.orgs_of(d).len() >= MAX_ORGS_PER_DEVICE {
+            send(
+                tx,
+                error(
+                    "too-many-orgs",
+                    format!(
+                        "{}: a device is in at most {MAX_ORGS_PER_DEVICE} orgs at a time",
+                        m.org
+                    ),
+                ),
+            );
+            continue;
+        }
+        let (role, chain) = match m.proof {
+            Ok(x) => x,
+            Err(why) => {
+                refuse(why);
+                continue;
+            }
+        };
+        if let Err(why) = not_revoked(d, chain.as_ref(), r.revoked.get(&m.org)) {
+            refuse(why);
+            continue;
+        }
+        if m.sent_notices {
+            if role != Role::Admin {
+                send(
+                    tx,
+                    error(
+                        "bad-revocation",
+                        format!("{}: only admins send revocation notices", m.org),
+                    ),
+                );
+            } else {
+                apply_revocations(r, &m.org, m.notices, tx);
+                if let Err(why) = not_revoked(d, chain.as_ref(), r.revoked.get(&m.org)) {
+                    refuse(why);
+                    continue;
+                }
+            }
+        }
+        match chain {
+            Some(c) => {
+                r.proofs
+                    .entry(d.to_string())
+                    .or_default()
+                    .insert(m.org.clone(), c);
+            }
+            None => {
+                if let Some(p) = r.proofs.get_mut(d) {
+                    p.remove(&m.org);
+                }
+            }
+        }
+        r.table.join_as(d, &m.org, role);
+        r.table
+            .set_always_on(d, m.always_on && role != Role::Pending);
+        if role != Role::Pending {
+            let online = r.table.online(&m.org);
+            fan_out(r, &online, || Frame::Presence {
+                org: m.org.clone(),
+                online: online.clone(),
+            });
+        }
+    }
 }
 
 fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
@@ -648,13 +1111,7 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
     let frame = match canonical_frame(frame) {
         Ok(f) => f,
         Err(org) => {
-            send(
-                tx,
-                error(
-                    "bad-org",
-                    format!("{org}: org ID must be the hex org root key"),
-                ),
-            );
+            send(tx, bad_org(&org));
             return;
         }
     };
@@ -668,8 +1125,8 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
         _ => None,
     };
     if let Some(org) = routed_org
-        && r.table.role(&org, d).is_some()
-        && !org_allows(r, &org)
+        && let Some(role) = r.table.role(&org, d)
+        && !org_allows(r, &org, role == Role::Pending)
     {
         send(
             tx,
@@ -681,83 +1138,6 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
         return;
     }
     match frame {
-        Frame::Announce { orgs } => {
-            for m in orgs {
-                if let Some(allowed) = &r.allowed_orgs
-                    && !allowed.contains(&m.org.to_ascii_lowercase())
-                {
-                    send(
-                        tx,
-                        error(
-                            "org-not-allowed",
-                            format!("{}: this relay does not serve this organization", m.org),
-                        ),
-                    );
-                    continue;
-                }
-                let refuse = |why: &str| {
-                    let code = if why == "device was revoked" {
-                        "revoked"
-                    } else {
-                        "bad-proof"
-                    };
-                    send(tx, error(code, format!("{}: {why}", m.org)));
-                };
-                // The announcer proves its membership first; only an admin's
-                // announce feeds revocation notices, and they may revoke the
-                // announcer itself.
-                let (role, chain) =
-                    match check_membership(&m.org, d, &m.proof, r.revoked.get(&m.org)) {
-                        Ok(x) => x,
-                        Err(why) => {
-                            refuse(why);
-                            continue;
-                        }
-                    };
-                if !m.revoked.is_empty() {
-                    if role != Role::Admin {
-                        send(
-                            tx,
-                            error(
-                                "bad-revocation",
-                                format!("{}: only admins send revocation notices", m.org),
-                            ),
-                        );
-                    } else {
-                        apply_revocations(r, &m.org, &m.revoked, tx);
-                        if let Err(why) =
-                            check_membership(&m.org, d, &m.proof, r.revoked.get(&m.org))
-                        {
-                            refuse(why);
-                            continue;
-                        }
-                    }
-                }
-                match chain {
-                    Some(c) => {
-                        r.proofs
-                            .entry(d.to_string())
-                            .or_default()
-                            .insert(m.org.clone(), c);
-                    }
-                    None => {
-                        if let Some(p) = r.proofs.get_mut(d) {
-                            p.remove(&m.org);
-                        }
-                    }
-                }
-                r.table.join_as(d, &m.org, role);
-                r.table
-                    .set_always_on(d, m.always_on && role != Role::Pending);
-                if role != Role::Pending {
-                    let online = r.table.online(&m.org);
-                    fan_out(r, &online, || Frame::Presence {
-                        org: m.org.clone(),
-                        online: online.clone(),
-                    });
-                }
-            }
-        }
         Frame::Broadcast { org, body } if member(r, &org) => {
             let route = r.table.broadcast(&org, d);
             deliver(r, route, tx, org, d, body);
@@ -777,14 +1157,11 @@ fn route(frame: Frame, d: &str, tx: &Tx, r: &mut Relay) {
             };
             // Its own frame type: the receiver takes nothing but a claim from it.
             let delivered = match route {
-                Route::To(devs) => {
-                    fan_out(r, &devs, || Frame::ClaimDeliver {
-                        org: org.clone(),
-                        from: d.into(),
-                        body: body.clone(),
-                    });
-                    devs
-                }
+                Route::To(devs) => fan_out(r, &devs, || Frame::ClaimDeliver {
+                    org: org.clone(),
+                    from: d.into(),
+                    body: body.clone(),
+                }),
                 Route::Dropped => vec![],
             };
             send(tx, Frame::Receipt { delivered });
@@ -848,25 +1225,23 @@ fn canonical_frame(frame: Frame) -> Result<Frame, String> {
 
 fn deliver(r: &Relay, route: Route, tx: &Tx, org: String, from: &str, body: Vec<u8>) {
     let delivered = match route {
-        Route::To(devs) => {
-            fan_out(r, &devs, || Frame::Deliver {
-                org: org.clone(),
-                from: from.into(),
-                body: body.clone(),
-            });
-            devs
-        }
+        Route::To(devs) => fan_out(r, &devs, || Frame::Deliver {
+            org: org.clone(),
+            from: from.into(),
+            body: body.clone(),
+        }),
         Route::Dropped => vec![],
     };
     send(tx, Frame::Receipt { delivered });
 }
 
-fn fan_out(r: &Relay, to: &[String], make: impl Fn() -> Frame) {
-    for d in to {
-        if let Some(conn) = r.conns.get(d) {
-            send(&conn.tx, make());
-        }
-    }
+/// Queue a frame for each of `to`; the devices it was queued for. A device whose
+/// outbox is full misses it (it catches up by sync).
+fn fan_out(r: &Relay, to: &[String], make: impl Fn() -> Frame) -> Vec<String> {
+    to.iter()
+        .filter(|d| r.conns.get(*d).is_some_and(|conn| queue(&conn.tx, make())))
+        .cloned()
+        .collect()
 }
 
 fn error(code: &str, message: String) -> Frame {
@@ -1885,6 +2260,12 @@ mod tests {
             &ann(&org, chain_b.to_hex(), vec![root_on_a.to_hex()]),
         )
         .await;
+        // Applied once B hears that A left (announces of different connections
+        // are not ordered otherwise).
+        assert!(matches!(
+            next_frame(&mut b2).await,
+            Some(Frame::Presence { .. })
+        ));
         let mut a2 = login(&url, &ka).await;
         send_frame(&mut a2, &ann(&org, chain_a.to_hex(), vec![])).await;
         expect_error(next_frame(&mut a2).await, "revoked");
@@ -1985,5 +2366,311 @@ mod tests {
         assert!(set.contains_key(&m_old.device_id().to_hex()));
         assert!(!set.contains_key(&m_new.device_id().to_hex()));
         assert!(set[&ka.device_id().to_hex()].by_root);
+    }
+
+    // ---- resource limits (REQ-RELAY-006, ADR 0019) ----
+
+    /// A relay on `state`, with connection info (as the binary runs it).
+    async fn start_state(state: Shared) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        url
+    }
+
+    fn claim(org: &str) -> Frame {
+        Frame::InviteClaim {
+            org: org.into(),
+            token: "t".into(),
+            body: b"claim".to_vec(),
+            to: None,
+        }
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn pending_devices_do_not_use_up_the_orgs_budget() {
+        let url = start_with(Limits {
+            org_frames_per_sec: 2.0,
+            pending_frames_per_sec: 0.5,
+            ..Limits::default()
+        })
+        .await;
+        let (root, ka, kb, kp) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let org = org_id(&root);
+        let mut a = login(&url, &ka).await;
+        announce(&mut a, &org, proof(&root, &ka, true)).await;
+        let mut b = login(&url, &kb).await;
+        join(&mut b, &root, &kb).await;
+        let mut p = login(&url, &kp).await;
+        announce(&mut p, &org, String::new()).await;
+        for _ in 0..10 {
+            send_frame(&mut p, &claim(&org)).await;
+        }
+        let (frames, _) = drain(&mut p, Duration::from_millis(300)).await;
+        assert_eq!(
+            count(&frames, |f| matches!(f, Frame::Receipt { .. })),
+            1,
+            "a burst of 2 x 0.5 claims: {frames:?}"
+        );
+        assert!(count(&frames, rate_limited) >= 8);
+        // The members' budget is untouched.
+        send_frame(
+            &mut b,
+            &Frame::Broadcast {
+                org: org.clone(),
+                body: vec![1],
+            },
+        )
+        .await;
+        let (frames, _) = drain(&mut b, Duration::from_millis(300)).await;
+        assert_eq!(
+            count(&frames, |f| matches!(f, Frame::Receipt { .. })),
+            1,
+            "{frames:?}"
+        );
+        assert_eq!(count(&frames, rate_limited), 0);
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn outboxes_have_a_frame_and_byte_budget() {
+        let big = |n: usize| Frame::Deliver {
+            org: "o".into(),
+            from: "f".into(),
+            body: vec![0; n],
+        };
+        // One frame always fits; more only within the byte budget.
+        let (tx, mut rx) = Tx::new(2000);
+        assert!(queue(&tx, big(5000)));
+        assert!(!queue(&tx, big(10)));
+        let (_, n) = rx.try_recv().unwrap();
+        tx.queued.fetch_sub(n, Ordering::Relaxed);
+        assert!(queue(&tx, big(1000)));
+        assert!(!queue(&tx, big(1000)), "over the byte budget");
+        // And within the frame budget.
+        let (tx, _rx) = Tx::new(usize::MAX);
+        for _ in 0..MAX_QUEUED_FRAMES {
+            assert!(queue(&tx, big(0)));
+        }
+        assert!(!queue(&tx, big(0)), "over the frame budget");
+    }
+
+    /// req: REQ-RELAY-006
+    #[test]
+    fn receipts_leave_out_devices_whose_outbox_is_full() {
+        let state = new_state(Duration::from_secs(10));
+        let mut r = state.lock().unwrap();
+        // Two devices; nobody reads `stuck`'s outbox, as with a device that stopped reading.
+        let (stuck, _rx1) = Tx::new(usize::MAX);
+        let (fine, _rx2) = Tx::new(usize::MAX);
+        while queue(&stuck, error("x", String::new())) {}
+        r.conns.insert("stuck".into(), Conn { id: 1, tx: stuck });
+        r.conns.insert("fine".into(), Conn { id: 2, tx: fine });
+        let to = ["stuck".to_string(), "fine".to_string(), "gone".to_string()];
+        assert_eq!(fan_out(&r, &to, || error("y", String::new())), ["fine"]);
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn silent_connections_are_closed_and_answering_ones_kept() {
+        let url = start_with(Limits {
+            idle_timeout: Duration::from_millis(300),
+            ..Limits::default()
+        })
+        .await;
+        let (root, ka, kb) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let mut a = login(&url, &ka).await;
+        join(&mut a, &root, &ka).await;
+        let mut b = login(&url, &kb).await;
+        join(&mut b, &root, &kb).await;
+        // b keeps reading, so its client answers the relay's pings.
+        let until = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < until {
+            if let Ok(Some(Ok(tungstenite::Message::Close(_))) | None | Some(Err(_))) =
+                tokio::time::timeout(Duration::from_millis(100), b.next()).await
+            {
+                panic!("a device that answers pings stays");
+            }
+        }
+        // a read nothing all that time, so it never answered: closed. (Its client may
+        // fail answering the queued pings before it reads the `idle-timeout` error.)
+        let (frames, closed) = drain(&mut a, Duration::from_secs(2)).await;
+        assert!(closed, "{frames:?}");
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn connections_per_client_address_are_limited() {
+        let state = new_state_with(
+            Duration::from_secs(10),
+            Limits {
+                max_connections_per_ip: 2,
+                ..Limits::default()
+            },
+        );
+        let url = start_state(state).await;
+        let first = connect(&url).await;
+        let _second = connect(&url).await;
+        assert!(connect_async(&url).await.is_err(), "HTTP 429");
+        drop(first);
+        for _ in 0..50 {
+            if connect_async(&url).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the slot was never freed");
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn behind_a_proxy_the_forwarded_address_counts() {
+        use tungstenite::client::IntoClientRequest;
+        let state = new_state_with(
+            Duration::from_secs(10),
+            Limits {
+                max_connections_per_ip: 1,
+                client_ip_header: Some("x-forwarded-for".into()),
+                ..Limits::default()
+            },
+        );
+        let url = start_state(state).await;
+        let from = |ip: &str| {
+            let mut req = url.as_str().into_client_request().unwrap();
+            req.headers_mut().insert(
+                "x-forwarded-for",
+                format!("10.0.0.9, {ip}").parse().unwrap(),
+            );
+            req
+        };
+        let _a = connect_async(from("192.0.2.1")).await.unwrap();
+        let _b = connect_async(from("192.0.2.2")).await.unwrap();
+        assert!(connect_async(from("192.0.2.1")).await.is_err());
+    }
+
+    #[test]
+    fn client_addresses_use_the_proxys_entry_and_group_ipv6_by_64() {
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut h = HeaderMap::new();
+        h.append(
+            "x-forwarded-for",
+            "203.0.113.5, 198.51.100.7".parse().unwrap(),
+        );
+        let ip = |h: &HeaderMap, name| client_ip(peer, h, name).unwrap().to_string();
+        assert_eq!(ip(&h, None), "127.0.0.1");
+        assert_eq!(ip(&h, Some("x-forwarded-for")), "198.51.100.7");
+        assert_eq!(ip(&HeaderMap::new(), Some("x-forwarded-for")), "127.0.0.1");
+        h.insert("x-forwarded-for", "2001:db8:1:2:3:4:5:6".parse().unwrap());
+        assert_eq!(ip(&h, Some("x-forwarded-for")), "2001:db8:1:2::");
+        h.insert("x-forwarded-for", "garbage".parse().unwrap());
+        assert_eq!(ip(&h, Some("x-forwarded-for")), "127.0.0.1");
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn orgs_per_announce_and_per_device_are_capped() {
+        let url = start(Duration::from_secs(10)).await;
+        let key = DeviceKey::generate();
+        let mut ws = login(&url, &key).await;
+        let pending = |n: usize| Frame::Announce {
+            orgs: (0..n)
+                .map(|_| Membership {
+                    org: org_id(&DeviceKey::generate()),
+                    proof: String::new(),
+                    always_on: false,
+                    revoked: vec![],
+                })
+                .collect(),
+        };
+        send_frame(&mut ws, &pending(MAX_ORGS_PER_ANNOUNCE + 1)).await;
+        expect_error(next_frame(&mut ws).await, "too-many-orgs");
+        send_frame(&mut ws, &pending(MAX_ORGS_PER_DEVICE)).await;
+        send_frame(&mut ws, &pending(1)).await;
+        expect_error(next_frame(&mut ws).await, "too-many-orgs");
+    }
+
+    #[test]
+    fn the_relay_keeps_a_bounded_number_of_revocations() {
+        let state = new_state(Duration::from_secs(10));
+        let root = DeviceKey::generate();
+        let org = org_id(&root);
+        let notice =
+            |dev: &DeviceKey| Revocation::issue_by_root(&root, dev.device_id(), 1).to_hex();
+        let mut r = state.lock().unwrap();
+        let rev = |n: &str| verify_notice(&root.device_id(), n).unwrap();
+        let first = notice(&DeviceKey::generate());
+        assert_eq!(
+            remember_verified(&mut r, &org, &rev(&first), &first, false),
+            Ok(true)
+        );
+        r.revoked_total = MAX_REVOKED_TOTAL;
+        let next = notice(&DeviceKey::generate());
+        assert!(remember_verified(&mut r, &org, &rev(&next), &next, false).is_err());
+        // Known devices are still recognised.
+        assert_eq!(
+            remember_verified(&mut r, &org, &rev(&first), &first, false),
+            Ok(false)
+        );
+    }
+
+    /// req: REQ-RELAY-006
+    #[tokio::test]
+    async fn rate_buckets_of_orgs_without_online_devices_are_forgotten() {
+        let state = new_state(Duration::from_secs(10));
+        let url = start_state(state.clone()).await;
+        let (root, ka, kp) = (
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+            DeviceKey::generate(),
+        );
+        let org = org_id(&root);
+        let mut a = login(&url, &ka).await;
+        join(&mut a, &root, &ka).await;
+        let mut p = login(&url, &kp).await;
+        announce(&mut p, &org, String::new()).await;
+        send_frame(&mut p, &claim(&org)).await;
+        send_frame(
+            &mut a,
+            &Frame::Broadcast {
+                org: org.clone(),
+                body: vec![1],
+            },
+        )
+        .await;
+        let _ = next_frame(&mut p).await;
+        while !matches!(next_frame(&mut a).await, Some(Frame::Receipt { .. })) {}
+        {
+            let r = state.lock().unwrap();
+            assert!(r.org_buckets.contains_key(&org) && r.pending_buckets.contains_key(&org));
+        }
+        drop(a);
+        drop(p);
+        for _ in 0..100 {
+            {
+                let r = state.lock().unwrap();
+                if r.org_buckets.is_empty() && r.pending_buckets.is_empty() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the buckets were kept");
     }
 }

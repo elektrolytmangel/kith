@@ -22,6 +22,7 @@ Open questions from the design doc that are waiting for an ADR:
 - [x] Which Welcomes a device accepts: [ADR 0016](0016-welcome-checks.md)
 - [x] Who may change a group's members: [ADR 0017](0017-commit-authorization.md)
 - [x] Relay revocation rules and the claim channel: [ADR 0018](0018-relay-revocation-rules.md)
+- [x] Relay resource limits: [ADR 0019](0019-relay-resource-limits.md)
 - [ ] Push token persistence (REQ-RELAY-007)
 - [x] Rule for changes concurrent with a revocation (REQ-PERM-004): [ADR 0006](0006-policy-object-roles-revocation.md)
 - [ ] Always-on client required or optional

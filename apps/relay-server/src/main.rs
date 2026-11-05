@@ -61,12 +61,16 @@ async fn main() {
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     tracing::info!(%addr, version = kith_protocol::PROTOCOL_VERSION, "kith relay listening");
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .expect("server");
+    // Connection info: the per-address connection limit needs the peer address.
+    axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .expect("server");
 }
 
 /// Azure Table Storage if configured, else the fixed list from `KITH_RELAY_ALLOWED_ORGS`.

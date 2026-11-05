@@ -51,8 +51,10 @@ The relay must enforce a maximum frame size and rate limits per device and per
 organization.
 
 `kith_relay_server::Limits` (env `KITH_RELAY_*`): WebSocket message cap, token buckets
-per connection (frames, bytes) and per org (routed frames), a connection cap, and
-disconnecting persistent abusers. Clients cap quarantined changes per author
+per connection (frames, bytes) and per org (routed frames; pending devices separately),
+caps on connections overall and per client address, bounded outboxes with a write
+timeout, an idle timeout, and disconnecting persistent abusers. Relay state is bounded
+too: orgs per announce and per device, revoked devices overall ([ADR 0019](../adr/0019-relay-resource-limits.md)). Clients cap quarantined changes per author
 (`MAX_QUARANTINE`).
 
 ### REQ-RELAY-007: Wake-up pushes

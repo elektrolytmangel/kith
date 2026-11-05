@@ -367,6 +367,12 @@ docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 80
 | `KITH_RELAY_MAX_CONNECTIONS` | `10000` | more are refused with HTTP 503 |
 | `KITH_RELAY_MAX_MESSAGE_BYTES` | `4194304` | larger WebSocket messages close the connection |
 | `KITH_RELAY_MAX_REFUSED` | `200` | refused frames in a row before the relay closes the connection |
+| `KITH_RELAY_PENDING_FRAMES_PER_SEC` | `10` | frames per org from its pending (joining) devices together; separate from the org's budget |
+| `KITH_RELAY_MAX_QUEUED_BYTES` | `16777216` | bytes queued for one connection; frames beyond it are dropped for that device |
+| `KITH_RELAY_WRITE_TIMEOUT_SECS` | `10` | a connection that takes longer to accept a frame is closed |
+| `KITH_RELAY_IDLE_TIMEOUT_SECS` | `120` | a connection that sends nothing (not even pongs to the relay's pings) this long is closed; `0` turns it off |
+| `KITH_RELAY_MAX_CONNECTIONS_PER_IP` | `100` | open connections per client address (IPv6: per /64), more get HTTP 429; `0` turns it off |
+| `KITH_RELAY_CLIENT_IP_HEADER` | unset | header with the client address set by a trusted proxy in front (last entry counts), e.g. `x-forwarded-for`. Unset: the TCP peer address |
 | `KITH_RELAY_ALLOWED_ORGS` | unset | org IDs (hex root public keys; commas or whitespace) the relay serves; any other org's `announce` gets `org-not-allowed`. Unset serves every org |
 | `KITH_RELAY_AZURE_STORAGE_ACCOUNT` | unset | storage account holding the approved orgs (table `allowedorgs`, one row per org: PartitionKey `org`, RowKey org ID), read with the Container Apps managed identity (`AZURE_CLIENT_ID` selects a user-assigned one). Needs a build with feature `azure-state` (the Linux images have it). Replaces `KITH_RELAY_ALLOWED_ORGS`; an empty table approves nobody |
 | `KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING` | unset | same, with an account key (Azurite, local use) |
