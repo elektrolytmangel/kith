@@ -63,6 +63,26 @@ jobs:
       - run: cargo test -p kith-store --features sqlite --locked
       - run: cargo run --locked -p example-two-devices
 
+  # The Azure Table state (feature `azure-state`) against the Azurite emulator.
+  relay-azure:
+    name: relay azure state
+    runs-on: ubuntu-latest
+    env:
+      KITH_AZURITE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start Azurite
+        run: |
+          docker run -d --name azurite --network host mcr.microsoft.com/azure-storage/azurite \
+            azurite-table --tableHost 127.0.0.1 --skipApiVersionCheck
+          for _ in $(seq 1 30); do nc -z 127.0.0.1 10002 && exit 0; sleep 1; done
+          docker logs azurite; exit 1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: relay-azure
+      - run: cargo clippy -p kith-relay-server --all-targets --features azure-state --locked -- -D warnings
+      - run: cargo test -p kith-relay-server --features azure-state --locked
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -75,6 +95,7 @@ jobs:
       # RUSTUP_TOOLCHAIN overrides rust-toolchain.toml.
       - run: RUSTUP_TOOLCHAIN="$MSRV" cargo check --workspace --all-targets --locked
       - run: RUSTUP_TOOLCHAIN="$MSRV" cargo check -p kith-store --features sqlite --all-targets --locked
+      - run: RUSTUP_TOOLCHAIN="$MSRV" cargo check -p kith-relay-server --features azure-state --locked
 
   wasm:
     name: wasm

@@ -367,6 +367,10 @@ docker build -f apps/relay-server/Dockerfile -t kith-relay . && docker run -p 80
 | `KITH_RELAY_MAX_MESSAGE_BYTES` | `4194304` | larger WebSocket messages close the connection |
 | `KITH_RELAY_MAX_REFUSED` | `200` | refused frames in a row before the relay closes the connection |
 | `KITH_RELAY_ALLOWED_ORGS` | unset | org IDs (hex root public keys; commas or whitespace) the relay serves; any other org's `announce` gets `org-not-allowed`. Unset serves every org |
+| `KITH_RELAY_AZURE_STORAGE_ACCOUNT` | unset | storage account holding the approved orgs (table `allowedorgs`, one row per org: PartitionKey `org`, RowKey org ID), read with the Container Apps managed identity (`AZURE_CLIENT_ID` selects a user-assigned one). Needs a build with feature `azure-state` (the Linux images have it). Replaces `KITH_RELAY_ALLOWED_ORGS`; an empty table approves nobody |
+| `KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING` | unset | same, with an account key (Azurite, local use) |
+| `KITH_RELAY_AZURE_ALLOWED_ORGS_TABLE` | `allowedorgs` | table name |
+| `KITH_RELAY_ALLOWLIST_REFRESH_SECS` | `30` | how often the table is re-read |
 | `RUST_LOG` | `info` | log filter |
 
 Devices authenticate by signing a challenge with their key (`hello` → `challenge` →

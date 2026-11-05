@@ -10,6 +10,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
   devices) and refuse it on `announce`. `Membership.revoked` in the protocol is optional, so older clients still work.
 - Relay: `KITH_RELAY_ALLOWED_ORGS` restricts a relay to approved organizations (REQ-RELAY-008); other orgs get
   `org-not-allowed` on `announce`. Unset keeps today's behaviour (every org).
+- Relay: approved orgs can come from an Azure Table (`KITH_RELAY_AZURE_STORAGE_ACCOUNT` with a managed identity, or
+  `KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING`; cargo feature `azure-state`, included in the Linux container images).
+  The list is re-read every 30 s (`KITH_RELAY_ALLOWLIST_REFRESH_SECS`), so approving an org needs no restart, and
+  devices of an org removed from the list (also from `KITH_RELAY_ALLOWED_ORGS`) are dropped from it. An empty table
+  approves nobody. New `StateStore` trait in `kith_relay_server::state`.
 
 ## [0.1.0-alpha.3] - 2026-11-05
 

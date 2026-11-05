@@ -72,8 +72,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, relay_features: "--features kith-relay-server/azure-state" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, relay_features: "--features kith-relay-server/azure-state" }
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
@@ -84,7 +84,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --release --locked -p kith-relay-server -p kith-always-on --target ${{ matrix.target }}
+      # Linux builds (the container images) include the Azure Table state; see docs/guides/deployment-azure.md.
+      - run: cargo build --release --locked -p kith-relay-server -p kith-always-on ${{ matrix.relay_features }} --target ${{ matrix.target }}
       - name: Package
         shell: bash
         env:
