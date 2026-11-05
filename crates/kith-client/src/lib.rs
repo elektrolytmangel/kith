@@ -404,6 +404,12 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     kp_asked: std::collections::HashSet<String>,
     /// Orgs we asked a peer to re-add us to after a restore (RAM).
     rejoin_asked: std::collections::HashSet<String>,
+    /// Groups we sent a KeyPackage for (re-add, rejoin, subgroup) → the device we
+    /// sent it to. Only that device's Welcome for that group is accepted (RAM).
+    welcome_from: std::collections::HashMap<String, DeviceId>,
+    /// Orgs we claimed an invite for → the issuing member for own-device invites
+    /// (RAM; after a restart the certificate chain alone decides).
+    joining: std::collections::HashMap<String, Option<DeviceId>>,
     /// Announce as an always-on client (REQ-SYNC-006).
     always_on: bool,
     /// Fetch files' chunks as soon as their `kith.file` arrives.
@@ -455,6 +461,8 @@ impl<S: Store, K: Signer> Client<S, K> {
             reconciling: Default::default(),
             kp_asked: Default::default(),
             rejoin_asked: Default::default(),
+            welcome_from: Default::default(),
+            joining: Default::default(),
             always_on: false,
             fetch_files: false,
             wanted_chunks: Default::default(),
@@ -1186,6 +1194,7 @@ impl<S: Store, K: Signer> Client<S, K> {
         // The KeyPackage's private part must be stored before it leaves.
         self.save_groups()?;
         let org = invite.org.to_hex();
+        self.joining.insert(org.clone(), invite.own_device);
         let body = sync::outer_body(&Outer::Claim {
             token: invite.token,
             proof: invite.claim_proof(&key_package),
@@ -1387,9 +1396,11 @@ impl<S: Store, K: Signer> Client<S, K> {
         group: &str,
         to: &str,
     ) -> Result<Frame, ClientError> {
+        let peer = DeviceId::from_hex(to)?;
         let key_package = self.groups.key_package(&self.key)?;
         // The private part must be stored before the KeyPackage leaves.
         self.save_groups()?;
+        self.welcome_from.insert(group.into(), peer);
         Ok(direct(
             org,
             to,
@@ -1780,10 +1791,15 @@ impl<S: Store, K: Signer> Client<S, K> {
                 }
             }
             Outer::Welcome { welcome, chain } => {
-                let joined = match self.groups.join(&welcome) {
+                let check = self.welcome_check(&org, &from, &chain);
+                let joined = match self.groups.join_checked(&welcome, check) {
                     Ok(o) => o,
                     Err(e) => return Ok(rejected(e.to_string())),
                 };
+                self.welcome_from.remove(&joined);
+                if joined == org {
+                    self.joining.remove(&org);
+                }
                 self.readd_asked.remove(&joined);
                 if joined.contains('/') {
                     // A subgroup: fetch its history from the owner that added us.
@@ -1924,9 +1940,13 @@ impl<S: Store, K: Signer> Client<S, K> {
                 })
             }
             Outer::ReaddNeeded { group } => {
-                // Only a group we have can be re-joined; ignore strangers' requests.
+                // Only a group we have can be re-joined, and only a member of it,
+                // that the policy does not exclude, can tell us to.
                 if self.groups.epoch(&group).is_err() {
                     return Ok(rejected("not in this group".into()));
+                }
+                if !self.trusted_member(&org, &group, &from) {
+                    return Ok(rejected("not a member of this group".into()));
                 }
                 let frame = self.readd_request_frame(&org, &group, &from)?;
                 Ok(Handled {
@@ -1934,6 +1954,98 @@ impl<S: Store, K: Signer> Client<S, K> {
                     replies: vec![frame],
                 })
             }
+        }
+    }
+
+    /// Is `device` (hex) in our view of `group` and not excluded by `org`'s policy?
+    fn trusted_member(&self, org: &str, group: &str, device: &str) -> bool {
+        let Ok(d) = DeviceId::from_hex(device) else {
+            return false;
+        };
+        self.groups.members(group).is_ok_and(|m| m.contains(&d))
+            && self
+                .policies
+                .get(org)
+                .filter(|p| p.creator.is_some())
+                .is_none_or(|p| p.role_of(&d).is_some())
+    }
+
+    /// The checks a Welcome delivered in `org` by `from` must pass before we join
+    /// (ADR 0016). We join only a group we asked to be added to, from the device we
+    /// asked; or, the first time, the org's group from the device that issued our
+    /// membership certificate (`chain`). Every device in the new group must be one
+    /// we accept as a member.
+    fn welcome_check(
+        &self,
+        org: &str,
+        from: &str,
+        chain: &str,
+    ) -> impl FnOnce(&kith_crypto::WelcomeInfo) -> Result<(), String> + use<S, K> {
+        let org = org.to_string();
+        let from = DeviceId::from_hex(from).ok();
+        let me = self.device_id();
+        let asked = self.welcome_from.clone();
+        let first_join = !self.groups.has_group(&org) && self.chain(&org).is_none();
+        let joining = self.joining.get(&org).copied();
+        let policy = self
+            .policies
+            .get(&org)
+            .filter(|p| p.creator.is_some())
+            .cloned();
+        let current = self.groups.members(&org).unwrap_or_default();
+        let chain = chain.to_string();
+        move |w| {
+            let adder = w.adder.ok_or("Welcome without an adder")?;
+            if Some(adder) != from {
+                return Err("Welcome not signed by its sender".into());
+            }
+            if !in_org(&org, &w.group) {
+                return Err("Welcome for a group of another org".into());
+            }
+            if asked.get(&w.group) == Some(&adder) {
+                let Some(p) = policy else {
+                    return Ok(());
+                };
+                if w.group == org {
+                    // Members the policy names, or that our group already had.
+                    if let Some(m) = w.members.iter().find(|m| {
+                        p.role_of(m).is_none() && (p.revoked.contains(m) || !current.contains(m))
+                    }) {
+                        return Err(format!("{m} in the new group is not a member"));
+                    }
+                } else {
+                    let name = &w.group[org.len() + 1..];
+                    if p.subgroup_owners.get(name) != Some(&adder) {
+                        return Err("Welcome not from the subgroup's owner".into());
+                    }
+                    let listed = p.subgroup(name);
+                    if let Some(m) = w
+                        .members
+                        .iter()
+                        .find(|m| !listed.is_some_and(|l| l.contains(m)))
+                    {
+                        return Err(format!("{m} is not in the subgroup"));
+                    }
+                }
+                return Ok(());
+            }
+            if w.group == org && first_join && !w.replaces {
+                // Our first join: the adder issued the certificate it sends us,
+                // under the org root key.
+                let org_id = DeviceId::from_hex(&org).map_err(|e| e.to_string())?;
+                let chain = CertChain::from_hex(&chain).map_err(|e| e.to_string())?;
+                chain.verify(&org_id, &me).map_err(|e| e.to_string())?;
+                if chain.leaf().map(|l| l.issuer) != Some(adder) {
+                    return Err("Welcome not from the certificate's issuer".into());
+                }
+                if let Some(Some(issuer)) = joining
+                    && issuer != adder
+                {
+                    return Err("Welcome not from the invite's issuer".into());
+                }
+                return Ok(());
+            }
+            Err("unexpected Welcome".into())
         }
     }
 

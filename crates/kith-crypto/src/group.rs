@@ -85,6 +85,19 @@ fn invalid(e: impl std::fmt::Debug) -> GroupError {
     GroupError::Invalid(format!("{e:?}"))
 }
 
+/// What a verified Welcome says, for the caller's checks before joining.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WelcomeInfo {
+    /// The group (org ID or `org/subgroup`).
+    pub group: String,
+    /// The device that added us (signed the group info).
+    pub adder: Option<DeviceId>,
+    /// Every device in the new group.
+    pub members: Vec<DeviceId>,
+    /// True if we already have state for this group (it would be replaced).
+    pub replaces: bool,
+}
+
 /// Result of [`Groups::add_member`] / [`Groups::readd_member`].
 #[derive(Debug)]
 pub struct Added {
@@ -440,8 +453,19 @@ impl Groups {
     }
 
     /// Join a group from a Welcome. Returns the org. If this device already had
-    /// state for that group (re-add, REQ-ENC-004), it is replaced.
+    /// state for that group (re-add, REQ-ENC-004), it is replaced. Accepts any
+    /// Welcome for one of our KeyPackages: callers use [`Self::join_checked`].
     pub fn join(&mut self, welcome: &[u8]) -> Result<String, GroupError> {
+        self.join_checked(welcome, |_| Ok(()))
+    }
+
+    /// [`Self::join`], but only if `check` accepts what the verified Welcome says
+    /// (group, adder, members). Nothing changes if it refuses.
+    pub fn join_checked(
+        &mut self,
+        welcome: &[u8],
+        check: impl FnOnce(&WelcomeInfo) -> Result<(), String>,
+    ) -> Result<String, GroupError> {
         let msg = MlsMessageIn::tls_deserialize_exact(welcome).map_err(invalid)?;
         let MlsMessageBodyIn::Welcome(welcome) = msg.extract() else {
             return Err(GroupError::Invalid("not a welcome".into()));
@@ -459,6 +483,16 @@ impl Groups {
             .welcome_sender()
             .ok()
             .and_then(|leaf| device_of(leaf.signature_key().as_slice()));
+        let info = WelcomeInfo {
+            group: org.clone(),
+            adder,
+            members: staged
+                .members()
+                .filter_map(|m| device_of(&m.signature_key))
+                .collect(),
+            replaces: self.groups.contains_key(&org),
+        };
+        check(&info).map_err(GroupError::Invalid)?;
         self.groups.remove(&org);
         self.commit_log.remove(&org);
         self.last.remove(&org);
