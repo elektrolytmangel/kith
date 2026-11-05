@@ -2025,3 +2025,106 @@ fn a_first_welcome_needs_the_adders_certificate() {
     assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
     assert!(!net.devs[2].is_member(&ORG));
 }
+
+// ---- commit authorization (ADR 0017) ----
+
+/// req: REQ-ENC-001
+/// req: REQ-PERM-002
+#[test]
+fn an_editor_cannot_add_or_remove_devices() {
+    let mut net = Net::org(3);
+    let before = net.devs[0].group_members(&ORG).unwrap();
+    let editor_hex = hex(&net.devs[1]);
+    // Editor 1 adds an outsider to the group...
+    let mut outsider = client();
+    let kp = outsider.groups.key_package(&outsider.key).unwrap();
+    let e = &mut net.devs[1];
+    let added = e.groups.add_member(&e.key, &ORG, &kp).unwrap();
+    for i in [0, 2] {
+        let h = net.devs[i]
+            .handle_frame(Frame::Deliver {
+                org: ORG.clone(),
+                from: editor_hex.clone(),
+                body: sync::outer_body(&Outer::Commit(added.commit.clone())),
+            })
+            .unwrap();
+        assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+        assert_eq!(net.devs[i].group_members(&ORG).unwrap(), before);
+    }
+    // ...or removes the admin (on a fresh copy of the group state).
+    let mut net = Net::org(3);
+    let admin = net.devs[0].device_id();
+    let e = &mut net.devs[1];
+    let commit = e.groups.remove_member(&e.key, &ORG, admin).unwrap();
+    let h = net.devs[2]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from: editor_hex,
+            body: sync::outer_body(&Outer::Commit(commit)),
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert_eq!(net.devs[2].group_members(&ORG).unwrap().len(), 3);
+}
+
+/// req: REQ-ENC-001
+#[test]
+fn a_commit_must_come_from_its_sender() {
+    let mut net = Net::org(3);
+    let a = &mut net.devs[0];
+    let commit = a.groups.self_update(&a.key, &ORG).unwrap();
+    let epoch = net.devs[2].group_epoch(&ORG).unwrap();
+    // The relay claims member 1 sent the admin's commit.
+    let from = hex(&net.devs[1]);
+    let h = net.devs[2]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body: sync::outer_body(&Outer::Commit(commit)),
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert_eq!(net.devs[2].group_epoch(&ORG).unwrap(), epoch);
+}
+
+/// req: REQ-ENC-004
+#[test]
+fn a_readd_for_another_device_changes_nothing() {
+    let mut net = Net::org(3);
+    let epoch = net.devs[0].group_epoch(&ORG).unwrap();
+    // Member 1 sends member 2's KeyPackage as if it lost the group.
+    let d2 = &mut net.devs[2];
+    let kp = d2.groups.key_package(&d2.key).unwrap();
+    let from = hex(&net.devs[1]);
+    let h = net.devs[0]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body: sync::outer_body(&Outer::KeyPackage {
+                group: ORG.clone(),
+                key_package: kp,
+            }),
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert!(h.replies.is_empty());
+    assert_eq!(net.devs[0].group_epoch(&ORG).unwrap(), epoch);
+}
+
+/// req: REQ-ENC-002
+#[test]
+fn outsiders_get_no_commits() {
+    let mut net = Net::org(2);
+    let h = net.devs[0]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from: hex(&client()),
+            body: sync::outer_body(&Outer::CommitRequest {
+                group: ORG.clone(),
+                epoch: 0,
+            }),
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert!(h.replies.is_empty());
+}

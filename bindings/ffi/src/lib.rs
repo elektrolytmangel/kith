@@ -973,12 +973,12 @@ mod tests {
         };
         assert_eq!(code, claim.code);
         let frames = sa.accept_claim(from).unwrap();
-        assert_eq!(frames.len(), 3, "commit + welcome + b named in the policy");
+        assert_eq!(frames.len(), 3, "b named in the policy + commit + welcome");
         // The commit reaches b before it is a member; the Welcome then adds it.
-        let _ = relay_to(a, sb, &frames[0]);
-        let out = relay_to(a, sb, &frames[1]);
+        // (The policy change, in the old epoch, reaches b with the catch-up.)
+        let _ = relay_to(a, sb, &frames[1]);
+        let out = relay_to(a, sb, &frames[2]);
         assert!(matches!(out.event, Some(RelayEvent::Joined { .. })));
-        let _ = relay_to(a, sb, &frames[2]);
         assert!(b.is_member(org.clone()));
         assert_eq!(a.group_members(org).unwrap().len(), 2);
         assert_eq!(out.replies.len(), 2);
@@ -1122,7 +1122,7 @@ mod tests {
                 compared.event,
                 Some(RelayEvent::SyncCompared { wanting: 4, .. })
             ),
-            "2 notes + the policy genesis + b named in the policy (asked before it arrived)"
+            "2 notes + the policy genesis + b named in the policy"
         );
         let asked = relay_to(&b, &sa, &compared.replies[0]);
         assert!(matches!(
@@ -1130,10 +1130,9 @@ mod tests {
             Some(RelayEvent::SyncReceived { requested: 4, .. })
         ));
         let received = relay_to(&a, &sb, &asked.replies[0]);
-        // b already had the policy change naming it.
         assert!(matches!(
             received.event,
-            Some(RelayEvent::SyncReceived { stored: 3, .. })
+            Some(RelayEvent::SyncReceived { stored: 4, .. })
         ));
         assert_eq!(b.history(created.object_id.clone()).unwrap().len(), 2);
         // And catch_up works the same way later: nothing to do now.

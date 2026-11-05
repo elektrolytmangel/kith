@@ -1215,7 +1215,8 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     /// Admit the device of an [`Event::InviteClaimed`]: adds it to the MLS group,
     /// issues its membership certificate and uses up the invite. Send the frames
-    /// (commit to the group, Welcome to the device).
+    /// (in order: the policy change naming the device, the commit to the group, the
+    /// Welcome to the device).
     pub fn accept_claim(&mut self, org: &str, device: &str) -> Result<Vec<Frame>, ClientError> {
         let (kp, token) = self
             .claims
@@ -1262,13 +1263,19 @@ impl<S: Store, K: Signer> Client<S, K> {
         } else {
             None
         };
-        let added = self.groups.add_member(&self.key, org, &kp)?;
-        self.save_groups()?;
-        if added.member.to_hex() != device {
+        if self.groups.key_package_device(&kp)?.to_hex() != device {
             return Err(ClientError::InvalidInvite(
                 "KeyPackage of another device".into(),
             ));
         }
+        // The policy change goes out first, in the current epoch: members check the
+        // commit that adds the device against it.
+        let policy_frame = match &link {
+            Some(change) => Some(self.broadcast_frame(org, change)?),
+            None => None,
+        };
+        let added = self.groups.add_member(&self.key, org, &kp)?;
+        self.save_groups()?;
         // An admin's chain is its root-issued admin certificate, which vouches for
         // the one we issue now: root -> us -> new device.
         let org_id = DeviceId::from_hex(org)?;
@@ -1282,23 +1289,19 @@ impl<S: Store, K: Signer> Client<S, K> {
             st.invites.retain(|i| i.token != token);
         }
         self.save_orgs()?;
-        let mut frames = vec![
-            Frame::Broadcast {
-                org: org.into(),
-                body: sync::outer_body(&Outer::Commit(added.commit)),
-            },
-            direct(
-                org,
-                device,
-                sync::outer_body(&Outer::Welcome {
-                    welcome: added.welcome,
-                    chain: CertChain(chain).to_hex(),
-                }),
-            ),
-        ];
-        if let Some(link) = link {
-            frames.push(self.broadcast_frame(org, &link)?);
-        }
+        let mut frames: Vec<Frame> = policy_frame.into_iter().collect();
+        frames.push(Frame::Broadcast {
+            org: org.into(),
+            body: sync::outer_body(&Outer::Commit(added.commit)),
+        });
+        frames.push(direct(
+            org,
+            device,
+            sync::outer_body(&Outer::Welcome {
+                welcome: added.welcome,
+                chain: CertChain(chain).to_hex(),
+            }),
+        ));
         Ok(frames)
     }
 
@@ -1657,6 +1660,13 @@ impl<S: Store, K: Signer> Client<S, K> {
         if !listed {
             return rejected("not a member of this subgroup in the policy");
         }
+        if !self
+            .groups
+            .key_package_device(key_package)
+            .is_ok_and(|d| d.to_hex() == from)
+        {
+            return rejected("KeyPackage is not the sender's");
+        }
         let already = self
             .groups
             .members(&group)
@@ -1772,7 +1782,11 @@ impl<S: Store, K: Signer> Client<S, K> {
                 let Ok(committer) = DeviceId::from_hex(&from) else {
                     return Ok(rejected("sender is not a device ID".into()));
                 };
-                match self.groups.apply_commit(&group, &commit, committer) {
+                let check = self.commit_check(&org, &group);
+                match self
+                    .groups
+                    .apply_commit_checked(&group, &commit, committer, check)
+                {
                     Ok(CommitOutcome::Applied { epoch, removed }) => {
                         Ok(Handled::event(Event::GroupChanged {
                             org: group,
@@ -1781,6 +1795,11 @@ impl<S: Store, K: Signer> Client<S, K> {
                         }))
                     }
                     Ok(CommitOutcome::Stale) => Ok(Handled::event(Event::Ignored)),
+                    // A fork we cannot verify (the epoch is gone): only a member we
+                    // trust makes us ask to be re-added.
+                    Ok(CommitOutcome::Fork { .. }) if !self.trusted_member(&org, &group, &from) => {
+                        Ok(rejected("fork claimed by a non-member".into()))
+                    }
                     Ok(CommitOutcome::Fork { we_win, .. }) => {
                         self.on_fork(org, group, from, we_win)
                     }
@@ -1880,22 +1899,23 @@ impl<S: Store, K: Signer> Client<S, K> {
             Outer::KeyPackage {
                 key_package: kp, ..
             } => {
-                let known = self
-                    .groups
-                    .members(&org)
-                    .is_ok_and(|m| m.iter().any(|d| d.to_hex() == from));
-                if !known {
+                if !self.trusted_member(&org, &org, &from) {
                     return Ok(rejected("not a member: join with an invite".into()));
                 }
-                // A member that lost the group (REQ-ENC-004). Only for its own key.
+                // A member that lost the group (REQ-ENC-004). Only for its own key,
+                // checked before the group changes.
+                if !self
+                    .groups
+                    .key_package_device(&kp)
+                    .is_ok_and(|d| d.to_hex() == from)
+                {
+                    return Ok(rejected("KeyPackage is not the sender's".into()));
+                }
                 match self.groups.readd_member(&self.key, &org, &kp) {
-                    Ok(added) if added.member.to_hex() == from => Ok(Handled {
+                    Ok(added) => Ok(Handled {
                         replies: self.readded_frames(&org, added),
                         event: Event::MemberReAdded { org, device: from },
                     }),
-                    Ok(_) => Err(ClientError::Group(GroupError::Invalid(
-                        "re-added device does not match the sender".into(),
-                    ))),
                     Err(e) => Ok(rejected(e.to_string())),
                 }
             }
@@ -1907,12 +1927,22 @@ impl<S: Store, K: Signer> Client<S, K> {
                 Ok(rejected("group of another org".into()))
             }
             Outer::CommitRequest { group, epoch } => {
+                if !self.trusted_member(&org, &group, &from) {
+                    return Ok(rejected("not a member of this group".into()));
+                }
                 Ok(self.serve_commits(org, group, from, epoch)?)
             }
             Outer::Commits { group, commits } => {
+                if !self.trusted_member(&org, &group, &from) {
+                    return Ok(rejected("not a member of this group".into()));
+                }
                 let mut applied = 0;
                 for (committer, c) in &commits {
-                    match self.groups.apply_commit(&group, c, *committer) {
+                    let check = self.commit_check(&org, &group);
+                    match self
+                        .groups
+                        .apply_commit_checked(&group, c, *committer, check)
+                    {
                         Ok(CommitOutcome::Applied { .. }) => applied += 1,
                         Ok(CommitOutcome::Stale) => {}
                         // The rest of the batch belongs to the other branch.
@@ -1968,6 +1998,71 @@ impl<S: Store, K: Signer> Client<S, K> {
                 .get(org)
                 .filter(|p| p.creator.is_some())
                 .is_none_or(|p| p.role_of(&d).is_some())
+    }
+
+    /// What a commit in `group` (of `org`) may change (ADR 0017). With a policy:
+    /// in the org's group, admins add and remove devices, a member may add a device
+    /// linked to it, and any member may re-add a device that is already in the
+    /// group; revoked devices are never added. In a subgroup only its owner adds,
+    /// re-adds and removes, and only listed devices are added. Key updates are
+    /// always allowed. Without a policy everything is allowed.
+    fn commit_check(
+        &self,
+        org: &str,
+        group: &str,
+    ) -> impl FnOnce(&kith_crypto::CommitInfo) -> Result<(), String> + use<S, K> {
+        let policy = self
+            .policies
+            .get(org)
+            .filter(|p| p.creator.is_some())
+            .cloned();
+        let subgroup = group
+            .strip_prefix(org)
+            .and_then(|g| g.strip_prefix('/'))
+            .map(str::to_string);
+        move |c| {
+            let Some(p) = policy else {
+                return Ok(());
+            };
+            let by = c.committer;
+            let readded = |d: &DeviceId| c.added.contains(d) && c.removed.contains(d);
+            if let Some(d) = c.added.iter().find(|d| p.revoked.contains(d)) {
+                return Err(format!("{d} is revoked"));
+            }
+            match subgroup {
+                None => {
+                    let admin = p.role_of(&by) == Some(Role::Admin);
+                    if p.role_of(&by).is_none() {
+                        return Err(format!("{by} has no role"));
+                    }
+                    for d in &c.added {
+                        if !(admin || readded(d) || p.links.get(d) == Some(&by)) {
+                            return Err(format!("{by} may not add {d}"));
+                        }
+                    }
+                    for d in &c.removed {
+                        if !(admin || readded(d)) {
+                            return Err(format!("{by} may not remove {d}"));
+                        }
+                    }
+                }
+                Some(name) => {
+                    let changes = !c.added.is_empty() || !c.removed.is_empty();
+                    if changes && p.subgroup_owners.get(&name) != Some(&by) {
+                        return Err("only the subgroup's owner changes its members".into());
+                    }
+                    let listed = p.subgroup(&name);
+                    if let Some(d) = c
+                        .added
+                        .iter()
+                        .find(|d| !listed.is_some_and(|l| l.contains(d)))
+                    {
+                        return Err(format!("{d} is not in the subgroup"));
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 
     /// The checks a Welcome delivered in `org` by `from` must pass before we join

@@ -11,7 +11,9 @@ use kith_core::{DeviceId, Signer};
 pub mod files;
 pub mod group;
 
-pub use group::{Added, CommitOutcome, Decrypted, Epoch, GroupError, Groups, WelcomeInfo};
+pub use group::{
+    Added, CommitInfo, CommitOutcome, Decrypted, Epoch, GroupError, Groups, WelcomeInfo,
+};
 
 /// A device's long-term signing key.
 pub struct DeviceKey(SigningKey);
