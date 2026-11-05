@@ -171,6 +171,19 @@ impl RoutingTable {
         v
     }
 
+    /// Orgs that have at least one online or pending device, sorted.
+    pub fn orgs(&self) -> Vec<OrgId> {
+        let mut v: Vec<_> = [&self.orgs, &self.pending]
+            .into_iter()
+            .flat_map(|m| m.iter())
+            .filter(|(_, devs)| !devs.is_empty())
+            .map(|(org, _)| org.clone())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
     /// Online devices in an org, sorted.
     pub fn online(&self, org: &str) -> Vec<DeviceIdHex> {
         let mut v: Vec<_> = self.orgs.get(org).into_iter().flatten().cloned().collect();

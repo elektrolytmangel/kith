@@ -20,7 +20,17 @@ path = "src/lib.rs"
 name = "kith-relay"
 path = "src/main.rs"
 
+[features]
+# Durable relay state in Azure Table Storage (allowed orgs). Off by default: the default build
+# stays RAM-only and free of an HTTP client.
+azure-state = ["dep:reqwest", "dep:hmac", "dep:sha2", "dep:base64", "dep:serde_json"]
+
 [dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"], optional = true }
+hmac = { version = "0.13", optional = true }
+sha2 = { workspace = true, optional = true }
+base64 = { version = "0.23", optional = true }
+serde_json = { workspace = true, optional = true }
 kith-relay.workspace = true
 kith-protocol.workspace = true
 kith-core.workspace = true

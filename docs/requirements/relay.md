@@ -71,4 +71,9 @@ pending devices included, so nobody can route there. Unset or empty serves every
 org (local use, tests).
 
 `KITH_RELAY_ALLOWED_ORGS`: org IDs (hex root public keys) separated by commas or
-whitespace. Read at start; a durable, live-reloaded list is planned (see PLAN.md).
+whitespace. Read at start.
+
+Alternatively the list lives in an Azure Table (feature `azure-state`; `KITH_RELAY_AZURE_STORAGE_*`),
+which the relay re-reads every `KITH_RELAY_ALLOWLIST_REFRESH_SECS` (default 30). Orgs
+removed from the list lose their online devices (`org-not-allowed`). An empty or
+missing table approves nobody; a failed read keeps the last list.

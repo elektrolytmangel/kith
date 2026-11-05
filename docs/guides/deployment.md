@@ -26,7 +26,10 @@ The relay speaks plain WebSocket. Put TLS in front of it: clients should use
 **Serve only approved organizations:** set `KITH_RELAY_ALLOWED_ORGS` to the org IDs
 (each org's root public key, hex; your app shows it as the org ID), separated by
 commas. Without it the relay serves any org that presents a valid certificate chain.
-Read at start: changing the list means restarting the relay.
+Read at start: changing the list means restarting the relay. To change it without a
+restart, keep the list in an Azure Table instead (`KITH_RELAY_AZURE_STORAGE_ACCOUNT`, see
+[integration.md](integration.md#relay)); the relay re-reads it every 30 s and
+drops the devices of an org you remove.
 
 ### With TLS: Docker Compose
 

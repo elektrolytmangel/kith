@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-05 (Azure plan: step 1 merged, plan refreshed)
+- **Last updated:** 2026-11-05 (Azure plan: step 2 done, `StateStore` + Azure Table)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
   allowlist (#57). Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
 - **State of `main` (16e991b, #57 merged):** CI green on all 12 jobs on #57. Locally checked: fmt, clippy (incl. wasm32),
@@ -190,10 +190,9 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-- **Azure plan (user said "start" 2026-11-05; step 1 done).** Before step 3 confirm: persisting revocation notices
+- **Azure plan (user said "start" 2026-11-05; steps 1-2 done).** Before step 3 confirm: persisting revocation notices
   reverses part of ADR 0013 ("RAM only", the user's choice earlier the same day). Steps 2 and 4-6 do not depend on it.
-  Step 2 defaults, change on request: allowlist in an Azure Table (live reload every ~30 s, no restart), Table over
-  Blob.
+  Step 2 used the defaults: allowlist in an Azure Table (live reload every 30 s), Table over Blob.
 
 ### Plan: approved orgs, durable relay state, Azure Container Apps + Bicep
 
@@ -207,12 +206,15 @@ Apps runs the relay with min = max = 1 replica (it is one in-memory router).
    `KITH_RELAY_ALLOWED_ORGS` (env) first; read at start, applies to later announces (step 2 makes it live).
    Open edge: removing an org from the list does not disconnect its devices already announced (they leave on
    reconnect); step 2 should evict them on reload.
-2. [ ] **`StateStore` trait in the relay** (default: RAM, unchanged); an **Azure Table Storage** implementation behind a
-   cargo feature `azure-state` (plain REST or the Azure SDK; keep the default build and the wasm/MSRV jobs untouched).
-   Tables: `allowedorgs` (PartitionKey `org`, RowKey org ID), `revocations` (PartitionKey org, RowKey device ID, signed
-   notice). Allowlist is re-read every N seconds, so approving an org needs no restart. Table over Blob (per-row
-   updates, no whole-file races); Queue does not fit (no state, no lookup). Next up. Test against Azurite (Docker
-   emulator) in CI; auth by managed identity in Azure, connection string for local/CI.
+2. [x] **`StateStore` trait in the relay** (PR `feat/relay-state-store`): `kith_relay_server::state::{StateStore, StaticState,
+   spawn_allowlist_refresh}`; Azure Table implementation `state::azure::AzureTables` over plain REST behind cargo feature
+   `azure-state` (reqwest/rustls; auth: managed identity via `IDENTITY_ENDPOINT`, or connection string = SharedKeyLite).
+   Table `allowedorgs` (PartitionKey `org`, RowKey org ID); re-read every 30 s; an empty or missing table approves nobody,
+   a failed read keeps the last list (startup failure exits). Removing an org evicts its online devices
+   (`set_allowed_orgs`, also closes the step 1 edge). Linux release binaries and the Dockerfile build with the feature.
+   CI job `relay azure state` runs the integration test against Azurite (`tests/azure.rs`, incl. paging).
+   Not yet tried against real Azure (managed identity path is untested; step 4/6 deployment will exercise it).
+   The `revocations` table is not built (step 3).
 3. [ ] **Revocation notices persisted** (amends ADR 0013 after the user confirms; new ADR 0014): load on start, write on
    accept; still verified on load. Closes the "restart forgets notices" gap in *Not usable yet*.
 4. [ ] **Bicep** in `deploy/azure/` (`main.bicep` + `main.bicepparam` example): Log Analytics, Container Apps
@@ -384,3 +386,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-05**: Road step 4, first gap: relay-level revocation (PR `feat/relay-revocation`, ADR 0013). User chose RAM-only signed notices. Next: share notices with other admins / always-on, then resumable syncs (REQ-SYNC-005), compaction (REQ-DATA-005).
 - **2026-11-05**: User asked where to host the relay and how to limit it to approved orgs (no allowlist yet). User wants Azure Container Apps with Table/Blob state and Bicep; plan written (allowlist, StateStore, Bicep in `deploy/azure/`), awaiting go-ahead.
 - **2026-11-05**: Azure plan step 1 done: relay org allowlist `KITH_RELAY_ALLOWED_ORGS` (REQ-RELAY-008, #57). #56 merged. Plan refreshed; next: step 2 (`StateStore`, Azure Table).
+- **2026-11-05**: Azure plan step 2: `StateStore`, Azure Table allowlist with live reload and eviction, Azurite CI job (PR `feat/relay-state-store`). Next: step 4 (Bicep); step 3 waits for the user's OK on amending ADR 0013.

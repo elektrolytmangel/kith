@@ -6,6 +6,9 @@
 //! - abuse limits (REQ-RELAY-006), see [`Limits::from_env`]
 //! - `KITH_RELAY_ALLOWED_ORGS`: org IDs (hex root public keys, separated by commas or
 //!   whitespace) this relay serves (REQ-RELAY-008). Unset or empty: every org is served.
+//! - `KITH_RELAY_AZURE_STORAGE_ACCOUNT` / `KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING`
+//!   (feature `azure-state`): read the approved orgs from an Azure Table instead, re-read
+//!   every `KITH_RELAY_ALLOWLIST_REFRESH_SECS` (default 30). See [`state`].
 //! - `RUST_LOG`: log filter, default `info`
 //!
 //! Connection: `hello` -> relay `challenge` -> `auth` (signature over
@@ -15,6 +18,8 @@
 //! root public key (REQ-RELAY-004). A device announcing an org without a proof is
 //! *pending*: it may only send `invite-claim` (routed to the org's online admins)
 //! and receive `direct` messages.
+
+pub mod state;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -219,10 +224,35 @@ pub fn parse_allowed_orgs(list: &str) -> Option<HashSet<String>> {
     (!orgs.is_empty()).then_some(orgs)
 }
 
-/// Restrict the relay to `orgs` (`None` serves every org). It applies to announces made
-/// afterwards; devices already announced for a removed org stay until they reconnect.
+/// Restrict the relay to `orgs` (`None` serves every org). Devices that are online in an
+/// org no longer on the list are removed from it and told (`org-not-allowed`); their
+/// connections stay open for their other orgs.
 pub fn set_allowed_orgs(state: &Shared, orgs: Option<HashSet<String>>) {
-    state.lock().unwrap().allowed_orgs = orgs;
+    let mut r = state.lock().unwrap();
+    r.allowed_orgs = orgs;
+    let Some(allowed) = r.allowed_orgs.clone() else {
+        return;
+    };
+    for org in r.table.orgs() {
+        if allowed.contains(&org.to_ascii_lowercase()) {
+            continue;
+        }
+        for dev in r.table.devices_in(&org) {
+            r.table.kick(&dev, &org);
+            if let Some(m) = r.proofs.get_mut(&dev) {
+                m.remove(&org);
+            }
+            if let Some(conn) = r.conns.get(&dev) {
+                send(
+                    &conn.tx,
+                    error(
+                        "org-not-allowed",
+                        format!("{org}: this relay no longer serves this organization"),
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Counts an open connection for as long as it lives.
@@ -874,6 +904,44 @@ mod tests {
         // Lifting the restriction serves the org again.
         set_allowed_orgs(&state, parse_allowed_orgs(""));
         join(&mut b, &other_root, &kb).await;
+    }
+
+    /// req: REQ-RELAY-008
+    #[tokio::test]
+    async fn removing_an_org_from_the_list_evicts_its_devices() {
+        let state = new_state(Duration::from_secs(10));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+        let served = state.clone();
+        tokio::spawn(async move { axum::serve(listener, app(served)).await.unwrap() });
+        let (root, other) = (DeviceKey::generate(), DeviceKey::generate());
+        let key = DeviceKey::generate();
+        let both = format!("{} {}", org_id(&root), org_id(&other));
+        set_allowed_orgs(&state, parse_allowed_orgs(&both));
+        let mut a = login(&url, &key).await;
+        join(&mut a, &root, &key).await;
+        join(&mut a, &other, &key).await;
+
+        set_allowed_orgs(&state, parse_allowed_orgs(&org_id(&other)));
+        expect_error(next_frame(&mut a).await, "org-not-allowed");
+        send_frame(
+            &mut a,
+            &Frame::Broadcast {
+                org: org_id(&root),
+                body: vec![1],
+            },
+        )
+        .await;
+        expect_error(next_frame(&mut a).await, "not-a-member");
+        // The other org keeps working.
+        send_frame(
+            &mut a,
+            &Frame::Broadcast {
+                org: org_id(&other),
+                body: vec![1],
+            },
+        )
+        .await;
     }
 
     #[test]
