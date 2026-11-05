@@ -34,7 +34,8 @@ per-type rules otherwise).
 `kith_merge::Merger` with the Automerge implementation does this (see
 [ADR 0003](../adr/0003-merge-automerge-default-pluggable.md)). All bindings expose it
 as JSON documents: `createDocument`, `updateDocument` (RFC 7396 merge patch) and
-`documentJson`.
+`documentJson`. Changes are checked before Automerge applies them, and documents nest
+at most 100 levels ([ADR 0020](../adr/0020-checked-automerge-changes.md)).
 
 ### REQ-DATA-005: Compaction
 

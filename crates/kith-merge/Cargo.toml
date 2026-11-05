@@ -16,10 +16,11 @@ kith-core.workspace = true
 thiserror.workspace = true
 automerge = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 
 [features]
 default = ["automerge"]
-automerge = ["dep:automerge", "dep:serde_json"]
+automerge = ["dep:automerge", "dep:serde_json", "dep:flate2"]
 
 [dev-dependencies]
 kith-client.workspace = true

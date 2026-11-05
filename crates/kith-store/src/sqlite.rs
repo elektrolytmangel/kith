@@ -337,9 +337,12 @@ impl Store for SqliteStore {
         let mut stmt = self
             .conn
             .prepare_cached(
+                // Only children in the same object count, as in `Store::heads`.
                 "SELECT c.change_id FROM changes c
                  WHERE c.object_id = ?1
-                   AND NOT EXISTS (SELECT 1 FROM change_parents p WHERE p.parent_id = c.change_id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM change_parents p JOIN changes k ON k.change_id = p.change_id
+                     WHERE p.parent_id = c.change_id AND k.object_id = ?1)
                  ORDER BY c.change_id",
             )
             .map_err(backend)?;
@@ -426,6 +429,25 @@ mod tests {
         let p = std::env::temp_dir().join(format!("kith-{name}-{}.db", ObjectId::random()));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// req: REQ-STORE-001
+    #[test]
+    fn heads_ignore_children_in_other_objects() {
+        let key = DeviceKey::generate();
+        let (a, b) = (ObjectId::random(), ObjectId::random());
+        let a1 = change(&key, a, vec![], b"a1");
+        // A change in another object that names a1 as its parent.
+        let b1 = change(&key, b, vec![a1.change_id], b"b1");
+        let mut sql = SqliteStore::open_in_memory().unwrap();
+        let mut mem = crate::MemoryStore::new();
+        for c in [&a1, &b1] {
+            sql.put(c.clone()).unwrap();
+            mem.put(c.clone()).unwrap();
+        }
+        assert_eq!(sql.heads(&a).unwrap(), vec![a1.change_id]);
+        assert_eq!(sql.heads(&a).unwrap(), mem.heads(&a).unwrap());
+        assert_eq!(sql.heads(&b).unwrap(), mem.heads(&b).unwrap());
     }
 
     /// req: REQ-STORE-001

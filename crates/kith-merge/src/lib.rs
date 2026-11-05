@@ -7,7 +7,8 @@
 //!
 //! - [`automerge_merger`] (feature `automerge`, on by default): payloads are
 //!   Automerge changes; the state is an Automerge document. This is the default
-//!   for JSON-like application data.
+//!   for JSON-like application data. Changes are checked before they are applied
+//!   (ADR 0020).
 //! - Other types implement [`Merger`] themselves (last-writer-wins registers,
 //!   detect-and-resolve, ...), or have no merger and stay forked until the
 //!   app resolves them.
