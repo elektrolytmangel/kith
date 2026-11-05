@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-05 (Azure plan: steps 1, 2, 4, 5 done; 3 waits for the user, 6 next)
+- **Last updated:** 2026-11-05 (Azure plan: steps 1, 2, 4, 5, 6 done; 3 waits for the user)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
   allowlist (#57). Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
 - **State of `main` (16e991b, #57 merged):** CI green on all 12 jobs on #57. Locally checked: fmt, clippy (incl. wasm32),
@@ -224,7 +224,7 @@ Apps runs the relay with min = max = 1 replica (it is one in-memory router).
    names and the domain are parameters (the template repo is rebranded by `scripts/rename.py`).
 5. [x] **CI** (`.github/workflows/bicep.yml`): `az bicep build` / `bicep lint` job on changes under `deploy/azure/` (path-filtered); a `what-if` stays a
    manual step in the guide (needs credentials).
-6. [ ] **Docs:** `docs/guides/deployment-azure.md` (prerequisites, `az deployment group create`, approving an org,
+6. [x] **Docs** (PR `docs/deployment-azure`; the whole template and the managed identity path have never run against real Azure, say so when the user deploys): `docs/guides/deployment-azure.md` (prerequisites, `az deployment group create`, approving an org,
    making the ghcr.io package public or adding registry credentials, costs); link from `deployment.md`.
 
 Where Bicep lives: **in this repo** (`deploy/azure/`), next to `deploy/docker-compose.yml`. It is a generic, reusable
@@ -388,3 +388,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-05**: Azure plan step 1 done: relay org allowlist `KITH_RELAY_ALLOWED_ORGS` (REQ-RELAY-008, #57). #56 merged. Plan refreshed; next: step 2 (`StateStore`, Azure Table).
 - **2026-11-05**: Azure plan step 2: `StateStore`, Azure Table allowlist with live reload and eviction, Azurite CI job (PR `feat/relay-state-store`). Next: step 4 (Bicep); step 3 waits for the user's OK on amending ADR 0013.
 - **2026-11-05**: #59 merged (StateStore). Bicep template + lint CI (PR `feat/azure-bicep`). Next: step 6 (Azure guide); step 3 waits for the user's OK.
+- **2026-11-05**: #60 merged (Bicep + lint CI). Azure guide `docs/guides/deployment-azure.md`. Next: user deploys and confirms ADR 0013 amendment (step 3); otherwise road step 4 gaps (REQ-SYNC-005) or step 1 security review prep.

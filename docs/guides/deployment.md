@@ -31,6 +31,10 @@ restart, keep the list in an Azure Table instead (`KITH_RELAY_AZURE_STORAGE_ACCO
 [integration.md](integration.md#relay)); the relay re-reads it every 30 s and
 drops the devices of an org you remove.
 
+### On Azure
+
+Container Apps with a managed identity and Bicep: [deployment-azure.md](deployment-azure.md).
+
 ### With TLS: Docker Compose
 
 [`deploy/docker-compose.yml`](../../deploy/docker-compose.yml) runs the relay
