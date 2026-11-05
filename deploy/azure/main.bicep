@@ -87,9 +87,21 @@ resource revocations 'Microsoft.Storage/storageAccounts/tableServices/tables@202
   name: 'revocations'
 }
 
-resource relayCanUseTables 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: storage
-  name: guid(storage.id, identity.id, tableContributor)
+// The relay's identity gets data access to its two tables only, not to the
+// whole storage account (it never creates tables or touches other data).
+resource relayCanUseAllowedOrgs 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: allowedOrgs
+  name: guid(allowedOrgs.id, identity.id, tableContributor)
+  properties: {
+    roleDefinitionId: tableContributor
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource relayCanUseRevocations 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (persistRevocations) {
+  scope: revocations
+  name: guid(revocations.id, identity.id, tableContributor)
   properties: {
     roleDefinitionId: tableContributor
     principalId: identity.properties.principalId
@@ -128,8 +140,8 @@ var extraEnv = [for item in items(relaySettings): { name: item.key, value: item.
 resource relay 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${name}-relay'
   location: location
-  // The table role must exist before the relay starts, or its first read fails and it exits.
-  dependsOn: [relayCanUseTables, allowedOrgs, revocations]
+  // The table roles must exist before the relay starts, or its first read fails and it exits.
+  dependsOn: [relayCanUseAllowedOrgs, relayCanUseRevocations, allowedOrgs, revocations]
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: { '${identity.id}': {} }

@@ -7,7 +7,7 @@
 | Container App `<name>-relay` | the relay image, **exactly one replica** (it is an in-memory router; two would split the devices), external HTTPS ingress, health probes |
 | Container Apps environment + Log Analytics | logs (`ContainerAppConsoleLogs_CL`) |
 | Storage account + table `allowedorgs` | the list of approved organizations |
-| User-assigned managed identity | reads the table (*Storage Table Data Contributor*). The account has shared-key access disabled: no key exists |
+| User-assigned managed identity | reads and writes the relay's tables (*Storage Table Data Contributor* on each table, not on the account). The account has shared-key access disabled: no key exists |
 
 The relay still stores nothing about your users' data. Only the approved-org list is durable.
 
@@ -76,5 +76,9 @@ az containerapp hostname bind -g kith-rg -n kith-relay --hostname relay.example.
   forgets them until the issuing admin reconnects. Set `persistRevocations = true` to keep them in the `revocations`
   table ([ADR 0014](../adr/0014-optional-revocation-persistence.md)); the relay then stores the IDs of removed devices
   and their signed notices, and re-verifies them at start.
+- **Deployments made before table-scoped roles:** the relay's identity used to hold *Storage Table Data Contributor*
+  on the whole storage account. Deploying the current template adds the per-table assignments but does not remove
+  the old one; delete it once (Azure portal: storage account → *Access control (IAM)* → *Role assignments*, or
+  `az role assignment delete --assignee <principalId> --role "Storage Table Data Contributor" --scope <storage account ID>`).
 - **Not covered:** the managed identity path was written against the
   documented Container Apps endpoint and is verified against the Azurite emulator only for the table calls.

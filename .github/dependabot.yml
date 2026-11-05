@@ -20,10 +20,14 @@ updates:
       # update them in one PR so CI can build the combination.
       android-build:
         patterns: ["com.android.*", "gradle-wrapper"]
+  # Base images are pinned by digest; Dependabot moves tag and digest together.
   - package-ecosystem: docker
-    directory: /apps/relay-server
+    directories: [/apps/relay-server, /docker]
+    schedule: { interval: monthly }
+  - package-ecosystem: docker-compose
+    directory: /deploy
     schedule: { interval: monthly }
   - package-ecosystem: npm
-    directory: /bindings/wasm/tests
+    directories: [/bindings/wasm/tests, /bindings/wasm/tests/browser, /examples/web-vite]
     schedule:
       interval: weekly

@@ -22,7 +22,10 @@ Android receives it as `-Pversion` and Swift through the release tag.
    - builds the XCFramework, tests the Swift package against it and packages it,
    - builds the Android AAR,
    - builds the relay and always-on container images and pushes them to ghcr.io (`docker/Dockerfile`),
-   - creates the GitHub Release with all of them, `SHA256SUMS` and generated notes.
+   - creates the GitHub Release with all of them, `SHA256SUMS`, an SPDX SBOM (`kith-<version>.spdx.json`)
+     and generated notes,
+   - signs a build provenance attestation for every release file and both images (Sigstore, stored on GitHub
+     and, for the images, in ghcr.io next to them).
 
    GitHub (the Release and GitHub Packages) is the only publish target. After the first release with
    images, make both packages public once, see [deployment.md](deployment.md#publishing-the-images-maintainers).
@@ -35,6 +38,19 @@ release, but only when the workflow is run on a `vX.Y.Z` tag.
 The release is created only after every package built. If a build fails, fix
 it and use *Re-run failed jobs*, or run the workflow on the tag with `dry_run`
 unticked.
+
+## Verifying a release
+
+Anyone can check that a release file or image was built by this repository's release workflow
+from a tagged commit (needs the [GitHub CLI](https://cli.github.com/)):
+
+```sh
+gh attestation verify kith-relay-x86_64-unknown-linux-gnu.tar.gz --repo <owner>/kith
+gh attestation verify oci://ghcr.io/<owner>/kith-relay:<version> --repo <owner>/kith
+```
+
+`SHA256SUMS` is attested too. The images also carry BuildKit's own SBOM and provenance
+(`docker buildx imagetools inspect ghcr.io/<owner>/kith-relay:<version> --format '{{json .SBOM}}'`).
 
 ## Configuration
 
