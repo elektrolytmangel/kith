@@ -402,7 +402,7 @@ fn direct(org: &str, to: &str, body: Vec<u8>) -> Frame {
 pub struct Client<S: Store, K: Signer = DeviceKey> {
     key: K,
     /// Seals the org and MLS state before they reach the store (ADR 0021).
-    storage_key: [u8; 32],
+    storage_key: zeroize::Zeroizing<[u8; 32]>,
     store: S,
     groups: Groups,
     /// Per org: the epoch at which we last asked to be re-added after losing a
@@ -448,7 +448,7 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Create a client from a signer and a store. Loads the MLS group state from
     /// the store if there is one.
     pub fn new(key: K, store: S) -> Result<Self, ClientError> {
-        let storage_key = sealed::storage_key(&key).map_err(stored_state)?;
+        let storage_key = zeroize::Zeroizing::new(sealed::storage_key(&key).map_err(stored_state)?);
         let open = |name: &str| -> Result<Option<Vec<u8>>, ClientError> {
             match store.get_meta(name)? {
                 Some(v) => Ok(Some(
@@ -1367,7 +1367,11 @@ impl<S: Store, K: Signer> Client<S, K> {
     }
 
     fn save_orgs(&mut self) -> Result<(), ClientError> {
-        let sealed = sealed::seal(&self.storage_key, ORGS_KEY, &self.orgs.to_bytes());
+        let sealed = sealed::seal(
+            &self.storage_key,
+            ORGS_KEY,
+            &zeroize::Zeroizing::new(self.orgs.to_bytes()),
+        );
         Ok(self.store.put_meta(ORGS_KEY, &sealed)?)
     }
 
