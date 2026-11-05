@@ -23,6 +23,14 @@ pub(crate) struct OrgState {
     pub invites: Vec<Invite>,
 }
 
+impl Drop for OrgState {
+    fn drop(&mut self) {
+        if let Some(root) = &mut self.root {
+            zeroize::Zeroize::zeroize(root);
+        }
+    }
+}
+
 /// All orgs, saved as one blob.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Orgs(pub BTreeMap<String, OrgState>);

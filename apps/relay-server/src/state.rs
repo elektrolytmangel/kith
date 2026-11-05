@@ -116,7 +116,9 @@ pub fn load_revocations(state: &Shared, records: &[RevocationRecord]) -> usize {
     }
     // Root notices first (a stable sort keeps the stored order otherwise).
     verified.sort_by_key(|(_, rev, _)| !rev.by_root());
-    let mut r = state.lock().unwrap();
+    let mut r = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut n = 0;
     for (org, rev, notice) in verified {
         // `persist` is off while loading, so nothing is written back.
@@ -137,7 +139,10 @@ pub fn spawn_revocation_writer(
     store: Arc<dyn StateStore>,
 ) -> tokio::task::JoinHandle<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RevocationRecord>();
-    state.lock().unwrap().persist = Some(tx);
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .persist = Some(tx);
     tokio::spawn(async move {
         while let Some(rec) = rx.recv().await {
             let mut delay = Duration::from_millis(500);

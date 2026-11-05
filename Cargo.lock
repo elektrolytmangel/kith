@@ -1694,6 +1694,7 @@ dependencies = [
  "kith-sync",
  "serde_json",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

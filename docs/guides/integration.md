@@ -62,7 +62,9 @@ or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-cer
    show. Until it is admitted the relay treats it as *pending*: it can only claim.
 4. The admin that issued the invite gets `inviteClaimed { from, code }`. The app can
    ask the user to compare the codes on both screens, then calls `acceptClaim(from)` (or
-   `rejectClaim(from)`). Only that admin can accept, and it must be online.
+   `rejectClaim(from)`). Only that admin can accept, and it must be online. If several
+   devices claim the same link, only the first one accepted gets in, and `acceptClaim`
+   fails once the invite has expired.
 5. The new device gets `joined` with its membership certificate, announces itself
    to the relay with it, and downloads the history from a peer on its own.
 

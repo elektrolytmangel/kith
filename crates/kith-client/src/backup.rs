@@ -12,6 +12,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use zeroize::Zeroizing;
 
 use crate::*;
 
@@ -27,10 +28,10 @@ fn params() -> Params {
     Params::new(m, t, 1, Some(32)).expect("valid Argon2 parameters")
 }
 
-fn derive(passphrase: &str, salt: &[u8; 16]) -> Result<[u8; 32], ClientError> {
-    let mut key = [0u8; 32];
+fn derive(passphrase: &str, salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>, ClientError> {
+    let mut key = Zeroizing::new([0u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params())
-        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .hash_password_into(passphrase.as_bytes(), salt, &mut *key)
         .map_err(|e| ClientError::InvalidBackup(e.to_string()))?;
     Ok(key)
 }
@@ -65,9 +66,10 @@ impl<S: Store> Client<S, DeviceKey> {
     /// `passphrase` (ADR 0010). Contains the device key: anyone
     /// with the file and the passphrase can act as this device.
     pub fn export_backup(&self, passphrase: &str) -> Result<Vec<u8>, ClientError> {
-        let mut plain = Vec::new();
-        plain.extend_from_slice(&self.key.secret_bytes());
-        put(&mut plain, &self.orgs.to_bytes());
+        // Holds the device key and the org root keys: wiped when dropped.
+        let mut plain = Zeroizing::new(Vec::new());
+        plain.extend_from_slice(&*Zeroizing::new(self.key.secret_bytes()));
+        put(&mut plain, &Zeroizing::new(self.orgs.to_bytes()));
         let ids = self.store.all_ids()?;
         plain.extend_from_slice(&(ids.len() as u32).to_be_bytes());
         for id in &ids {
@@ -98,11 +100,11 @@ impl<S: Store> Client<S, DeviceKey> {
         let salt: [u8; 16] = kith_core::random_bytes();
         let nonce: [u8; 24] = kith_core::random_bytes();
         let key = derive(passphrase, &salt)?;
-        let ct = XChaCha20Poly1305::new(&key.into())
+        let ct = XChaCha20Poly1305::new((&*key).into())
             .encrypt(
                 &XNonce::from(nonce),
                 Payload {
-                    msg: &plain,
+                    msg: plain.as_slice(),
                     aad: MAGIC,
                 },
             )
@@ -124,7 +126,7 @@ impl<S: Store> Client<S, DeviceKey> {
         let salt: [u8; 16] = r.take(16)?.try_into().expect("16 bytes");
         let nonce: [u8; 24] = r.take(24)?.try_into().expect("24 bytes");
         let key = derive(passphrase, &salt)?;
-        let plain = XChaCha20Poly1305::new(&key.into())
+        let plain = XChaCha20Poly1305::new((&*key).into())
             .decrypt(
                 &XNonce::from(nonce),
                 Payload {
@@ -133,9 +135,10 @@ impl<S: Store> Client<S, DeviceKey> {
                 },
             )
             .map_err(|_| ClientError::InvalidBackup("wrong passphrase or damaged backup".into()))?;
+        let plain = Zeroizing::new(plain);
         let mut r = Reader(&plain);
-        let seed: [u8; 32] = r.take(32)?.try_into().expect("32 bytes");
-        let orgs = r.bytes()?.to_vec();
+        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(r.take(32)?.try_into().expect("32 bytes"));
+        let orgs = Zeroizing::new(r.bytes()?.to_vec());
         let mut store = store;
         let n = r.u32()?;
         for _ in 0..n {
