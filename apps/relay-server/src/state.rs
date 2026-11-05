@@ -97,16 +97,24 @@ pub struct RevocationRecord {
 }
 
 /// Load the stored notices into the relay. Each is verified against its org ID again;
-/// bad ones are skipped. Returns how many revoked devices the relay now knows.
+/// bad ones are skipped. Root-signed notices go first, so an admin's notices are
+/// judged against the root's revocation of that admin whatever the stored order
+/// (ADR 0018). Returns how many revoked devices the relay now knows.
 pub fn load_revocations(state: &Shared, records: &[RevocationRecord]) -> usize {
     let mut r = state.lock().unwrap();
     let mut n = 0;
-    for rec in records {
-        let Ok(org_key) = kith_core::DeviceId::from_hex(&rec.org) else {
+    let by_root = |rec: &RevocationRecord| {
+        kith_core::membership::Revocation::from_hex(&rec.notice).is_ok_and(|v| v.by_root())
+    };
+    let (root, admins): (Vec<&RevocationRecord>, Vec<&RevocationRecord>) =
+        records.iter().partition(|rec| by_root(rec));
+    for rec in root.into_iter().chain(admins) {
+        let Some(org) = crate::canonical_org(&rec.org) else {
             continue;
         };
+        let org_key = kith_core::DeviceId::from_hex(&org).expect("canonical");
         // `persist` is off while loading, so nothing is written back.
-        match crate::remember_revocation(&mut r, &rec.org, &org_key, &rec.notice) {
+        match crate::remember_revocation(&mut r, &org, &org_key, &rec.notice, true) {
             Ok(true) => n += 1,
             Ok(false) => {}
             Err(e) => tracing::warn!(org = %rec.org, error = %e, "skipping a stored revocation"),

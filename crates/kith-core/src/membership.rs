@@ -246,13 +246,14 @@ pub struct Revocation {
     pub org: DeviceId,
     /// The removed device.
     pub device: DeviceId,
-    /// The admin device that signed.
+    /// The admin device that signed, or the org root key itself.
     pub issuer: DeviceId,
     /// When it was signed (issuer's clock, informational).
     pub issued_ms: u64,
     /// Ed25519 signature by `issuer`.
     pub signature: [u8; 64],
-    /// The issuer's membership chain, proving it is an admin.
+    /// The issuer's membership chain, proving it is an admin; empty when the
+    /// root key signed.
     pub chain: CertChain,
 }
 
@@ -287,13 +288,33 @@ impl Revocation {
         m
     }
 
-    /// Check the signature and that the issuer is an admin of `org`. No state needed.
+    /// Sign a revocation with the org root key (needed to remove an admin at the
+    /// relay, ADR 0018).
+    pub fn issue_by_root(root: &dyn Signer, device: DeviceId, issued_ms: u64) -> Self {
+        let org = root.device_id();
+        Self::issue(root, CertChain(vec![]), org, device, issued_ms)
+    }
+
+    /// True if the org root key signed it.
+    pub fn by_root(&self) -> bool {
+        self.issuer == self.org
+    }
+
+    /// Check the signature and that the issuer is an admin of `org` (or its root
+    /// key). No state needed.
     pub fn verify(&self, org: &DeviceId) -> Result<(), MembershipError> {
         if &self.org != org {
             return Err(MembershipError::Invalid("revocation for another org"));
         }
         verify_signature(&self.issuer, &self.signed_bytes(), &self.signature)
             .map_err(|_| MembershipError::BadSignature)?;
+        if self.by_root() {
+            return if self.chain.0.is_empty() {
+                Ok(())
+            } else {
+                Err(MembershipError::Invalid("a root revocation has no chain"))
+            };
+        }
         if !self.chain.verify(org, &self.issuer)?.admin {
             return Err(MembershipError::Invalid(
                 "revocation issuer is not an admin",
@@ -319,7 +340,7 @@ impl Revocation {
     /// Parse [`Self::to_hex`].
     pub fn from_hex(s: &str) -> Result<Self, MembershipError> {
         let b = hex::decode(s).map_err(|_| MembershipError::Malformed("not hex"))?;
-        if b.len() < REVOKE_LEN + CERT_LEN
+        if b.len() < REVOKE_LEN
             || !(b.len() - REVOKE_LEN).is_multiple_of(CERT_LEN)
             || b.len() > REVOKE_LEN + 3 * CERT_LEN
         {

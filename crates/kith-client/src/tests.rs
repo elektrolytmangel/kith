@@ -51,6 +51,7 @@ impl Net {
         while let Some((sender, frame)) = queue.pop_front() {
             let from_hex = hex(&self.devs[sender]);
             let online = |i: usize, net: &Net| i != sender && !net.offline.contains(&i);
+            let claim = matches!(frame, Frame::InviteClaim { .. });
             let (targets, body): (Vec<usize>, Vec<u8>) = match frame {
                 Frame::Broadcast { body, .. } => (
                     (0..self.devs.len()).filter(|&i| online(i, self)).collect(),
@@ -83,10 +84,18 @@ impl Net {
             };
             for t in targets {
                 let handled = self.devs[t]
-                    .handle_frame(Frame::Deliver {
-                        org: ORG.clone(),
-                        from: from_hex.clone(),
-                        body: body.clone(),
+                    .handle_frame(if claim {
+                        Frame::ClaimDeliver {
+                            org: ORG.clone(),
+                            from: from_hex.clone(),
+                            body: body.clone(),
+                        }
+                    } else {
+                        Frame::Deliver {
+                            org: ORG.clone(),
+                            from: from_hex.clone(),
+                            body: body.clone(),
+                        }
                     })
                     .unwrap();
                 self.events.push((t, handled.event));
@@ -2127,4 +2136,47 @@ fn outsiders_get_no_commits() {
         .unwrap();
     assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
     assert!(h.replies.is_empty());
+}
+
+// ---- claim channel and relay notices (ADR 0018) ----
+
+/// req: REQ-INV-002
+#[test]
+fn claims_and_other_messages_keep_to_their_frames() {
+    let mut net = Net::org(2);
+    let outsider = hex(&client());
+    // A claim frame carrying anything but a claim is refused...
+    let h = net.devs[1]
+        .handle_frame(Frame::ClaimDeliver {
+            org: ORG.clone(),
+            from: outsider.clone(),
+            body: sync::outer_body(&Outer::ReaddNeeded { group: ORG.clone() }),
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    assert!(h.replies.is_empty());
+    // ...and so is a claim in an ordinary delivery.
+    let h = net.devs[0]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from: outsider,
+            body: sync::outer_body(&Outer::Claim {
+                token: [0; 16],
+                proof: [0; 32],
+                key_package: vec![],
+            }),
+        })
+        .unwrap();
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+}
+
+/// req: REQ-INV-004
+#[test]
+fn the_root_holder_signs_relay_notices_with_the_root_key() {
+    let mut net = Net::org(2);
+    let gone = hex(&net.devs[1]);
+    net.devs[0].remove_member(&ORG, &gone).unwrap();
+    let notice = net.devs[0].revocations.last().unwrap();
+    assert!(notice.by_root());
+    notice.verify(&DeviceId::from_hex(&ORG).unwrap()).unwrap();
 }
