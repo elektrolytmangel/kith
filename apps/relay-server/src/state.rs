@@ -101,23 +101,29 @@ pub struct RevocationRecord {
 /// judged against the root's revocation of that admin whatever the stored order
 /// (ADR 0018). Returns how many revoked devices the relay now knows.
 pub fn load_revocations(state: &Shared, records: &[RevocationRecord]) -> usize {
-    let mut r = state.lock().unwrap();
-    let mut n = 0;
-    let by_root = |rec: &RevocationRecord| {
-        kith_core::membership::Revocation::from_hex(&rec.notice).is_ok_and(|v| v.by_root())
-    };
-    let (root, admins): (Vec<&RevocationRecord>, Vec<&RevocationRecord>) =
-        records.iter().partition(|rec| by_root(rec));
-    for rec in root.into_iter().chain(admins) {
+    // Verify first, without the relay lock.
+    let mut verified = vec![];
+    for rec in records {
         let Some(org) = crate::canonical_org(&rec.org) else {
+            tracing::warn!(org = %rec.org, "skipping a stored revocation: bad org ID");
             continue;
         };
         let org_key = kith_core::DeviceId::from_hex(&org).expect("canonical");
+        match crate::verify_notice(&org_key, &rec.notice) {
+            Ok(rev) => verified.push((org, rev, &rec.notice)),
+            Err(e) => tracing::warn!(org = %rec.org, error = %e, "skipping a stored revocation"),
+        }
+    }
+    // Root notices first (a stable sort keeps the stored order otherwise).
+    verified.sort_by_key(|(_, rev, _)| !rev.by_root());
+    let mut r = state.lock().unwrap();
+    let mut n = 0;
+    for (org, rev, notice) in verified {
         // `persist` is off while loading, so nothing is written back.
-        match crate::remember_revocation(&mut r, &org, &org_key, &rec.notice, true) {
+        match crate::remember_verified(&mut r, &org, &rev, notice, true) {
             Ok(true) => n += 1,
             Ok(false) => {}
-            Err(e) => tracing::warn!(org = %rec.org, error = %e, "skipping a stored revocation"),
+            Err(e) => tracing::warn!(%org, error = %e, "skipping a stored revocation"),
         }
     }
     n

@@ -117,6 +117,8 @@ var relayEnv = [
   { name: 'KITH_RELAY_AZURE_STORAGE_ACCOUNT', value: storage.name }
   { name: 'KITH_RELAY_AZURE_ALLOWED_ORGS_TABLE', value: allowedOrgsTable }
   { name: 'KITH_RELAY_ALLOWLIST_REFRESH_SECS', value: string(allowlistRefreshSecs) }
+  // The ingress proxy appends the client address; count connections per client, not per proxy.
+  { name: 'KITH_RELAY_CLIENT_IP_HEADER', value: 'x-forwarded-for' }
   { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
 ]
 

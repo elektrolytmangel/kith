@@ -159,6 +159,19 @@ impl RoutingTable {
         self.always_on.remove(device);
     }
 
+    /// The orgs `device` is announced in (any role), sorted.
+    pub fn orgs_of(&self, device: &str) -> Vec<OrgId> {
+        let mut v: Vec<_> = self
+            .devices
+            .get(device)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        v.sort();
+        v
+    }
+
     /// Every device announced in `org`, members and pending ones, sorted.
     pub fn devices_in(&self, org: &str) -> Vec<DeviceIdHex> {
         let mut v: Vec<_> = [&self.orgs, &self.pending]
