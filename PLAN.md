@@ -190,11 +190,41 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-- **Relay only for approved orgs.** The relay has no org allowlist today: any org (any root key) can announce and
-  route, limited only by the abuse limits. Proposal: `KITH_RELAY_ALLOWED_ORGS` (comma-separated org IDs = root
-  public keys, hex) or a file; the relay refuses `announce` for other orgs (error `org-not-allowed`), including
-  pending devices. Org ID is already the root key, so no new crypto. Until then: restrict by network (VPN /
-  Tailscale / IP allowlist at the proxy). Needs the user's go-ahead (env var vs file, reload without restart?).
+- **Relay with persistent state on Azure (user request 2026-11-05; plan below, awaiting go-ahead).** Confirm: this
+  reverses part of ADR 0013 ("revocation notices in RAM only"). With storage behind it the relay may keep notices
+  across restarts. Also decide: allowlist storage (Table, recommended) and whether approving an org is a table edit
+  (live, no restart) or a redeploy.
+
+### Plan: approved orgs, durable relay state, Azure Container Apps + Bicep
+
+Facts: the relay has no org allowlist today (any root key can announce). Online connections, auth challenges and rate
+buckets are per-process and cannot move to storage. Durable candidates: the **allowlist** (approved org IDs = root
+public keys) and the **revocation notices** (ADR 0013). Functions are not an option (no WebSocket server); Container
+Apps runs the relay with min = max = 1 replica (it is one in-memory router).
+
+1. [ ] **Org allowlist** in the relay (REQ-RELAY-008, new): refuse `announce` for orgs not on the list (error
+   `org-not-allowed`, also for pending devices); empty/unset = open (today's behaviour, for local use). Source:
+   `KITH_RELAY_ALLOWED_ORGS` (env) first.
+2. [ ] **`StateStore` trait in the relay** (default: RAM, unchanged); an **Azure Table Storage** implementation behind a
+   cargo feature `azure-state` (plain REST or the Azure SDK; keep the default build and the wasm/MSRV jobs untouched).
+   Tables: `allowedorgs` (PartitionKey `org`, RowKey org ID), `revocations` (PartitionKey org, RowKey device ID, signed
+   notice). Allowlist is re-read every N seconds, so approving an org needs no restart. Table over Blob (per-row
+   updates, no whole-file races); Queue does not fit (no state, no lookup).
+3. [ ] **Revocation notices persisted** (amends ADR 0013 after the user confirms; new ADR 0014): load on start, write on
+   accept; still verified on load. Closes the "restart forgets notices" gap in *Not usable yet*.
+4. [ ] **Bicep** in `deploy/azure/` (`main.bicep` + `main.bicepparam` example): Log Analytics, Container Apps
+   environment, the app (image `ghcr.io/elektrolytmangel/kith-relay:<version>`, port 8080, external ingress, min=max=1,
+   env limits), Storage account (Table), **user-assigned managed identity** with role *Storage Table Data Contributor*
+   (no storage keys in the app), managed certificate + custom domain optional, optional ingress IP restrictions. All
+   names and the domain are parameters (the template repo is rebranded by `scripts/rename.py`).
+5. [ ] **CI:** `az bicep build` / `bicep lint` job on changes under `deploy/azure/` (path-filtered); a `what-if` stays a
+   manual step in the guide (needs credentials).
+6. [ ] **Docs:** `docs/guides/deployment-azure.md` (prerequisites, `az deployment group create`, approving an org,
+   making the ghcr.io package public or adding registry credentials, costs); link from `deployment.md`.
+
+Where Bicep lives: **in this repo** (`deploy/azure/`), next to `deploy/docker-compose.yml`. It is a generic, reusable
+module and versions with the relay (image tag, env vars, new settings). Environment-specific parameter files
+(subscription, domain, secrets) belong in a private repo or the operator's pipeline, not here.
 
 ### Open issues
 
@@ -349,4 +379,4 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
   Next: step 3 (Swift/Kotlin on devices; needs a macOS/Android runner or device), step 4 (gaps), step 6 docs for other platforms.
 - **2026-11-05**: Release PR `release/0.1.0-alpha.3` (version bump, changelog, doc links). Release dry run on the branch before merge.
 - **2026-11-05**: Road step 4, first gap: relay-level revocation (PR `feat/relay-revocation`, ADR 0013). User chose RAM-only signed notices. Next: share notices with other admins / always-on, then resumable syncs (REQ-SYNC-005), compaction (REQ-DATA-005).
-- **2026-11-05**: User asked where to host the relay and how to limit it to approved orgs. Found: no org allowlist yet; proposal under *Open questions*.
+- **2026-11-05**: User asked where to host the relay and how to limit it to approved orgs (no allowlist yet). User wants Azure Container Apps with Table/Blob state and Bicep; plan written (allowlist, StateStore, Bicep in `deploy/azure/`), awaiting go-ahead.
