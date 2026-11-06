@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (review fixes merged, ADRs 0016-0023; next: release by the user)
+- **Last updated:** 2026-11-06 (release PR `release/0.1.0-alpha.4` open; the user merges and tags)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
   allowlist (#57), optional revocation persistence (ADR 0014), the review fixes (ADRs 0016-0023), build and release
   hardening (#63). **Breaking for apps:** the invite short code now arrives as an event (`claimCode` / `ClaimCode`)
@@ -76,7 +76,7 @@ Work top to bottom; check items off here as they land.
    `create_own_device_invite` (web/FFI), `InviteClaim.to` routing, removal covers linked devices.
 3. **Road to a release users can use:** see the next section (agreed with the user 2026-11-04). Next open item: step 3
    there (real-device verification), then 4. The freeze point is decided (first beta), so step 2 can be finished: migrations and previous-protocol support at the freeze.
-4. **Next:** the user releases (version bump PR + tag); the release notes include the API change above.
+4. **Next:** release `v0.1.0-alpha.4`: PR `release/0.1.0-alpha.4` (version bump, changelog with an *Upgrading* section); the user merges and tags.
 5. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
@@ -400,3 +400,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-05**: CI on `main` red since the relay-limits merge (wasm browser test every run, kith-net join test intermittently): both tests raced the relay registering an announce (now checked off the lock). Tests now wait for presence, like the others (PR `test/wait-for-relay-membership`). No product change; integration guide notes when live changes start reaching a new device.
 - **2026-11-05**: Build and release hardening (PR `chore/supply-chain`): Actions pinned to SHAs, base images to digests, `cargo deny` workflow (`deny.toml`, weekly + on dependency changes; three build-time/unused-curve advisories ignored with reasons), Dependabot covers all npm/Docker/Compose dirs, release SBOM + build provenance attestations, Azure role scoped to the two tables (old account-wide assignment must be deleted by hand on existing deployments).
 - **2026-11-06**: Review fixes merged (ADRs 0016-0023: Welcome checks, commit authorization, relay revocation rules and limits, checked Automerge changes, sealed stored secrets, admission and secret hygiene, invite short code with the admin's nonce, one sync peer, native TLS on by default). The always-on client can now reach `wss://` relays (it had no TLS backend). Dependabot: `examples/web-vite` removed again (its kith-wasm dependency is a local path). Next: release by the user.
+- **2026-11-06**: Release PR `release/0.1.0-alpha.4` (version bump, changelog incl. upgrade notes: stores from alpha.3 can't be opened, all devices and the relay upgrade together, invite code as an event). Release dry run on the branch before merge.

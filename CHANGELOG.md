@@ -4,6 +4,37 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-11-06
+
+Review fixes, relay revocation and allowlist, build and release hardening. **Not compatible with
+0.1.0-alpha.3:** see *Upgrading*.
+
+### Upgrading
+- **Stored data:** stores from earlier alphas can't be opened (the org and MLS state is now
+  encrypted, [ADR 0021](docs/adr/0021-sealed-stored-secrets.md)). Export a backup with alpha.3 and
+  restore it with alpha.4, or invite the device again.
+- **All devices and the relay change together:** invites between alpha.3 and alpha.4 devices fail
+  (new short-code exchange, [ADR 0023](docs/adr/0023-claim-nonce-sync-peer-native-tls.md)), and claims
+  travel in a new relay frame (`claim-deliver`, [ADR 0018](docs/adr/0018-relay-revocation-rules.md)).
+- **Existing orgs:** the device holding the org root key must start alpha.4 once, so the policy gets
+  its root-signed genesis ([ADR 0015](docs/adr/0015-policy-genesis-and-named-members.md)).
+- **Invite API:** `claimInvite` (web), `RelaySession.claim` (Swift/Kotlin), `claim_invite` and
+  `LiveClient::claim` (Rust) no longer return the short code. It arrives as an event once the admin
+  answers: `claimCode` (web), `RelayEvent.ClaimCode` / `.claimCode`, `Event::ClaimCode`.
+  `RelaySession.claim` returns the frame bytes (no `ClaimOutput`).
+- **Native client (`kith-net`, always-on client):** `wss://` works out of the box (TLS is a default
+  feature); plain `ws://` is accepted only for a relay on the same machine.
+- **Azure:** after redeploying, delete the relay identity's old account-wide role assignment
+  ([deployment-azure.md](docs/guides/deployment-azure.md#updating-cost-limits)).
+- **Always-on client:** `--join -` reads the invite link from stdin (a link on the command line
+  still works, with a warning); `KITH_BACKUP_PASSPHRASE_FILE` is preferred over
+  `KITH_BACKUP_PASSPHRASE`.
+
+### Security
+- Fixes from the 2026-11 review of the client, policy, relay and native network code
+  ([ADRs 0015-0023](docs/adr/README.md)). Upgrading is recommended for every deployment; details
+  will be published separately.
+
 ### Added
 - Relay-level revocation (REQ-INV-004, [ADR 0013](docs/adr/0013-relay-revocation.md)): `remove_member` signs a
   revocation notice that the relay verifies from the org ID, keeps in RAM and uses to drop the device (and its own
@@ -28,6 +59,30 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Azure template: the relay's identity gets *Storage Table Data Contributor* on its tables only, not on the storage
   account. Existing deployments keep the old account-wide assignment until it is deleted
   ([deployment-azure.md](docs/guides/deployment-azure.md#updating-cost-limits)).
+- Policy: the root key signs the policy's genesis; a device has a role only if the policy names it; a
+  restriction only lowers a role and wins over the restricted admin's concurrent policy changes
+  ([ADR 0015](docs/adr/0015-policy-genesis-and-named-members.md)).
+- Groups: a device accepts only Welcomes it asked for, and only admins (and subgroup owners) change a
+  group's members ([ADR 0016](docs/adr/0016-welcome-checks.md), [ADR 0017](docs/adr/0017-commit-authorization.md)).
+- Relay: removing an admin needs a notice signed by the org root key; invite claims have their own frame
+  ([ADR 0018](docs/adr/0018-relay-revocation-rules.md)). New limits: per-connection outbox, write and
+  idle timeouts, connections per client address, a separate budget for pending devices
+  (`KITH_RELAY_MAX_QUEUED_BYTES`, `KITH_RELAY_WRITE_TIMEOUT_SECS`, `KITH_RELAY_IDLE_TIMEOUT_SECS`,
+  `KITH_RELAY_MAX_CONNECTIONS_PER_IP`, `KITH_RELAY_CLIENT_IP_HEADER`, `KITH_RELAY_PENDING_FRAMES_PER_SEC`;
+  [ADR 0019](docs/adr/0019-relay-resource-limits.md)).
+- Documents: received Automerge changes are checked before they are applied; documents are limited to
+  100 levels ([ADR 0020](docs/adr/0020-checked-automerge-changes.md)).
+- Storage: the org and MLS state is encrypted with a key derived from the device key; SQLite files and
+  the always-on data directory are readable by the owner only ([ADR 0021](docs/adr/0021-sealed-stored-secrets.md)).
+- Invites: checked again when the admin accepts (one device per invite, not after expiry); at most 8
+  claims wait per invite; the short code includes a value the admin signs after the claim
+  ([ADR 0022](docs/adr/0022-admission-and-secret-hygiene.md), [ADR 0023](docs/adr/0023-claim-nonce-sync-peer-native-tls.md)).
+- Signatures are checked strictly (`verify_strict`); secrets are wiped from memory when dropped.
+- Native client: TLS on by default (rustls with ring), `ws://` only to this machine, 16 MiB message
+  limit ([ADR 0023](docs/adr/0023-claim-nonce-sync-peer-native-tls.md)).
+
+### Fixed
+- The always-on client release builds had no TLS support and could not connect to `wss://` relays.
 
 ## [0.1.0-alpha.3] - 2026-11-05
 
