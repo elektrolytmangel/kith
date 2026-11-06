@@ -46,10 +46,14 @@ Done for native Rust: `kith_net::LiveClient` broadcasts via the relay and
 
 ### REQ-SYNC-005: Resumable large syncs
 
-- **Priority:** should | **Phase:** 7 | **Status:** proposed | **Verify:** test | **Source:** design §Large syncs
+- **Priority:** should | **Phase:** 7 | **Status:** partial | **Verify:** test | **Source:** design §Large syncs
 
 Large initial syncs should be chunked and resumable, preferring a direct
 peer-to-peer connection.
+
+Done (ADR 0025): a catch-up runs in rounds of at most 500 changes and about 2 MiB, and an
+interrupted sync continues where it stopped on the next catch-up. Not done: the direct
+peer-to-peer connection (everything goes through the relay).
 
 ### REQ-SYNC-006: Always-on client
 

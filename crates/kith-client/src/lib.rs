@@ -50,6 +50,12 @@ pub const MAX_QUARANTINE: usize = if cfg!(test) { 20 } else { 1000 };
 
 /// Meta key of the revocation notices this device signed or was given (ADR 0024).
 const REVOCATIONS_KEY: &str = "revocations";
+/// One catch-up round moves at most this many changes in each direction and about
+/// this many bytes (REQ-SYNC-005). A bigger difference takes several rounds, so a
+/// large first sync stays under the relay's rate limits and an interrupted one
+/// resumes with the next catch-up (what is stored is not asked for again).
+const SYNC_BATCH_CHANGES: usize = 500;
+const SYNC_BATCH_BYTES: usize = 2 * 1024 * 1024;
 /// Most notices kept per org: what the relay takes in one announce (ADR 0013).
 const MAX_HELD_NOTICES: usize = 256;
 
@@ -2669,6 +2675,17 @@ impl<S: Store, K: Signer> Client<S, K> {
                     Err(e) => Ok(rejected(e.to_string())),
                 }
             }
+            Message::More => {
+                // Another round with this peer (REQ-SYNC-005), unless one is running.
+                if self.reconciling.contains_key(&scope) {
+                    return Ok(Handled::event(Event::Ignored));
+                }
+                let body = self.start_reconcile(&scope, Some(&from))?;
+                Ok(Handled {
+                    replies: vec![direct(&org, &from, body)],
+                    event: Event::Ignored,
+                })
+            }
             Message::Notices(lines) if scope == org => {
                 self.learn_notices(&org, &lines)?;
                 Ok(Handled::event(Event::Ignored))
@@ -2697,17 +2714,24 @@ impl<S: Store, K: Signer> Client<S, K> {
                     }),
                     Ok(kith_sync::Step::Done(diff)) => {
                         self.reconciling.remove(&scope);
-                        let to_send = self.changes_for(&scope, &diff.to_send)?;
-                        let replies = if to_send.is_empty() && diff.to_request.is_empty() {
+                        let (to_send, cut) = batch(self.changes_for(&scope, &diff.to_send)?);
+                        // Ask for one batch; the peer sends `More` if it has further
+                        // changes for us after answering.
+                        let to_request =
+                            &diff.to_request[..diff.to_request.len().min(SYNC_BATCH_CHANGES)];
+                        let mut replies = if to_send.is_empty() && to_request.is_empty() {
                             vec![]
                         } else {
-                            self.offer_frames(&org, &scope, &from, &diff.to_request, &to_send)?
+                            self.offer_frames(&org, &scope, &from, to_request, &to_send)?
                         };
+                        if cut {
+                            replies.push(self.more_frame(&org, &scope, &from)?);
+                        }
                         Ok(Handled {
                             event: Event::SyncCompared {
                                 from,
                                 sending: to_send.len(),
-                                wanting: diff.to_request.len(),
+                                wanting: to_request.len(),
                             },
                             replies,
                         })
@@ -2749,8 +2773,14 @@ impl<S: Store, K: Signer> Client<S, K> {
                 let mut replies = if want.is_empty() {
                     vec![]
                 } else {
-                    let wanted = self.changes_for(&scope, &want)?;
-                    self.offer_frames(&org, &scope, &from, &[], &wanted)?
+                    let (wanted, cut) = batch(self.changes_for(&scope, &want)?);
+                    let mut r = self.offer_frames(&org, &scope, &from, &[], &wanted)?;
+                    // The asker cut its list at one batch, or we cut our answer:
+                    // tell it to reconcile again.
+                    if cut || want.len() >= SYNC_BATCH_CHANGES {
+                        r.push(self.more_frame(&org, &scope, &from)?);
+                    }
+                    r
                 };
                 replies.extend(fetches);
                 Ok(Handled {
@@ -2781,6 +2811,10 @@ impl<S: Store, K: Signer> Client<S, K> {
         }
         out.sort_by_key(|c| (c.body.timestamp_ms, c.change_id));
         Ok(out)
+    }
+
+    fn more_frame(&mut self, org: &str, scope: &str, to: &str) -> Result<Frame, ClientError> {
+        Ok(direct(org, to, self.app_body(scope, &sync::more_body())?))
     }
 
     fn offer_frames(
@@ -2887,6 +2921,24 @@ fn in_org(org: &str, group: &str) -> bool {
         || group
             .strip_prefix(org)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The first changes of `changes` (oldest first) that fit one round, and whether
+/// some were left out (REQ-SYNC-005).
+fn batch(changes: Vec<Change>) -> (Vec<Change>, bool) {
+    let mut bytes = 0;
+    let mut n = 0;
+    for c in &changes {
+        bytes += kith_store::codec::encode_change(c).len();
+        if n >= SYNC_BATCH_CHANGES || (n > 0 && bytes > SYNC_BATCH_BYTES) {
+            break;
+        }
+        n += 1;
+    }
+    let cut = n < changes.len();
+    let mut changes = changes;
+    changes.truncate(n);
+    (changes, cut)
 }
 
 fn org_scope(org: &str) -> Result<Scope, ClientError> {

@@ -46,6 +46,17 @@ impl Net {
     /// Route frames sent by `from` until no frame is left. Returns the events of
     /// this run.
     fn send(&mut self, from: usize, frames: Vec<Frame>) -> Vec<(usize, Event)> {
+        self.send_until(from, frames, |_| false)
+    }
+
+    /// Like `send`, but the connection drops (the frames still on the way are lost)
+    /// as soon as `stop` matches an event.
+    fn send_until(
+        &mut self,
+        from: usize,
+        frames: Vec<Frame>,
+        stop: impl Fn(&Event) -> bool,
+    ) -> Vec<(usize, Event)> {
         let mut queue: VecDeque<(usize, Frame)> = frames.into_iter().map(|f| (from, f)).collect();
         let start = self.events.len();
         while let Some((sender, frame)) = queue.pop_front() {
@@ -98,8 +109,12 @@ impl Net {
                         }
                     })
                     .unwrap();
+                let stopped = stop(&handled.event);
                 self.events.push((t, handled.event));
                 queue.extend(handled.replies.into_iter().map(|f| (t, f)));
+                if stopped {
+                    queue.clear();
+                }
             }
         }
         self.events.drain(start..).collect()
@@ -635,6 +650,59 @@ fn large_histories_are_split_into_several_offers() {
         .map(|id| net.devs[0].store().get(id).unwrap().unwrap())
         .collect();
     assert!(sync::offer_bodies(&[], &changes).len() >= 2);
+    let f = net.devs[1].sync_request_frame(&ORG).unwrap();
+    net.send(1, vec![f]);
+    assert_eq!(net.ids(1), net.ids(0));
+}
+
+/// req: REQ-SYNC-005
+#[test]
+fn a_large_first_sync_runs_in_batches_and_stops_when_both_sides_agree() {
+    let mut net = Net::org(2);
+    net.offline.insert(1);
+    let n = SYNC_BATCH_CHANGES * 2 + 30;
+    for i in 0..n {
+        net.devs[0]
+            .create(ObjectType::new("note"), format!("note {i}").into_bytes())
+            .unwrap();
+    }
+    net.offline.clear();
+    let f = net.devs[1].sync_request_frame(&ORG).unwrap();
+    let events = net.send(1, vec![f]);
+    assert_eq!(net.ids(1), net.ids(0), "all rounds ran");
+    // One round moves at most one batch.
+    let rounds: Vec<usize> = events
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Event::SyncReceived { stored, .. } => Some(*stored),
+            _ => None,
+        })
+        .collect();
+    assert!(rounds.len() >= 3, "{rounds:?}");
+    assert!(
+        rounds.iter().all(|r| *r <= SYNC_BATCH_CHANGES),
+        "{rounds:?}"
+    );
+}
+
+/// req: REQ-SYNC-005
+#[test]
+fn an_interrupted_sync_resumes_where_it_stopped() {
+    let mut net = Net::org(2);
+    net.offline.insert(1);
+    let n = SYNC_BATCH_CHANGES * 2;
+    for i in 0..n {
+        net.devs[0]
+            .create(ObjectType::new("note"), format!("note {i}").into_bytes())
+            .unwrap();
+    }
+    net.offline.clear();
+    // Round one only: the connection drops before `More` is acted on.
+    let f = net.devs[1].sync_request_frame(&ORG).unwrap();
+    net.send_until(1, vec![f], |e| matches!(e, Event::SyncReceived { .. }));
+    let have = net.ids(1).len();
+    assert!(have > 0 && have < net.ids(0).len(), "partial: {have}");
+    // The next catch-up asks only for the rest.
     let f = net.devs[1].sync_request_frame(&ORG).unwrap();
     net.send(1, vec![f]);
     assert_eq!(net.ids(1), net.ids(0));

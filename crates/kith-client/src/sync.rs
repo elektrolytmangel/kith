@@ -28,6 +28,7 @@ const KIND_CHUNK_WANT: u8 = 6;
 const KIND_CHUNKS: u8 = 7;
 const KIND_CHUNK_MISSING: u8 = 8;
 const KIND_NOTICES: u8 = 9;
+const KIND_MORE: u8 = 10;
 
 /// Stay well below the frame limit: the body is JSON-encoded by the relay protocol
 /// only after this check, and one oversized change must not block the others.
@@ -329,6 +330,9 @@ pub(crate) enum Message {
     Chunks(Vec<([u8; 32], Vec<u8>)>),
     /// "I do not have these chunks."
     ChunkMissing(Vec<[u8; 32]>),
+    /// "There is more: reconcile with me again" (REQ-SYNC-005). Sent after a round that
+    /// was cut at the batch limit.
+    More,
     /// Revocation notices (`Revocation::to_hex`, REQ-INV-004), shared so more than the
     /// issuing admin can repeat them to the relay (ADR 0024). Checked by the receiver.
     Notices(Vec<String>),
@@ -380,6 +384,10 @@ pub(crate) fn notices_bodies(notices: &[String]) -> Vec<Vec<u8>> {
             out
         })
         .collect()
+}
+
+pub(crate) fn more_body() -> Vec<u8> {
+    vec![KIND_MORE]
 }
 
 pub(crate) fn chunk_missing_body(ids: &[[u8; 32]]) -> Vec<u8> {
@@ -512,6 +520,12 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
             Message::Chunks(out)
         }
         KIND_REPLY => Message::Reply(rest.to_vec()),
+        KIND_MORE => {
+            if !rest.is_empty() {
+                return Err("trailing bytes".into());
+            }
+            Message::More
+        }
         KIND_NOTICES => {
             let text = std::str::from_utf8(rest).map_err(|_| "notices are not text")?;
             let lines: Vec<String> = text.lines().map(str::to_owned).collect();
