@@ -41,7 +41,7 @@ docs/
   design/                  design documents
   requirements/            requirements (REQ-…) + generated traceability matrix
   adr/                     architecture decision records
-  guides/                  integration, adapting, development, releasing
+  guides/                  getting started, threat model, integration, deployment, adapting, development, releasing
 scripts/                   build, codegen, requirements, rename
 .github/                   CI, release, issue/PR templates, dependabot
 ```
@@ -100,6 +100,8 @@ Working today: signed change history, SQLite / IndexedDB persistence, JSON docum
 (Automerge), live sync and catch-up through an authenticated relay, end-to-end encryption (one MLS
 group per organization), invitations with membership certificates the relay checks, roles and write rules,
 read-restricted subgroups, encrypted files, encrypted backups, and an always-on client.
+
+Start with [Getting started](docs/guides/getting-started.md) and read the [threat model](docs/guides/threat-model.md) before real data goes in.
 
 Known limits: history is never compacted (REQ-DATA-005, planned), so the whole history sits in memory on the web
 (plan for a few ten thousand changes per device); sync needs another member online (run the always-on client);

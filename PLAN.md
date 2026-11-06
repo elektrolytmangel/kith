@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (alpha.4 tagged, packages public; working through notice sharing, resumable syncs, adopter docs)
+- **Last updated:** 2026-11-06 (alpha.4 tagged; notice sharing, batched syncs and adopter docs done on `main` / in PR; unreleased)
 - **Version:** `v0.1.0-alpha.4` (2026-11-06): review fixes, relay revocation and allowlist, build and release
   hardening. Not compatible with alpha.3 (see the changelog's *Upgrading*).
   Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
@@ -76,11 +76,11 @@ Work top to bottom; check items off here as they land.
    Swift/Kotlin stay non-production previews, only web is production-ready. Migrations and previous-protocol support land at the freeze (first beta).
 4. [x] Release `v0.1.0-alpha.4` (#71, tagged by the user 2026-11-06).
 5. [x] Security review findings published (9 advisories, see *Road*, step 1) and summarized in `CHANGELOG.md`.
-6. **In progress (user, 2026-11-06; one PR each, in this order):**
-   - [ ] E: housekeeping (PLAN, README status, docs state the limits: compaction, mobile non-production).
+6. [x] **Done (user's picks, 2026-11-06; one PR each):**
+   - [x] E: housekeeping (#74) (PLAN, README status, docs state the limits: compaction, mobile non-production).
    - [x] A: share revocation notices between admins and the always-on client (ADR 0024, PR `feat/share-notices`).
    - [x] B: resumable large syncs (REQ-SYNC-005 partial: batched rounds, ADR 0025, PR `feat/resumable-sync`; no direct p2p).
-   - [ ] D: adopter docs (per-platform getting started, threat model and known limits).
+   - [x] D: adopter docs: `docs/guides/getting-started.md` (web walk-through, mobile marked non-production) and `docs/guides/threat-model.md` (PR `docs/adopter-guides`).
    - **Later (todo): C, history compaction (REQ-DATA-005).** Needs a design decision first (retention per type,
      verifiable snapshots). Limitation is documented in README, integration guide and web production guide.
 7. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
@@ -112,8 +112,7 @@ Blockers, in suggested order:
    the release binaries (no Rust compile in the image) and pushes it to GitHub Packages (ghcr.io) with
    `GITHUB_TOKEN`; plus a `docker-compose.yml` example and a deployment guide. Chosen over "Dockerfile that
    downloads the release" because users then just `docker run`/`pull`.
-6. [ ] **Docs for adopters:** per-platform getting started, a small example app, relay deployment guide (TLS,
-   limits, always-on client), threat model and the known limits above.
+6. [x] **Docs for adopters:** getting started, example app (`examples/web-vite`), relay deployment guides, threat model and known limits (2026-11-06).
 
 ### Web readiness (PR `feat/web-readiness`; user asked for all of it on 2026-11-04)
 
@@ -416,3 +415,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: User: alpha.4 tagged, packages public, advisories done. Skip real-device verification (mobile non-production, web only). Do E, A, B, D in that order; C (compaction) later, documented as a limit. Branch `docs/housekeeping`.
 - **2026-11-06**: #74 merged (E). Shared revocation notices (A, ADR 0024, PR `feat/share-notices`). Next: B, resumable syncs.
 - **2026-11-06**: Resumable large syncs (B, ADR 0025, PR `feat/resumable-sync`): rounds of 500 changes / 2 MiB, `More` message. Next: D, adopter docs.
+- **2026-11-06**: #75 (A) and #76 (B) merged. Adopter docs (D): getting started, threat model (PR `docs/adopter-guides`). All four items the user picked are done; open: C compaction (later), Firefox/WebKit browser tests, automatic `catchUp` after reconnect, direct p2p for REQ-SYNC-005.
