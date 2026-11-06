@@ -4,10 +4,10 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (release PR #78 merged; the user tags `v0.1.0-alpha.5`; compaction design waits for answers)
-- **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` is on `main`, untagged (notice sharing ADR 0024, batched sync
-  rounds ADR 0025, adopter docs). Compatible with alpha.4 (an alpha.4 device gets one batch per catch-up from an alpha.5
-  peer, see the changelog's *Upgrading*). Both ghcr.io packages are public.
+- **Last updated:** 2026-11-06 (release PR `release/0.1.0-alpha.6` open; the user tags `v0.1.0-alpha.5` first if not yet done, then `v0.1.0-alpha.6`)
+- **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
+  `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
+  Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
 - **State of `main`:** all review fixes merged. Locally checked: fmt, clippy (workspace, sqlite, azure-state),
   workspace tests x3, MSRV 1.91, wasm32, `cargo deny`, npm smoke test and browser tests against the real relay.
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
@@ -83,7 +83,7 @@ Work top to bottom; check items off here as they land.
    - [x] D: adopter docs: `docs/guides/getting-started.md` (web walk-through, mobile marked non-production) and `docs/guides/threat-model.md` (PR `docs/adopter-guides`).
    - **Later (todo): direct peer-to-peer transfer** for large syncs (rest of REQ-SYNC-005; user 2026-11-06: skip for now).
    - [x] C: history compaction (REQ-DATA-005, ADR 0026, PR `feat/compaction`): admin-made snapshots, per-type retention in the policy,
-     raw objects / documents / file versions + chunks. Unreleased (next release: alpha.6; upgrade all devices before setting a rule). Limitation is documented in README, integration guide and web production guide.
+     raw objects / documents / file versions + chunks. In `v0.1.0-alpha.6` (release PR `release/0.1.0-alpha.6`). Limitation is documented in README, integration guide and web production guide.
 7. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
@@ -425,3 +425,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: User answered the compaction questions (admins only, per-type policy retention, no full-history types, before the beta, documents + raw objects + file chunks). Implementing C.
 - **2026-11-06**: History compaction implemented (PR `feat/compaction`, ADR 0026): `kith_core::snapshot`, `Retention` + `SetRetention` policy op, `Store::delete`/`delete_chunk` (Memory, SQLite, IndexedDB), snapshot-aware Automerge merger, `Client::set_retention/compact/update_file`, wasm `setRetention/compact/updateFile`, FFI + Swift wrappers. Web smoke test (real relay, IndexedDB reopen) passes locally. Open: compaction of the policy object, squashing Automerge history, direct p2p.
 - **2026-11-06**: Dependabot #65, #66, #67, #70 merged (all green); #68 (chacha20poly1305 0.11) failed clippy on deprecated `XNonce::from_slice`, fixed in `sealed.rs` (`try_from`) and merged. Note: #66 (sbom-action) only runs in `release.yml`, so the next release dry run is its real test.
+- **2026-11-06**: #80 merged (C). Release PR `release/0.1.0-alpha.6` (version bump, changelog).

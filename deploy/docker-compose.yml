@@ -1,7 +1,7 @@
 # Relay with automatic TLS (Caddy), plus an optional always-on client.
 # Guide: docs/guides/deployment.md
 #
-#   export KITH_VERSION=0.1.0-alpha.5   # an image tag from the Packages page
+#   export KITH_VERSION=0.1.0-alpha.6   # an image tag from the Packages page
 #   export DOMAIN=relay.example.com     # DNS must point at this host
 #   docker compose up -d
 #

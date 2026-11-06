@@ -12,7 +12,7 @@ You need Node 22+ (or a browser) and Docker or a relay binary from the
 The relay routes encrypted messages between devices and stores nothing. For development:
 
 ```sh
-docker run --rm -p 8080:8080 ghcr.io/elektrolytmangel/kith-relay:0.1.0-alpha.5
+docker run --rm -p 8080:8080 ghcr.io/elektrolytmangel/kith-relay:0.1.0-alpha.6
 curl localhost:8080/healthz          # ok
 ```
 
@@ -22,7 +22,7 @@ Clients connect to `ws://localhost:8080/v1/ws`. Anything beyond your own machine
 ## 2. Install the package
 
 ```sh
-npm install https://github.com/elektrolytmangel/kith/releases/download/v0.1.0-alpha.5/kith-wasm-0.1.0-alpha.5.tgz
+npm install https://github.com/elektrolytmangel/kith/releases/download/v0.1.0-alpha.6/kith-wasm-0.1.0-alpha.6.tgz
 ```
 
 The quickest way to see everything working is the example app
