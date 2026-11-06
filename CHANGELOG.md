@@ -31,9 +31,28 @@ Review fixes, relay revocation and allowlist, build and release hardening. **Not
   `KITH_BACKUP_PASSPHRASE`.
 
 ### Security
-- Fixes from the 2026-11 review of the client, policy, relay and native network code
-  ([ADRs 0015-0023](docs/adr/README.md)). Upgrading is recommended for every deployment; details
-  will be published separately.
+Fixes from the 2026-11 review (internal and external) of the client, policy, relay and native
+network code ([ADRs 0015-0023](docs/adr/README.md)). All earlier versions are affected; upgrade
+every device and the relay.
+- Critical: a client accepted an unsolicited MLS Welcome and replaced the org's encryption group
+  ([GHSA-w42p-rf3h-qqxx](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-w42p-rf3h-qqxx), ADR 0016).
+- Critical: a rival policy genesis from a root-certified admin took over the org policy
+  ([GHSA-xr6v-qq86-27m3](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-xr6v-qq86-27m3), ADR 0015).
+- High: uncertified authors counted as editors; linking, un-revoking and backdating bypassed roles
+  ([GHSA-phpw-5h6c-rvcm](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-phpw-5h6c-rvcm), ADR 0015).
+- High: MLS commits were not authorized by policy role; a re-add changed state before the sender
+  was checked ([GHSA-2w6q-fch9-2q26](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-2w6q-fch9-2q26), ADR 0017).
+- High: revoked admins could still revoke others at the relay; pending announces bypassed
+  revocation ([GHSA-32v8-6gqm-8v8x](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-32v8-6gqm-8v8x), ADR 0018).
+- High: relay resource exhaustion (unbounded queues and state, no idle timeout, verification under
+  the global lock) ([GHSA-c5jv-3fvw-5672](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-c5jv-3fvw-5672), ADR 0019).
+- High: unbounded recursion and no size cap when materializing Automerge documents
+  ([GHSA-r2g8-h8ph-gfgm](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-r2g8-h8ph-gfgm), ADR 0020).
+- Medium: secrets stored or exposed in plaintext (org root key, MLS state, always-on key and logs)
+  ([GHSA-36qv-j64f-c6rj](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-36qv-j64f-c6rj), ADR 0021).
+- Low: client and relay hardening: invites reusable at admission, certificate downgrade, error
+  echo, non-strict signatures; also the invite short code, catch-up peer, commit resend and native
+  TLS ([GHSA-mrg7-v28j-wqgw](https://github.com/elektrolytmangel/kith/security/advisories/GHSA-mrg7-v28j-wqgw), ADRs 0022, 0023).
 
 ### Added
 - Relay-level revocation (REQ-INV-004, [ADR 0013](docs/adr/0013-relay-revocation.md)): `remove_member` signs a
