@@ -58,13 +58,20 @@ or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-cer
 2. An admin calls `createInvite(org, relayUrl, ttlSeconds)` and shares the link (QR
    code, message). It works once and expires. Treat it like a password.
 3. The new device reads the link (`parseInvite(link)` gives `org` and `relay`), connects
-   to that relay and org, and calls `claimInvite(link)`, which returns a 6-digit code to
-   show. Until it is admitted the relay treats it as *pending*: it can only claim.
-4. The admin that issued the invite gets `inviteClaimed { from, code }`. The app can
-   ask the user to compare the codes on both screens, then calls `acceptClaim(from)` (or
+   to that relay and org, and calls `claimInvite(link)`. Until it is admitted the relay
+   treats it as *pending*: it can only claim.
+4. The admin that issued the invite gets `inviteClaimed { from, code }` and answers the
+   claim by itself with a signed random value; the new device then gets
+   `claimCode { from, code }` with the same 6-digit code. The app can ask the user to
+   compare the codes on both screens, then calls `acceptClaim(from)` (or
    `rejectClaim(from)`). Only that admin can accept, and it must be online. If several
-   devices claim the same link, only the first one accepted gets in, and `acceptClaim`
-   fails once the invite has expired.
+   devices claim the same link, only the first one accepted gets in, at most 8 claims
+   wait at once, and `acceptClaim` fails once the invite has expired.
+
+   The code is what protects a leaked link: someone who has it and claims first gets a
+   code that does not match the user's device. Because the admin's random value is part
+   of it, the code cannot be predicted when the claim is made, even by a relay that
+   sees both claims.
 5. The new device gets `joined` with its membership certificate, announces itself
    to the relay with it, and downloads the history from a peer on its own. Live
    changes reach it once the relay has that announce (its `presence` lists it);
@@ -172,7 +179,7 @@ Live sync with other devices through a relay (see [Relay](#relay) below):
 ```ts
 const org = client.createOrg(); // first device only (see "Organizations and encryption")
 client.connect("wss://relay.example.com/v1/ws", org, (e) => {
-  // e.type: "received" | "rejected" | "presence" | "receipt" | "inviteClaimed" | "joined" | ...
+  // e.type: "received" | "rejected" | "presence" | "receipt" | "inviteClaimed" | "claimCode" | "joined" | ...
   if (e.type === "received") render(e.objectId); // the change is already decrypted, validated and stored
   if (e.type === "inviteClaimed" && userConfirmsCode(e.code)) client.acceptClaim(e.from);
 });
@@ -182,7 +189,7 @@ const link = client.createInvite(org, "wss://relay.example.com/v1/ws", 24 * 3600
 // On the new device:
 const { org: o, relay } = KithClient.parseInvite(link);
 newClient.connect(relay, o, onEvent);
-showCode(newClient.claimInvite(link)); // then wait for "joined"
+newClient.claimInvite(link); // then show e.code of the "claimCode" event, wait for "joined"
 ```
 
 Catch up on changes made while this device was offline (and download the history on a
@@ -232,7 +239,7 @@ let conn = RelayConnection(client: client, url: URL(string: "wss://relay.example
 conn.start()
 let link = try client.createInvite(org: org, relay: "wss://relay.example.com/v1/ws", ttlSeconds: 86400)
 // On the new device: let info = try parseInvite(link: link); connect to info.relay / info.org,
-// then `let code = try conn.claim(link)` and wait for `.joined`.
+// then `try conn.claim(link)`, show the code of `.claimCode`, and wait for `.joined`.
 let change = try client.create(type: "acme.note", text: "hi")
 conn.broadcast(change)   // to the other online devices
 ```
@@ -286,8 +293,8 @@ ws.send(session.broadcast(change.changeId).toByteString())
 
 Catch up with `ws.send(session.catchUp().toByteString())` once a `RelayEvent.Presence` shows
 another device (answers come back through `receive` as `RelayEvent.SyncReceived`). A new
-device opens the session for `parseInvite(link).org`, sends `session.claim(link).frame` after
-the handshake and waits for `RelayEvent.Joined`. Live updates only reach online devices.
+device opens the session for `parseInvite(link).org`, sends `session.claim(link)` after
+the handshake, shows the code of `RelayEvent.ClaimCode` and waits for `RelayEvent.Joined`. Live updates only reach online devices.
 
 Keep the device key in the Android Keystore: save `client.secretKey()` (encrypted with a
 Keystore key) and restore with `KithClient.withSecretKey(bytes)`.

@@ -126,17 +126,18 @@ pub async fn join(
     dir: &Path,
     link: &str,
     wait: Duration,
-    on_code: impl FnOnce(&str),
+    mut on_code: impl FnMut(&str),
 ) -> Result<String, Error> {
     let info =
         kith_client::Invite::parse(link).map_err(|e| Error::Config(format!("invite: {e}")))?;
     let (org, relay) = (info.org.to_hex(), info.relay.clone());
     let client = open_client(dir)?;
     let mut live = LiveClient::connect(&relay, &org, client).await?;
-    on_code(&live.claim(link).await?);
+    live.claim(link).await?;
     let joined = tokio::time::timeout(wait, async {
         loop {
             match live.next_event().await? {
+                Some(Event::ClaimCode { org: o, code, .. }) if o == org => on_code(&code),
                 Some(Event::Joined { org: o }) if o == org => return Ok::<_, Error>(()),
                 Some(_) => continue,
                 None => return Err(Error::Config("relay closed the connection".into())),

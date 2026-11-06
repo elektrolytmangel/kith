@@ -166,6 +166,12 @@ fn to_js(ev: Event) -> Option<Object> {
             set(&o, "code", code);
             set(&o, "message", message);
         }
+        Event::ClaimCode { org, from, code } => {
+            set(&o, "type", "claimCode");
+            set(&o, "org", org);
+            set(&o, "from", from);
+            set(&o, "code", code);
+        }
         Event::InviteClaimed { org, from, code } => {
             set(&o, "type", "inviteClaimed");
             set(&o, "org", org);

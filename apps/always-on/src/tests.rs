@@ -42,14 +42,15 @@ async fn until<S: kith_client::Store, T>(
 }
 
 /// The admin accepts the next valid claim.
-async fn accept_one(admin: &mut LiveClient<MemoryStore>) -> String {
-    let from = until(admin, |e| match e {
-        Event::InviteClaimed { from, .. } => Some(from),
+/// Accept the next claim; returns the device and the code the admin was shown.
+async fn accept_one(admin: &mut LiveClient<MemoryStore>) -> (String, String) {
+    let (from, code) = until(admin, |e| match e {
+        Event::InviteClaimed { from, code, .. } => Some((from, code)),
         _ => None,
     })
     .await;
     admin.accept_claim(&from).await.unwrap();
-    from
+    (from, code)
 }
 
 /// req: REQ-SYNC-006
@@ -63,19 +64,31 @@ async fn the_always_on_client_is_the_preferred_peer_and_serves_when_others_are_o
     let link_x = founder.create_invite(&org, &url, 60_000).unwrap();
     let link_b = founder.create_invite(&org, &url, 60_000).unwrap();
     let mut admin = LiveClient::connect(&url, &org, founder).await.unwrap();
+    // Claims reach the admins the relay has registered: wait until it has this one.
+    until(&mut admin, |e| {
+        matches!(e, Event::Presence { .. }).then_some(())
+    })
+    .await;
 
     // The always-on client joins by invite, then runs in the background.
     let dir = temp_dir("x");
     let x_id = device_id(&dir).unwrap();
     let join_dir = dir.clone();
+    let shown = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let shown_by_x = shown.clone();
     let joining = tokio::spawn(async move {
-        join(&join_dir, &link_x, Duration::from_secs(10), |code| {
-            assert_eq!(code.len(), 6)
+        join(&join_dir, &link_x, Duration::from_secs(10), move |code| {
+            *shown_by_x.lock().unwrap() = Some(code.to_string())
         })
         .await
     });
-    accept_one(&mut admin).await;
+    let (_, admin_code) = accept_one(&mut admin).await;
     assert_eq!(joining.await.unwrap().unwrap(), org);
+    assert_eq!(
+        shown.lock().unwrap().as_deref(),
+        Some(admin_code.as_str()),
+        "both show the same code"
+    );
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let options = Options {
         catch_up_every: Duration::from_secs(3600),

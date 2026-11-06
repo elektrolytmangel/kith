@@ -12,9 +12,10 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = []
-# wss:// (TLS) connections, with the webpki root certificates.
-tls = ["tokio-tungstenite/rustls-tls-webpki-roots"]
+# wss:// (TLS) connections with the webpki root certificates and the ring
+# crypto provider. On by default: relays outside this machine need it.
+default = ["tls"]
+tls = ["tokio-tungstenite/rustls-tls-webpki-roots", "dep:rustls"]
 
 [dependencies]
 kith-client.workspace = true
@@ -25,6 +26,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
 [dev-dependencies]
 kith-relay-server = { path = "../../apps/relay-server" }

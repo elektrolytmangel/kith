@@ -126,14 +126,12 @@ impl Net {
         let claim = self.devs[new].claim_invite(&link).unwrap();
         assert_eq!(claim.org, *ORG);
         let events = self.send(new, vec![claim.frame]);
-        let code = events
-            .into_iter()
-            .find_map(|(i, e)| match e {
-                Event::InviteClaimed { code, .. } if i == admin => Some(code),
-                _ => None,
-            })
-            .expect("the claim reaches the admin");
-        assert_eq!(code, claim.code, "both screens show the same code");
+        let code = claimed_by(&events, admin).expect("the claim reaches the admin");
+        assert_eq!(
+            Some(code),
+            claim_code(&events, new),
+            "both screens show the same code"
+        );
         let new_hex = hex(&self.devs[new]);
         let frames = self.devs[admin].accept_claim(&ORG, &new_hex).unwrap();
         let events = self.send(admin, frames);
@@ -885,6 +883,14 @@ fn claimed_by(events: &[(usize, Event)], who: usize) -> Option<String> {
     })
 }
 
+/// The code the claiming device `who` shows (from the admin's answer).
+fn claim_code(events: &[(usize, Event)], who: usize) -> Option<String> {
+    events.iter().find_map(|(i, e)| match e {
+        Event::ClaimCode { code, .. } if *i == who => Some(code.clone()),
+        _ => None,
+    })
+}
+
 /// req: REQ-INV-001
 /// req: REQ-INV-002
 /// req: REQ-ID-003
@@ -939,7 +945,8 @@ fn invites_are_single_use_expiring_and_need_the_secret() {
     // The real one works once.
     let claim = net.devs[2].claim_invite(&link).unwrap();
     let events = net.send(2, vec![claim.frame]);
-    assert_eq!(claimed_by(&events, 0), Some(claim.code));
+    assert!(claimed_by(&events, 0).is_some());
+    assert_eq!(claimed_by(&events, 0), claim_code(&events, 2));
     let d2 = hex(&net.devs[2]);
     let frames = net.devs[0].accept_claim(&ORG, &d2).unwrap();
     net.send(0, frames);
@@ -964,7 +971,8 @@ fn an_invite_admits_one_device_and_only_before_it_expires() {
     for i in [1, 2] {
         let claim = net.devs[i].claim_invite(&link).unwrap();
         let events = net.send(i, vec![claim.frame]);
-        assert_eq!(claimed_by(&events, 0), Some(claim.code));
+        assert!(claimed_by(&events, 0).is_some());
+        assert_eq!(claimed_by(&events, 0), claim_code(&events, i));
     }
     // Only the first one admitted gets in.
     let frames = net.devs[0].accept_claim(&ORG, &d1).unwrap();
@@ -980,7 +988,8 @@ fn an_invite_admits_one_device_and_only_before_it_expires() {
     let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
     let claim = net.devs[2].claim_invite(&link).unwrap();
     let events = net.send(2, vec![claim.frame]);
-    assert_eq!(claimed_by(&events, 0), Some(claim.code));
+    assert!(claimed_by(&events, 0).is_some());
+    assert_eq!(claimed_by(&events, 0), claim_code(&events, 2));
     let token = Invite::parse(&link).unwrap().token;
     for inv in &mut net.devs[0].orgs.0.get_mut(&*ORG).unwrap().invites {
         if inv.token == token {
@@ -1002,7 +1011,8 @@ fn a_rejected_claim_admits_nobody_and_the_invite_stays_valid() {
     let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
     let claim = net.devs[1].claim_invite(&link).unwrap();
     let events = net.send(1, vec![claim.frame]);
-    assert_eq!(claimed_by(&events, 0), Some(claim.code));
+    assert!(claimed_by(&events, 0).is_some());
+    assert_eq!(claimed_by(&events, 0), claim_code(&events, 1));
     let d1 = hex(&net.devs[1]);
     net.devs[0].reject_claim(&ORG, &d1);
     assert!(net.devs[0].accept_claim(&ORG, &d1).is_err());
@@ -1864,7 +1874,7 @@ fn a_member_adds_its_own_device_and_it_follows_the_member() {
             _ => None,
         })
         .expect("the claim reaches the member, not an admin");
-    assert_eq!(code, claim.code);
+    assert_eq!(Some(code), claim_code(&events, 2));
     assert!(
         !events
             .iter()
@@ -2316,4 +2326,198 @@ fn the_root_holder_signs_relay_notices_with_the_root_key() {
     let notice = net.devs[0].revocations.last().unwrap();
     assert!(notice.by_root());
     notice.verify(&DeviceId::from_hex(&ORG).unwrap()).unwrap();
+}
+
+// ---- short code, reconciliation peer, unasked commits (ADR 0023) ----
+
+/// An admin's signed answer to `claimer`'s pending claim, as `signer` would send it.
+fn claim_answer(net: &Net, signer: usize, claimer: usize, nonce: [u8; 32]) -> Vec<u8> {
+    let (invite, kp) = net.devs[claimer].claiming.get(&*ORG).unwrap().clone();
+    let s = &net.devs[signer];
+    sync::outer_body(&Outer::ClaimNonce {
+        token: invite.token,
+        nonce,
+        signature: s.key.sign(&invite.nonce_signed_bytes(&kp, &nonce)),
+        chain: s.membership_proof(&ORG),
+    })
+}
+
+fn deliver(net: &mut Net, to: usize, from: usize, body: Vec<u8>) -> Handled {
+    let from = hex(&net.devs[from]);
+    net.devs[to]
+        .handle_frame(Frame::Deliver {
+            org: ORG.clone(),
+            from,
+            body,
+        })
+        .unwrap()
+}
+
+/// req: REQ-INV-003
+#[test]
+fn the_short_code_comes_from_the_admins_signed_answer() {
+    let mut net = Net::org(2);
+    net.devs.push(client());
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    let claim = net.devs[2].claim_invite(&link).unwrap();
+    // Not before the admin answers: the code needs the admin's nonce, which a holder
+    // of the link who sees this claim cannot know when it picks its own KeyPackage.
+    let events = net.send(2, vec![claim.frame]);
+    let code = claim_code(&events, 2).expect("the admin answers with a nonce");
+    assert_eq!(claimed_by(&events, 0), Some(code.clone()));
+    // A member (not an admin) cannot answer with a nonce of its choosing.
+    let forged = claim_answer(&net, 1, 2, [9; 32]);
+    let h = deliver(&mut net, 2, 1, forged);
+    assert!(
+        matches!(&h.event, Event::Rejected { reason, .. } if reason.contains("admin")),
+        "{:?}",
+        h.event
+    );
+    // Nor can anyone change the admin's nonce.
+    let mut tampered = claim_answer(&net, 0, 2, [1; 32]);
+    let at = 1 + 16;
+    tampered[at] ^= 1;
+    let h = deliver(&mut net, 2, 0, tampered);
+    assert!(
+        matches!(&h.event, Event::Rejected { reason, .. } if reason.contains("signature")),
+        "{:?}",
+        h.event
+    );
+    // The admin's answer, relayed as if from another device, is refused too.
+    let real = claim_answer(&net, 0, 2, [1; 32]);
+    let h = deliver(&mut net, 2, 1, real);
+    assert!(matches!(h.event, Event::Rejected { .. }), "{:?}", h.event);
+    // The code shown is still the admin's, and the admin admits the device.
+    let d2 = hex(&net.devs[2]);
+    let frames = net.devs[0].accept_claim(&ORG, &d2).unwrap();
+    net.send(0, frames);
+    assert!(net.devs[2].is_member(&ORG));
+}
+
+/// req: REQ-INV-003
+#[test]
+fn only_the_admin_that_answered_the_claim_can_welcome() {
+    let mut net = Net::org(2);
+    let d1 = hex(&net.devs[1]);
+    let frames = net.devs[0].grant_admin(&ORG, &d1).unwrap();
+    net.send(0, frames);
+    assert!(net.devs[1].is_admin(&ORG));
+    net.devs.push(client());
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    let claim = net.devs[2].claim_invite(&link).unwrap();
+    let events = net.send(2, vec![claim.frame]);
+    assert!(claim_code(&events, 2).is_some());
+    // Admin 1 never answered: its Welcome, with a valid chain for the newcomer, is
+    // refused (the user compared codes with admin 0).
+    let newbie = net.devs[2].device_id();
+    let kp = net.devs[2].claiming.get(&*ORG).unwrap().1.clone();
+    let mut rogue = Groups::new();
+    rogue.create_group(&net.devs[1].key, &ORG).unwrap();
+    let added = rogue.add_member(&net.devs[1].key, &ORG, &kp).unwrap();
+    let org_id = DeviceId::from_hex(&ORG).unwrap();
+    let mut chain = CertChain::from_hex(&net.devs[1].membership_proof(&ORG)).unwrap();
+    chain.0.push(MembershipCert::issue(
+        &net.devs[1].key,
+        org_id,
+        newbie,
+        false,
+        now_ms(),
+    ));
+    let h = welcome_to(&mut net, 2, &d1, added.welcome, chain.to_hex());
+    assert!(
+        matches!(&h.event, Event::Rejected { reason, .. } if reason.contains("answered")),
+        "{:?}",
+        h.event
+    );
+    assert!(!net.devs[2].is_member(&ORG));
+}
+
+/// req: REQ-INV-002
+#[test]
+fn an_invite_takes_a_limited_number_of_claims() {
+    let mut net = Net::org(1);
+    let link = net.devs[0].create_invite(&ORG, "ws://r", 60_000).unwrap();
+    for n in 0..=MAX_CLAIMS_PER_INVITE {
+        net.devs.push(client());
+        let i = net.devs.len() - 1;
+        let claim = net.devs[i].claim_invite(&link).unwrap();
+        let events = net.send(i, vec![claim.frame]);
+        assert_eq!(
+            claimed_by(&events, 0).is_some(),
+            n < MAX_CLAIMS_PER_INVITE,
+            "claim {n}"
+        );
+    }
+    // A waiting device may claim again: the same claim keeps its nonce (and code),
+    // a new KeyPackage gets a new one.
+    let nonce = |net: &Net| {
+        net.devs[0]
+            .claims
+            .get(&(ORG.clone(), hex(&net.devs[1])))
+            .unwrap()
+            .2
+    };
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    net.send(1, vec![claim.frame.clone()]);
+    let first = nonce(&net);
+    net.send(1, vec![claim.frame]);
+    assert_eq!(nonce(&net), first);
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    net.send(1, vec![claim.frame]);
+    assert_ne!(nonce(&net), first);
+}
+
+/// req: REQ-SYNC-001
+#[test]
+fn a_reconciliation_only_takes_answers_from_its_peer() {
+    let mut net = Net::org(3);
+    net.create(1, b"from 1");
+    // Device 0 asks device 1 directly; device 2 (another member) gets a copy.
+    let d1 = hex(&net.devs[1]);
+    let query = net.devs[0].start_reconcile(&ORG, Some(&d1)).unwrap();
+    let from_2 = deliver(&mut net, 2, 0, query.clone());
+    let from_1 = deliver(&mut net, 1, 0, query);
+    let reply = |h: &Handled| match &h.replies[0] {
+        Frame::Direct { body, .. } => body.clone(),
+        f => panic!("{f:?}"),
+    };
+    // Device 2's answer is ignored and does not end device 0's reconciliation...
+    let h = deliver(&mut net, 0, 2, reply(&from_2));
+    assert!(matches!(h.event, Event::Ignored), "{:?}", h.event);
+    assert!(h.replies.is_empty());
+    // ...which completes with device 1.
+    let h = deliver(&mut net, 0, 1, reply(&from_1));
+    assert!(
+        matches!(&h.event, Event::SyncCompared { from, .. } if *from == d1),
+        "{:?}",
+        h.event
+    );
+}
+
+/// req: REQ-ENC-002
+#[test]
+fn an_old_epoch_header_gets_the_missed_commits_once_and_only_for_members() {
+    let mut net = Net::org(3);
+    // Device 1 writes at the current epoch; the message is held back.
+    let change = net.devs[1]
+        .create(ObjectType::new("note"), b"late".to_vec())
+        .unwrap();
+    let Frame::Broadcast { body, .. } = net.devs[1].broadcast_frame(&ORG, &change).unwrap() else {
+        panic!()
+    };
+    let f = net.devs[0].rotate_key(&ORG).unwrap();
+    net.send(0, vec![f]);
+    let commits = |h: &Handled| {
+        h.replies
+            .iter()
+            .filter(|f| matches!(f, Frame::Direct { body, .. } if matches!(sync::parse_outer(body), Ok(Outer::Commits { .. }))))
+            .count()
+    };
+    // The late message makes device 0 send the commit device 1 missed...
+    assert_eq!(commits(&deliver(&mut net, 0, 1, body.clone())), 1);
+    // ...once per epoch, not for every message claiming that epoch.
+    assert_eq!(commits(&deliver(&mut net, 0, 1, body.clone())), 0);
+    // A device that is not in the group gets nothing.
+    net.devs.push(client());
+    assert_eq!(commits(&deliver(&mut net, 0, 3, body)), 0);
 }

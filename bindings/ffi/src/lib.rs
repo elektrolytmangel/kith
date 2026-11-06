@@ -415,6 +415,13 @@ pub enum RelayEvent {
     Receipt { delivered: Vec<String> },
     /// The relay refused something (for example `auth-failed`, after which it closes).
     RelayError { code: String, message: String },
+    /// The admin answered our invite claim: show `code` (the admin sees the same in
+    /// `InviteClaimed`). `Joined` follows once it accepts.
+    ClaimCode {
+        org: String,
+        from: String,
+        code: String,
+    },
     /// A device claimed one of our invites with a valid proof. Compare `code` with
     /// the new device's screen if you want, then `RelaySession.acceptClaim(from)` (or
     /// `rejectClaim`).
@@ -483,15 +490,6 @@ pub struct FileInfoRecord {
     pub chunks: u64,
     /// Chunks not on this device yet (0: `readFile` works).
     pub missing: u64,
-}
-
-/// Result of [`RelaySession::claim`].
-#[derive(uniffi::Record)]
-pub struct ClaimOutput {
-    /// The claim frame to send.
-    pub frame: Vec<u8>,
-    /// The short code to show; the admin sees the same in `InviteClaimed`.
-    pub code: String,
 }
 
 /// What an invite link points to.
@@ -652,8 +650,9 @@ impl RelaySession {
     }
 
     /// Claim an invite link (on the new device; open this session for the link's
-    /// org, see `parseInvite`). Send `frame`, show `code`, wait for `Joined`.
-    pub fn claim(&self, link: String) -> Result<ClaimOutput, KithError> {
+    /// org, see `parseInvite`). Send the returned frame; the admin's answer brings
+    /// `ClaimCode` (show the code), then `Joined`.
+    pub fn claim(&self, link: String) -> Result<Vec<u8>, KithError> {
         let mut c = self.client.lock();
         let claim = c.claim_invite(&link)?;
         if claim.org != self.org {
@@ -664,10 +663,7 @@ impl RelaySession {
                 ),
             });
         }
-        Ok(ClaimOutput {
-            frame: encode_frame(&claim.frame)?,
-            code: claim.code,
-        })
+        encode_frame(&claim.frame)
     }
 
     /// Admit the device of an `InviteClaimed` event. Send all returned frames, in order.
@@ -804,6 +800,7 @@ fn relay_event(ev: kith_client::Event) -> Option<RelayEvent> {
         Event::Presence { org, online } => RelayEvent::Presence { org, online },
         Event::Receipt { delivered } => RelayEvent::Receipt { delivered },
         Event::RelayError { code, message } => RelayEvent::RelayError { code, message },
+        Event::ClaimCode { org, from, code } => RelayEvent::ClaimCode { org, from, code },
         Event::InviteClaimed { org, from, code } => RelayEvent::InviteClaimed { org, from, code },
         Event::CertificateUpdated { org, admin } => RelayEvent::CertificateUpdated { org, admin },
         Event::Joined { org } => RelayEvent::Joined { org },
@@ -977,11 +974,15 @@ mod tests {
             (org.as_str(), "ws://relay/v1/ws")
         );
         let claim = sb.claim(link).unwrap();
-        let out = relay_to(b, sa, &claim.frame);
+        let out = relay_to(b, sa, &claim);
         let Some(RelayEvent::InviteClaimed { from, code, .. }) = out.event else {
             panic!("claim expected")
         };
-        assert_eq!(code, claim.code);
+        let answer = relay_to(a, sb, &out.replies[0]);
+        let Some(RelayEvent::ClaimCode { code: shown, .. }) = answer.event else {
+            panic!("the admin's answer expected")
+        };
+        assert_eq!(code, shown, "both screens show the same code");
         let frames = sa.accept_claim(from).unwrap();
         assert_eq!(frames.len(), 3, "b named in the policy + commit + welcome");
         // The commit reaches b before it is a member; the Welcome then adds it.

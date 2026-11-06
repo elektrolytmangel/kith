@@ -51,6 +51,13 @@ pub const MAX_QUARANTINE: usize = if cfg!(test) { 20 } else { 1000 };
 /// Meta key of the revocation notices this device signed.
 const REVOCATIONS_KEY: &str = "revocations";
 
+/// A claim waiting for [`Client::accept_claim`]: (KeyPackage, invite token, our nonce).
+type PendingClaim = (Vec<u8>, [u8; 16], [u8; 32]);
+
+/// Claims one invite may have waiting at once; more are refused, so a holder of a
+/// leaked link cannot keep trying for a matching short code.
+const MAX_CLAIMS_PER_INVITE: usize = 8;
+
 /// Key under which the MLS state is kept in the [`Store`] (`Store::put_meta`).
 pub const MLS_STATE_KEY: &str = "mls";
 
@@ -158,10 +165,9 @@ pub struct Claim {
     pub org: String,
     /// The relay URL from the invite.
     pub relay: String,
-    /// The claim to send (an `invite-claim` frame).
+    /// The claim to send (an `invite-claim` frame). The short code to show follows
+    /// as [`Event::ClaimCode`] once the admin answers.
     pub frame: Frame,
-    /// The short code to show; the admin sees the same in [`Event::InviteClaimed`].
-    pub code: String,
 }
 
 /// Result of [`Client::handle_frame`].
@@ -254,6 +260,17 @@ pub enum Event {
         rejected: usize,
         /// Changes the peer asked us to send back (we replied with them).
         requested: usize,
+    },
+    /// The admin answered our invite claim: show `code`; the admin's screen shows
+    /// the same in [`Event::InviteClaimed`] (REQ-INV-003). [`Event::Joined`]
+    /// follows once it accepts.
+    ClaimCode {
+        /// Organization.
+        org: String,
+        /// The admin that answered (hex); only its Welcome is accepted.
+        from: String,
+        /// The short code to show.
+        code: String,
     },
     /// A device claimed one of our invites with a valid proof (REQ-INV-002). To
     /// admit it call [`Client::accept_claim`] (after comparing `code` with the new
@@ -409,7 +426,13 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     /// fork, so one fork sends one request, not one per message.
     readd_asked: std::collections::HashMap<String, u64>,
     /// Per scope: our running catch-up reconciliation (one at a time).
-    reconciling: std::collections::HashMap<String, kith_sync::Reconciliation>,
+    /// The peer it runs with: known for a `Direct` request, otherwise the first
+    /// device that answers; other devices' answers are ignored.
+    reconciling: std::collections::HashMap<String, (kith_sync::Reconciliation, Option<String>)>,
+    /// (group, device) → our epoch when we last sent that device the commits it
+    /// missed unasked, so a message claiming an old epoch triggers that once per
+    /// epoch, not every time (RAM).
+    helped: std::collections::HashMap<(String, String), u64>,
     /// Subgroups we sent our KeyPackage to the owner for (RAM; `sync_request_frames` retries).
     kp_asked: std::collections::HashSet<String>,
     /// Orgs we asked a peer to re-add us to after a restore (RAM).
@@ -417,9 +440,13 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     /// Groups we sent a KeyPackage for (re-add, rejoin, subgroup) → the device we
     /// sent it to. Only that device's Welcome for that group is accepted (RAM).
     welcome_from: std::collections::HashMap<String, DeviceId>,
-    /// Orgs we claimed an invite for → the issuing member for own-device invites
-    /// (RAM; after a restart the certificate chain alone decides).
+    /// Orgs we claimed an invite for → the device whose Welcome we accept: the
+    /// issuing member for own-device invites, then the admin that answered the
+    /// claim (RAM; after a restart the certificate chain alone decides).
     joining: std::collections::HashMap<String, Option<DeviceId>>,
+    /// Orgs we claimed an invite for → (invite, our KeyPackage), to check the
+    /// admin's nonce and derive the short code (RAM).
+    claiming: std::collections::HashMap<String, (Invite, Vec<u8>)>,
     /// Announce as an always-on client (REQ-SYNC-006).
     always_on: bool,
     /// Fetch files' chunks as soon as their `kith.file` arrives.
@@ -434,8 +461,9 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     /// announce so a restarted relay learns them again.
     revocations: Vec<Revocation>,
     /// Valid invite claims waiting for [`Client::accept_claim`]: (org, device) →
-    /// (KeyPackage, invite token). RAM only: after a restart the device claims again.
-    claims: std::collections::HashMap<(String, String), (Vec<u8>, [u8; 16])>,
+    /// (KeyPackage, invite token, our nonce). RAM only: after a restart the device
+    /// claims again.
+    claims: std::collections::HashMap<(String, String), PendingClaim>,
     /// Per org: the policy folded from its policy object (phase 6).
     policies: std::collections::BTreeMap<String, Policy>,
     /// Stored changes the policy does not allow (hidden from history, merge, sync).
@@ -479,10 +507,12 @@ impl<S: Store, K: Signer> Client<S, K> {
             groups,
             readd_asked: Default::default(),
             reconciling: Default::default(),
+            helped: Default::default(),
             kp_asked: Default::default(),
             rejoin_asked: Default::default(),
             welcome_from: Default::default(),
             joining: Default::default(),
+            claiming: Default::default(),
             always_on: false,
             fetch_files: false,
             wanted_chunks: Default::default(),
@@ -1213,8 +1243,8 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     /// Claim an invite link (on the new device). Connect to `Claim::relay` and
     /// announce `Claim::org` (the client has no proof yet, so it is pending), then
-    /// send `Claim::frame` and show `Claim::code`. [`Event::Joined`] follows once
-    /// the admin accepts.
+    /// send `Claim::frame`. The admin answers with [`Event::ClaimCode`] (show the
+    /// code); [`Event::Joined`] follows once it accepts.
     pub fn claim_invite(&mut self, link: &str) -> Result<Claim, ClientError> {
         let invite = Invite::parse(link).map_err(|e| ClientError::InvalidInvite(e.to_string()))?;
         if invite.is_expired(now_ms()) {
@@ -1230,6 +1260,8 @@ impl<S: Store, K: Signer> Client<S, K> {
             proof: invite.claim_proof(&key_package),
             key_package: key_package.clone(),
         });
+        self.claiming
+            .insert(org.clone(), (invite.clone(), key_package));
         Ok(Claim {
             frame: Frame::InviteClaim {
                 org: org.clone(),
@@ -1237,7 +1269,6 @@ impl<S: Store, K: Signer> Client<S, K> {
                 body,
                 to: invite.own_device.map(|d| d.to_hex()),
             },
-            code: invite.short_code(&key_package),
             relay: invite.relay,
             org,
         })
@@ -1248,7 +1279,7 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// (in order: the policy change naming the device, the commit to the group, the
     /// Welcome to the device).
     pub fn accept_claim(&mut self, org: &str, device: &str) -> Result<Vec<Frame>, ClientError> {
-        let (kp, token) = self
+        let (kp, token, _) = self
             .claims
             .remove(&(org.to_string(), device.to_string()))
             .ok_or_else(|| {
@@ -1326,7 +1357,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             st.invites.retain(|i| i.token != token);
         }
         // Other devices' claims on the same invite can't be admitted any more.
-        self.claims.retain(|_, (_, t)| *t != token);
+        self.claims.retain(|_, (_, t, _)| *t != token);
         self.save_orgs()?;
         let mut frames: Vec<Frame> = policy_frame.into_iter().collect();
         frames.push(Frame::Broadcast {
@@ -1590,7 +1621,7 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// [`Event::SyncReceived`]. Works from an empty store (join). The relay's
     /// `Receipt` shows whether a peer was online (`delivered` empty: try later).
     pub fn sync_request_frame(&mut self, org: &str) -> Result<Frame, ClientError> {
-        let body = self.start_reconcile(org)?;
+        let body = self.start_reconcile(org, None)?;
         self.save_groups()?;
         Ok(Frame::SyncRequest {
             org: org.into(),
@@ -1600,11 +1631,14 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     /// Start (or restart) our reconciliation for `scope` (an org or `org/subgroup`
     /// key); returns the first query, encrypted for that scope's group.
-    fn start_reconcile(&mut self, scope: &str) -> Result<Vec<u8>, ClientError> {
+    /// `peer`: the device the query goes to (`Direct`), or `None` for a
+    /// `SyncRequest` (the relay picks one).
+    fn start_reconcile(&mut self, scope: &str, peer: Option<&str>) -> Result<Vec<u8>, ClientError> {
         let ids = self.store.scope_ids(&org_scope(scope)?)?;
         let (r, first) = kith_sync::Reconciliation::start(&ids)?;
         let body = self.app_body(scope, &sync::query_body(&first))?;
-        self.reconciling.insert(scope.into(), r);
+        self.reconciling
+            .insert(scope.into(), (r, peer.map(str::to_string)));
         Ok(body)
     }
 
@@ -1626,8 +1660,9 @@ impl<S: Store, K: Signer> Client<S, K> {
                 .filter(|o| *o != me)
                 .or_else(|| self.groups.members(&g).ok()?.into_iter().find(|d| *d != me));
             if let Some(peer) = peer {
-                let body = self.start_reconcile(&g)?;
-                frames.push(direct(org, &peer.to_hex(), body));
+                let peer = peer.to_hex();
+                let body = self.start_reconcile(&g, Some(&peer))?;
+                frames.push(direct(org, &peer, body));
             }
         }
         self.kp_asked.retain(|g| !in_org(org, g));
@@ -1897,12 +1932,13 @@ impl<S: Store, K: Signer> Client<S, K> {
                 self.welcome_from.remove(&joined);
                 if joined == org {
                     self.joining.remove(&org);
+                    self.claiming.remove(&org);
                 }
                 self.readd_asked.remove(&joined);
                 if joined.contains('/') {
                     // A subgroup: fetch its history from the owner that added us.
                     self.kp_asked.remove(&joined);
-                    let body = self.start_reconcile(&joined)?;
+                    let body = self.start_reconcile(&joined, Some(&from))?;
                     return Ok(Handled {
                         event: Event::Joined {
                             org: joined.clone(),
@@ -1918,7 +1954,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 }
                 // Announce with the certificate (we were pending), then ask a peer
                 // for the history.
-                let body = self.start_reconcile(&joined)?;
+                let body = self.start_reconcile(&joined, None)?;
                 Ok(Handled {
                     event: Event::Joined {
                         org: joined.clone(),
@@ -1954,11 +1990,42 @@ impl<S: Store, K: Signer> Client<S, K> {
                     Ok(d) if d.to_hex() == from => {}
                     _ => return Ok(rejected("KeyPackage is not the sender's".into())),
                 }
-                let code = invite.short_code(&key_package);
-                self.claims
-                    .insert((org.clone(), from.clone()), (key_package, token));
-                Ok(Handled::event(Event::InviteClaimed { org, from, code }))
+                let key = (org.clone(), from.clone());
+                let pending = self.claims.values().filter(|c| c.1 == token).count();
+                if !self.claims.contains_key(&key) && pending >= MAX_CLAIMS_PER_INVITE {
+                    return Ok(rejected("too many claims for this invite".into()));
+                }
+                // A repeated claim with the same KeyPackage keeps its nonce (and code).
+                let nonce = match self.claims.get(&key) {
+                    Some((kp, t, n)) if *kp == key_package && *t == token => *n,
+                    _ => kith_core::random_bytes(),
+                };
+                let code = invite.short_code(&key_package, &nonce);
+                let answer = sync::outer_body(&Outer::ClaimNonce {
+                    token,
+                    nonce,
+                    signature: self
+                        .key
+                        .sign(&invite.nonce_signed_bytes(&key_package, &nonce)),
+                    chain: self.chain(&org).map(CertChain::to_hex).unwrap_or_default(),
+                });
+                self.claims.insert(key, (key_package, token, nonce));
+                Ok(Handled {
+                    replies: vec![direct(&org, &from, answer)],
+                    event: Event::InviteClaimed { org, from, code },
+                })
             }
+            Outer::ClaimNonce {
+                token,
+                nonce,
+                signature,
+                chain,
+            } => Ok(
+                match self.claim_code(&org, &from, token, &nonce, &signature, &chain) {
+                    Ok(code) => Handled::event(Event::ClaimCode { org, from, code }),
+                    Err(e) => rejected(e),
+                },
+            ),
             Outer::Cert(chain) if !self.is_newer_chain(&org, &chain) => {
                 Ok(rejected("membership certificate: older than ours".into()))
             }
@@ -2037,7 +2104,11 @@ impl<S: Store, K: Signer> Client<S, K> {
                 let epoch = self.groups.epoch(&group)?;
                 // Data sent while we were behind could not be read: resync with this peer.
                 let replies = if applied > 0 && self.groups.is_member(&group) {
-                    vec![direct(&org, &from, self.start_reconcile(&group)?)]
+                    vec![direct(
+                        &org,
+                        &from,
+                        self.start_reconcile(&group, Some(&from))?,
+                    )]
                 } else {
                     vec![]
                 };
@@ -2152,6 +2223,41 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// asked; or, the first time, the org's group from the device that issued our
     /// membership certificate (`chain`). Every device in the new group must be one
     /// we accept as a member.
+    /// Check the admin's answer to our claim and derive the short code. The signer
+    /// must be an admin of the org (or the issuing member of an own-device invite);
+    /// from then on only its Welcome is accepted.
+    fn claim_code(
+        &mut self,
+        org: &str,
+        from: &str,
+        token: [u8; 16],
+        nonce: &[u8; 32],
+        signature: &[u8; 64],
+        chain: &str,
+    ) -> Result<String, String> {
+        let (invite, kp) = self
+            .claiming
+            .get(org)
+            .filter(|(i, _)| i.token == token)
+            .ok_or("no claim of ours for this invite")?;
+        let signer = DeviceId::from_hex(from).map_err(|e| e.to_string())?;
+        let proven = CertChain::from_hex(chain)
+            .and_then(|c| c.verify(&invite.org, &signer))
+            .map_err(|e| format!("answer to our claim: {e}"))?;
+        let allowed = match invite.own_device {
+            Some(issuer) => issuer == signer,
+            None => proven.admin,
+        };
+        if !allowed {
+            return Err("answer to our claim not from an admin or the invite's issuer".into());
+        }
+        kith_core::verify_signature(&signer, &invite.nonce_signed_bytes(kp, nonce), signature)
+            .map_err(|_| "answer to our claim: bad signature".to_string())?;
+        let code = invite.short_code(kp, nonce);
+        self.joining.insert(org.into(), Some(signer));
+        Ok(code)
+    }
+
     fn welcome_check(
         &self,
         org: &str,
@@ -2218,7 +2324,7 @@ impl<S: Store, K: Signer> Client<S, K> {
                 if let Some(Some(issuer)) = joining
                     && issuer != adder
                 {
-                    return Err("Welcome not from the invite's issuer".into());
+                    return Err("Welcome not from the device that answered our claim".into());
                 }
                 return Ok(());
             }
@@ -2346,8 +2452,15 @@ impl<S: Store, K: Signer> Client<S, K> {
         ct: &[u8],
     ) -> Result<Handled, ClientError> {
         // A sender at an older epoch missed commits: send them along (REQ-ENC-002).
+        // The epoch is the message's unauthenticated header, so only for a member of
+        // the group, and once per our epoch (it can still ask with `CommitRequest`).
         let help = match (Groups::message_epoch(ct), self.groups.epoch(&group)) {
-            (Ok(theirs), Ok(ours)) if theirs < ours => {
+            (Ok(theirs), Ok(ours))
+                if theirs < ours
+                    && self.trusted_member(&org, &group, &from)
+                    && self.helped.get(&(group.clone(), from.clone())) != Some(&ours) =>
+            {
+                self.helped.insert((group.clone(), from.clone()), ours);
                 self.serve_commits(org.clone(), group.clone(), from.clone(), theirs)?
                     .replies
             }
@@ -2490,10 +2603,17 @@ impl<S: Store, K: Signer> Client<S, K> {
                 }
             }
             Message::Reply(answer) => {
-                let Some(r) = self.reconciling.get_mut(&scope) else {
+                let Some((r, peer)) = self.reconciling.get_mut(&scope) else {
                     // Not reconciling (any more): a late or duplicate answer.
                     return Ok(Handled::event(Event::Ignored));
                 };
+                // One reconciliation runs with one peer: the first to answer, or the
+                // one we asked. Another member's answer would derail it.
+                match peer {
+                    Some(p) if *p != from => return Ok(Handled::event(Event::Ignored)),
+                    Some(_) => {}
+                    None => *peer = Some(from.clone()),
+                }
                 match r.step(&answer) {
                     Ok(kith_sync::Step::Continue(query)) => Ok(Handled {
                         replies: vec![direct(
