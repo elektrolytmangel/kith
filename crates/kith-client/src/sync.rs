@@ -27,6 +27,7 @@ const KIND_REPLY: u8 = 5;
 const KIND_CHUNK_WANT: u8 = 6;
 const KIND_CHUNKS: u8 = 7;
 const KIND_CHUNK_MISSING: u8 = 8;
+const KIND_NOTICES: u8 = 9;
 
 /// Stay well below the frame limit: the body is JSON-encoded by the relay protocol
 /// only after this check, and one oversized change must not block the others.
@@ -328,6 +329,9 @@ pub(crate) enum Message {
     Chunks(Vec<([u8; 32], Vec<u8>)>),
     /// "I do not have these chunks."
     ChunkMissing(Vec<[u8; 32]>),
+    /// Revocation notices (`Revocation::to_hex`, REQ-INV-004), shared so more than the
+    /// issuing admin can repeat them to the relay (ADR 0024). Checked by the receiver.
+    Notices(Vec<String>),
     Offer {
         want: Vec<ChangeId>,
         /// Encoded changes, decoded one by one so a bad one cannot hide the rest.
@@ -360,6 +364,21 @@ fn ids_body(kind: u8, ids: &[[u8; 32]]) -> Vec<u8> {
 pub(crate) fn chunk_want_bodies(ids: &[[u8; 32]]) -> Vec<Vec<u8>> {
     ids.chunks(MAX_WANT_IDS)
         .map(|c| ids_body(KIND_CHUNK_WANT, c))
+        .collect()
+}
+
+/// Most notices in one `Notices` message.
+pub(crate) const MAX_NOTICES_PER_MESSAGE: usize = 64;
+
+/// `Notices` bodies for `notices` (hex), split to stay under the size limit.
+pub(crate) fn notices_bodies(notices: &[String]) -> Vec<Vec<u8>> {
+    notices
+        .chunks(MAX_NOTICES_PER_MESSAGE)
+        .map(|c| {
+            let mut out = vec![KIND_NOTICES];
+            out.extend_from_slice(c.join("\n").as_bytes());
+            out
+        })
         .collect()
 }
 
@@ -493,6 +512,14 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
             Message::Chunks(out)
         }
         KIND_REPLY => Message::Reply(rest.to_vec()),
+        KIND_NOTICES => {
+            let text = std::str::from_utf8(rest).map_err(|_| "notices are not text")?;
+            let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            if lines.len() > MAX_NOTICES_PER_MESSAGE {
+                return Err("too many notices".into());
+            }
+            Message::Notices(lines)
+        }
         KIND_OFFER => {
             let want = r.ids()?;
             let n = r.u32()? as usize;

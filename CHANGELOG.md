@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- Revocation notices are shared with the other admins and the always-on client, so any of them can
+  restore a restarted relay's list ([ADR 0024](docs/adr/0024-shared-revocation-notices.md)). Old clients
+  show the new message as `Rejected` and keep working.
+
 ## [0.1.0-alpha.4] - 2026-11-06
 
 Review fixes, relay revocation and allowlist, build and release hardening. **Not compatible with
