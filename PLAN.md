@@ -4,8 +4,8 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (release PR `release/0.1.0-alpha.5` open; the user merges and tags)
-- **Version:** `v0.1.0-alpha.4` released (2026-11-06). Next: `v0.1.0-alpha.5` (notice sharing ADR 0024, batched sync
+- **Last updated:** 2026-11-06 (release PR #78 merged; the user tags `v0.1.0-alpha.5`; compaction design waits for answers)
+- **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` is on `main`, untagged (notice sharing ADR 0024, batched sync
   rounds ADR 0025, adopter docs). Compatible with alpha.4 (an alpha.4 device gets one batch per catch-up from an alpha.5
   peer, see the changelog's *Upgrading*). Both ghcr.io packages are public.
 - **State of `main`:** all review fixes merged. Locally checked: fmt, clippy (workspace, sqlite, azure-state),
@@ -82,8 +82,8 @@ Work top to bottom; check items off here as they land.
    - [x] B: resumable large syncs (REQ-SYNC-005 partial: batched rounds, ADR 0025, PR `feat/resumable-sync`; no direct p2p).
    - [x] D: adopter docs: `docs/guides/getting-started.md` (web walk-through, mobile marked non-production) and `docs/guides/threat-model.md` (PR `docs/adopter-guides`).
    - **Later (todo): direct peer-to-peer transfer** for large syncs (rest of REQ-SYNC-005; user 2026-11-06: skip for now).
-   - **Next: C, history compaction (REQ-DATA-005).** Needs a design decision first (retention per type,
-     verifiable snapshots). Limitation is documented in README, integration guide and web production guide.
+   - **Next: C, history compaction (REQ-DATA-005).** Design proposed in ADR 0026 (PR `docs/compaction-design`); implement
+     after the user answers the questions under *Open questions*. Limitation is documented in README, integration guide and web production guide.
 7. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
@@ -204,6 +204,10 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - [x] Release PR `v0.1.0-alpha.2` (#42, version bump + changelog); **the user merges and tags**.
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
+
+- **Compaction (ADR 0026, recommended answers first):** (1) who may compact: admins only / any editor; (2) retention: per type in the
+  policy (default keep everything; last N, D days, snapshot only) / one org-wide setting; (3) do any types need full history;
+  (4) before the first beta (recommended) or after; (5) first step: documents only (recommended) / also raw objects and file chunks.
 
 - **Azure plan:** all six steps done. Never deployed to real Azure (managed identity path, Bicep): the first deploy is the test.
   Step 2 used the defaults: allowlist in an Azure Table (live reload every 30 s), Table over Blob.
@@ -418,3 +422,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: Resumable large syncs (B, ADR 0025, PR `feat/resumable-sync`): rounds of 500 changes / 2 MiB, `More` message. Next: D, adopter docs.
 - **2026-11-06**: #75 (A) and #76 (B) merged. Adopter docs (D): getting started, threat model (PR `docs/adopter-guides`). All four items the user picked are done; open: C compaction (later), Firefox/WebKit browser tests, automatic `catchUp` after reconnect, direct p2p for REQ-SYNC-005.
 - **2026-11-06**: User: release now, prepare C (compaction), skip direct p2p (todo for later). Release PR `release/0.1.0-alpha.5`.
+- **2026-11-06**: Compaction design prepared (ADR 0026, proposed) with five questions; direct p2p recorded as a later todo. Waiting for answers before implementing C.
