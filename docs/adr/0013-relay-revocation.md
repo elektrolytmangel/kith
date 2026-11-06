@@ -30,8 +30,8 @@ policy, and it stores nothing on disk.
 
 - The relay still stores nothing on disk; after a restart a removed device can connect until an admin
   that issued the notice announces again.
-- Only the issuing admin repeats a notice. Spreading notices to other admins and the always-on client
-  (so they can repeat them if the issuer is gone) is open work.
+- Only the issuing admin repeats a notice. Other admins and the always-on client now keep them too
+  ([ADR 0024](0024-shared-revocation-notices.md)).
 - Revocation is permanent per device key. A removed device that wants back needs a new device key and
   an invite.
 

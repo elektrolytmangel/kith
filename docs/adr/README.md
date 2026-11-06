@@ -27,6 +27,7 @@ Open questions from the design doc that are waiting for an ADR:
 - [x] Encrypted secrets in the store: [ADR 0021](0021-sealed-stored-secrets.md)
 - [x] Invite admission, certificate updates, secret hygiene: [ADR 0022](0022-admission-and-secret-hygiene.md)
 - [x] Short codes with the admin's nonce, one sync peer, native TLS: [ADR 0023](0023-claim-nonce-sync-peer-native-tls.md)
+- [x] Sharing revocation notices with other admins and the always-on client: [ADR 0024](0024-shared-revocation-notices.md)
 - [ ] Push token persistence (REQ-RELAY-007)
 - [x] Rule for changes concurrent with a revocation (REQ-PERM-004): [ADR 0006](0006-policy-object-roles-revocation.md)
 - [ ] Always-on client required or optional

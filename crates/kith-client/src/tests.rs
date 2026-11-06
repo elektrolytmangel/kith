@@ -1227,6 +1227,66 @@ fn removing_a_member_gives_the_relay_a_signed_notice_that_survives_restarts() {
     assert_eq!(announced(&net.devs[1].announce_frame(&ORG)), 0);
 }
 
+/// req: REQ-INV-004
+#[test]
+fn admins_and_the_always_on_client_keep_notices_other_admins_issued() {
+    let mut net = Net::org(5);
+    let (d1, d2, d4) = (hex(&net.devs[1]), hex(&net.devs[2]), hex(&net.devs[4]));
+    let frames = net.devs[0].grant_admin(&ORG, &d1).unwrap();
+    net.send(0, frames);
+    assert!(net.devs[1].is_admin(&ORG));
+    let d4_id = DeviceId::from_hex(&d4).unwrap();
+    net.devs[3].set_always_on(true);
+    let frames = net.devs[0].remove_member(&ORG, &d4).unwrap();
+    net.send(0, frames);
+    // The issuing admin, the other admin and the always-on client hold it; a plain
+    // member does not.
+    assert_eq!(net.devs[0].held_revocations(&ORG), 1);
+    assert_eq!(net.devs[1].held_revocations(&ORG), 1);
+    assert_eq!(net.devs[3].held_revocations(&ORG), 1);
+    assert_eq!(net.devs[2].held_revocations(&ORG), 0);
+    // The other admin repeats it to the relay although it did not issue it.
+    assert_eq!(announced(&net.devs[1].announce_frame(&ORG)), 1);
+    let Frame::Announce { orgs } = net.devs[1].announce_frame(&ORG) else {
+        panic!()
+    };
+    let rev = kith_core::membership::Revocation::from_hex(&orgs[0].revoked[0]).unwrap();
+    assert_eq!(rev.device, d4_id);
+    // A device made admin later learns the notice when it catches up.
+    let frames = net.devs[0].grant_admin(&ORG, &d2).unwrap();
+    net.send(0, frames);
+    assert_eq!(net.devs[2].held_revocations(&ORG), 0);
+    let f = net.devs[2].sync_request_frame(&ORG).unwrap();
+    net.send(2, vec![f]);
+    assert_eq!(net.devs[2].held_revocations(&ORG), 1);
+}
+
+/// req: REQ-INV-004
+#[test]
+fn shared_notices_must_verify_and_plain_members_keep_none() {
+    let mut net = Net::org(3);
+    let d2 = hex(&net.devs[2]);
+    let frames = net.devs[0].remove_member(&ORG, &d2).unwrap();
+    let Some(Frame::Announce { orgs }) = frames.last() else {
+        panic!()
+    };
+    let good = orgs[0].revoked[0].clone();
+    let mut forged = kith_core::membership::Revocation::from_hex(&good).unwrap();
+    forged.signature[0] ^= 1;
+    let forged = forged.to_hex();
+    let mut other_org = kith_core::membership::Revocation::from_hex(&good).unwrap();
+    other_org.org = DeviceId::from_hex(&hex(&net.devs[1])).unwrap();
+    let other_org = other_org.to_hex();
+    // dev 0 is an admin: takes only the valid, new notice once.
+    let lines = vec![forged, other_org, "zz".into(), good.clone(), good.clone()];
+    net.devs[0].revocations.clear();
+    net.devs[0].learn_notices(&ORG, &lines).unwrap();
+    assert_eq!(net.devs[0].held_revocations(&ORG), 1);
+    // A plain member does not keep it.
+    net.devs[1].learn_notices(&ORG, &[good]).unwrap();
+    assert_eq!(net.devs[1].held_revocations(&ORG), 0);
+}
+
 fn announced(f: &Frame) -> usize {
     match f {
         Frame::Announce { orgs } => orgs[0].revoked.len(),

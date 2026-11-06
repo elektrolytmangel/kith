@@ -35,4 +35,5 @@ revoke it in the policy object; later changes by that key must be rejected.
 `remove_member` removes the device from MLS and revokes it in the policy (ADR 0006).
 It also signs a revocation notice (ADR 0013): the relay checks it against the org ID, holds
 it in RAM, drops the device (and devices certified through it) and refuses its certificate
-until the relay restarts; the admin repeats the notice on every announce.
+until the relay restarts; the admin repeats the notice on every announce. Other admins and the
+always-on client keep it too and repeat it (ADR 0024).

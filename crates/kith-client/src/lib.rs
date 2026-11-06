@@ -48,8 +48,10 @@ use sync::Outer;
 /// make others store.
 pub const MAX_QUARANTINE: usize = if cfg!(test) { 20 } else { 1000 };
 
-/// Meta key of the revocation notices this device signed.
+/// Meta key of the revocation notices this device signed or was given (ADR 0024).
 const REVOCATIONS_KEY: &str = "revocations";
+/// Most notices kept per org: what the relay takes in one announce (ADR 0013).
+const MAX_HELD_NOTICES: usize = 256;
 
 /// A claim waiting for [`Client::accept_claim`]: (KeyPackage, invite token, our nonce).
 type PendingClaim = (Vec<u8>, [u8; 16], [u8; 32]);
@@ -1573,8 +1575,57 @@ impl<S: Store, K: Signer> Client<S, K> {
             });
         }
         frames.push(self.broadcast_frame(org, &revocation)?);
+        // The other admins and the always-on client keep the notice too, so one of
+        // them can repeat it if this device is gone (ADR 0024).
+        let shared = vec![self.revocations[self.revocations.len() - 1].to_hex()];
+        for body in sync::notices_bodies(&shared) {
+            let body = self.app_body(org, &body)?;
+            self.save_groups()?;
+            frames.push(Frame::Broadcast {
+                org: org.into(),
+                body,
+            });
+        }
         frames.push(self.announce_frame(org));
         Ok(frames)
+    }
+
+    /// Number of revocation notices this device repeats to the relay for `org`.
+    pub fn held_revocations(&self, org: &str) -> usize {
+        self.revocations
+            .iter()
+            .filter(|r| r.org.to_hex() == org)
+            .count()
+    }
+
+    /// Keep notices that other members shared (ADR 0024). Only admins and the
+    /// always-on client keep them: they are the ones that repeat notices on announce.
+    /// Each must verify for `org` on its own, so a member cannot plant anything.
+    fn learn_notices(&mut self, org: &str, lines: &[String]) -> Result<(), ClientError> {
+        if !(self.always_on || self.is_admin(org)) || self.chain(org).is_none() {
+            return Ok(());
+        }
+        let Ok(org_id) = DeviceId::from_hex(org) else {
+            return Ok(());
+        };
+        let mut changed = false;
+        for line in lines {
+            let Ok(notice) = Revocation::from_hex(line) else {
+                continue;
+            };
+            if notice.verify(&org_id).is_err()
+                || self.held_revocations(org) >= MAX_HELD_NOTICES
+                || self.revocations.iter().any(|r| r == &notice)
+            {
+                continue;
+            }
+            self.revocations.push(notice);
+            changed = true;
+        }
+        if changed {
+            self.save_revocations()?;
+        }
+        Ok(())
     }
 
     fn save_revocations(&mut self) -> Result<(), ClientError> {
@@ -2591,17 +2642,38 @@ impl<S: Store, K: Signer> Client<S, K> {
             }
             Message::Query(query) => {
                 match kith_sync::respond(&self.store.scope_ids(&org_scope(&scope)?)?, &query) {
-                    Ok(answer) => Ok(Handled {
-                        replies: vec![direct(
+                    Ok(answer) => {
+                        let mut replies = vec![direct(
                             &org,
                             &from,
                             self.app_body(&scope, &sync::reply_body(&answer))?,
-                        )],
-                        event: Event::SyncServed { from },
-                    }),
+                        )];
+                        // Catching up also hands over the notices we hold, so a
+                        // new admin or always-on client learns them (ADR 0024).
+                        if scope == org {
+                            let held: Vec<String> = self
+                                .revocations
+                                .iter()
+                                .filter(|r| r.org.to_hex() == org)
+                                .map(Revocation::to_hex)
+                                .collect();
+                            for body in sync::notices_bodies(&held) {
+                                replies.push(direct(&org, &from, self.app_body(&scope, &body)?));
+                            }
+                        }
+                        Ok(Handled {
+                            replies,
+                            event: Event::SyncServed { from },
+                        })
+                    }
                     Err(e) => Ok(rejected(e.to_string())),
                 }
             }
+            Message::Notices(lines) if scope == org => {
+                self.learn_notices(&org, &lines)?;
+                Ok(Handled::event(Event::Ignored))
+            }
+            Message::Notices(_) => Ok(rejected("notices belong to the org group".into())),
             Message::Reply(answer) => {
                 let Some((r, peer)) = self.reconciling.get_mut(&scope) else {
                     // Not reconciling (any more): a late or duplicate answer.

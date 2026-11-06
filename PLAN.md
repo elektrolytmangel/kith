@@ -52,7 +52,7 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | A device added by the losing side of an MLS fork needs a new invite | Rare (two admins at once) | ADR 0004 |
 | A device added as a member's own device cannot add devices itself; subgroups list devices, not users | Link from the original device; admin lists linked devices | ADR 0011 |
 | Restoring a backup while the original device still runs makes them re-add each other | Restore only when the original is gone | ADR 0010 |
-| A removed device is refused by the relay only while the relay remembers the signed notice. By default that is RAM: after a restart it can connect again until the issuing admin reconnects (opt-in persistence in Azure Table: ADR 0014). Other admins and the always-on client do not repeat notices yet | Turn on persistence; share notices with other admins | ADR 0013, 0014 |
+| A removed device is refused by the relay only while the relay remembers the signed notice. By default that is RAM: after a restart it can connect again until an admin or the always-on client that holds the notice reconnects (ADR 0024; opt-in persistence in Azure Table: ADR 0014). Notices of removals before alpha.5 are held only by their issuer | Turn on persistence | ADR 0013, 0014, 0024 |
 | Subgroup membership changes need the subgroup's owner device online; ownership cannot move | ADR 0008 | REQ-PERM-003 |
 | Sync needs another member online | Run the always-on client (`kith-always-on`) | REQ-SYNC-006 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
@@ -78,7 +78,7 @@ Work top to bottom; check items off here as they land.
 5. [x] Security review findings published (9 advisories, see *Road*, step 1) and summarized in `CHANGELOG.md`.
 6. **In progress (user, 2026-11-06; one PR each, in this order):**
    - [ ] E: housekeeping (PLAN, README status, docs state the limits: compaction, mobile non-production).
-   - [ ] A: share revocation notices between admins and the always-on client (ADR 0013 gap).
+   - [x] A: share revocation notices between admins and the always-on client (ADR 0024, PR `feat/share-notices`).
    - [ ] B: resumable large syncs (REQ-SYNC-005).
    - [ ] D: adopter docs (per-platform getting started, threat model and known limits).
    - **Later (todo): C, history compaction (REQ-DATA-005).** Needs a design decision first (retention per type,
@@ -414,3 +414,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: Release PR `release/0.1.0-alpha.4` (version bump, changelog incl. upgrade notes: stores from alpha.3 can't be opened, all devices and the relay upgrade together, invite code as an event). Release dry run on the branch before merge.
 - **2026-11-06**: `v0.1.0-alpha.4` tagged; the 9 security advisories published by the user. Summary added to *Road* step 1 and the alpha.4 changelog (*Security*).
 - **2026-11-06**: User: alpha.4 tagged, packages public, advisories done. Skip real-device verification (mobile non-production, web only). Do E, A, B, D in that order; C (compaction) later, documented as a limit. Branch `docs/housekeeping`.
+- **2026-11-06**: #74 merged (E). Shared revocation notices (A, ADR 0024, PR `feat/share-notices`). Next: B, resumable syncs.
