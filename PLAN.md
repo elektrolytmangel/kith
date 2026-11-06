@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (`v0.1.0-alpha.4` tagged; security advisories published)
+- **Last updated:** 2026-11-06 (`v0.1.0-alpha.4` released, advisories published; handover below in *Pick up here*)
 - **Version:** `v0.1.0-alpha.4` (2026-11-06): review fixes, relay revocation and allowlist, build and release
   hardening. Not compatible with alpha.3 (see the changelog's *Upgrading*).
   Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
@@ -65,6 +65,28 @@ between alphas.
 
 Phases follow the [design doc](docs/design/0001-local-first-e2ee-sync.md#technology-stack-and-implementation-phases).
 Work top to bottom; check items off here as they land.
+
+### Pick up here (handover 2026-11-06)
+
+State: `v0.1.0-alpha.4` is released, the 9 security advisories are published, the security work is
+finished. Nothing is in flight except:
+
+- [ ] **PR #73** (`fix/release-assets`): `DOCKER_BUILD_RECORD_UPLOAD: false` in `release.yml` (alpha.4 got two
+  stray `*.dockerbuild` assets) and the attestation note in `releasing.md`. The user merges it once CI and the
+  dry run are green. Then check: no `*.dockerbuild` among the next release's assets.
+- [ ] **Stray assets on the alpha.4 release** (user's call, harmless):
+  `gh release delete-asset v0.1.0-alpha.4 elektrolytmangel.kith.0A4T3U.dockerbuild -y` and `... XTNUU8.dockerbuild -y`.
+- [ ] **Existing Azure deployments:** after redeploying, delete the relay identity's old account-wide role
+  assignment ([deployment-azure.md](docs/guides/deployment-azure.md#updating-cost-limits)). User's step.
+- [ ] Optional, user's call: report the Automerge panic on deeply nested documents upstream (kith guards against
+  it since ADR 0020).
+
+Then continue with *Road to a release users can use*: step 3 (Swift/Kotlin against a real relay on devices),
+step 4 (known gaps), step 6 (docs for adopters), the first real Azure deployment (template and managed-identity
+path never ran against Azure), an independent audit (step 1), and making the two ghcr.io packages public
+(user, see *Publishing the images*).
+
+Verified on alpha.4: `gh attestation verify` passes for the release files and `oci://ghcr.io/elektrolytmangel/kith-relay:0.1.0-alpha.4`.
 
 ### Next steps (in order)
 
@@ -300,6 +322,14 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **UniFFI metadata is stripped** from release cdylibs (`strip = true`). Generate bindings from an unstripped host build (`scripts/build-android.sh` does).
 - **wasm32:** `std::time::SystemTime::now()` panics (use `js_sys::Date`); `wasm-opt` needs the feature flags in `bindings/wasm/Cargo.toml` for Rust ≥ 1.87.
 - **Signatures must stay byte-identical** across crypto upgrades: keep `rfc8032_test_vector_1` passing.
+- **Private advisory forks run no GitHub Actions.** Fixes merged from them reach `main` untested by CI: a relay
+  change (announces checked off the lock) left `main` red for a day (#64). Before such a merge run the full local
+  suite *and* the browser tests (`scripts/build-wasm.sh web`, Playwright image, see development.md).
+- **Tests that rely on the relay having processed another connection's frame race.** Wait for `presence` (the admin
+  before a claim; both devices before relying on live broadcasts), as the kith-net and browser tests now do.
+- **Docs-only PRs have no checks, and the agent's tooling may refuse to merge them** (no review). Ask the user to merge.
+- **Release assets = all workflow artifacts.** Anything a job uploads (e.g. Docker build records) ends up in the
+  release; see #73.
 - **Local machine has no Rust toolchain.** Run everything in Docker (`rust:1-bookworm`), see [Run CI locally](docs/guides/development.md#run-ci-locally). Android: `cimg/android:2026.10.1`.
 
 - **`git push` over SSH fails intermittently** too. Fallback: `git -c credential.helper='!gh auth git-credential' push https://github.com/elektrolytmangel/kith.git <branch>`, then `gh pr create --head <branch>`.
@@ -327,7 +357,7 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 
 ## Working agreements
 
-- Branch from `main`, open a PR, wait for CI (docs-only PRs have none, merge directly). **Once every check is green the agent merges its own PR**
+- Branch from `main`, open a PR, wait for CI (docs-only PRs have none: merge directly, or ask the user if the merge is refused). **Once every check is green the agent merges its own PR**
   (`gh pr merge --merge --delete-branch`; decided 2026-11-04). Never merge on red or pending checks, never
   force-push. Tags and releases stay the user's.
 - `gh` is logged in as `finocchio-42` (push access, not admin).
@@ -404,3 +434,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: Review fixes merged (ADRs 0016-0023: Welcome checks, commit authorization, relay revocation rules and limits, checked Automerge changes, sealed stored secrets, admission and secret hygiene, invite short code with the admin's nonce, one sync peer, native TLS on by default). The always-on client can now reach `wss://` relays (it had no TLS backend). Dependabot: `examples/web-vite` removed again (its kith-wasm dependency is a local path). Next: release by the user.
 - **2026-11-06**: Release PR `release/0.1.0-alpha.4` (version bump, changelog incl. upgrade notes: stores from alpha.3 can't be opened, all devices and the relay upgrade together, invite code as an event). Release dry run on the branch before merge.
 - **2026-11-06**: `v0.1.0-alpha.4` tagged; the 9 security advisories published by the user. Summary added to *Road* step 1 and the alpha.4 changelog (*Security*).
+- **2026-11-06**: alpha.4 release: all packages and the SBOM attached, attestations verified; two stray `*.dockerbuild` assets (fix in #73). Handover written (*Pick up here*).
