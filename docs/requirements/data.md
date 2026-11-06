@@ -44,6 +44,9 @@ at most 100 levels ([ADR 0020](../adr/0020-checked-automerge-changes.md)).
 Clients should support snapshots plus pruning of old changes under a per-type
 policy agreed by the organization.
 
+**Not built yet (decided 2026-11-06: later).** Until then history only grows; the guides tell adopters to plan for it.
+Open design question: how much history is kept per object type, and how a snapshot stays verifiable.
+
 ### REQ-DATA-006: Encrypted backups
 
 - **Priority:** should | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** design §Risks (all devices lose data)
