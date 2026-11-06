@@ -45,7 +45,7 @@ Clients should support snapshots plus pruning of old changes under a per-type
 policy agreed by the organization.
 
 **Not built yet (decided 2026-11-06: later).** Until then history only grows; the guides tell adopters to plan for it.
-Open design question: how much history is kept per object type, and how a snapshot stays verifiable.
+Design proposed in [ADR 0026](../adr/0026-history-compaction.md) (signed snapshots, tombstones, per-type retention in the policy); waiting for decisions.
 
 ### REQ-DATA-006: Encrypted backups
 

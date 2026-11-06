@@ -205,6 +205,10 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
+- **Compaction (ADR 0026, recommended answers first):** (1) who may compact: admins only / any editor; (2) retention: per type in the
+  policy (default keep everything; last N, D days, snapshot only) / one org-wide setting; (3) do any types need full history;
+  (4) before the first beta (recommended) or after; (5) first step: documents only (recommended) / also raw objects and file chunks.
+
 - **Azure plan:** all six steps done. Never deployed to real Azure (managed identity path, Bicep): the first deploy is the test.
   Step 2 used the defaults: allowlist in an Azure Table (live reload every 30 s), Table over Blob.
 
@@ -418,3 +422,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: Resumable large syncs (B, ADR 0025, PR `feat/resumable-sync`): rounds of 500 changes / 2 MiB, `More` message. Next: D, adopter docs.
 - **2026-11-06**: #75 (A) and #76 (B) merged. Adopter docs (D): getting started, threat model (PR `docs/adopter-guides`). All four items the user picked are done; open: C compaction (later), Firefox/WebKit browser tests, automatic `catchUp` after reconnect, direct p2p for REQ-SYNC-005.
 - **2026-11-06**: User: release now, prepare C (compaction), skip direct p2p (todo for later). Release PR `release/0.1.0-alpha.5`.
+- **2026-11-06**: Compaction design prepared (ADR 0026, proposed) with five questions; direct p2p recorded as a later todo. Waiting for answers before implementing C.
