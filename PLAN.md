@@ -79,7 +79,7 @@ Work top to bottom; check items off here as they land.
 6. **In progress (user, 2026-11-06; one PR each, in this order):**
    - [ ] E: housekeeping (PLAN, README status, docs state the limits: compaction, mobile non-production).
    - [x] A: share revocation notices between admins and the always-on client (ADR 0024, PR `feat/share-notices`).
-   - [ ] B: resumable large syncs (REQ-SYNC-005).
+   - [x] B: resumable large syncs (REQ-SYNC-005 partial: batched rounds, ADR 0025, PR `feat/resumable-sync`; no direct p2p).
    - [ ] D: adopter docs (per-platform getting started, threat model and known limits).
    - **Later (todo): C, history compaction (REQ-DATA-005).** Needs a design decision first (retention per type,
      verifiable snapshots). Limitation is documented in README, integration guide and web production guide.
@@ -415,3 +415,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: `v0.1.0-alpha.4` tagged; the 9 security advisories published by the user. Summary added to *Road* step 1 and the alpha.4 changelog (*Security*).
 - **2026-11-06**: User: alpha.4 tagged, packages public, advisories done. Skip real-device verification (mobile non-production, web only). Do E, A, B, D in that order; C (compaction) later, documented as a limit. Branch `docs/housekeeping`.
 - **2026-11-06**: #74 merged (E). Shared revocation notices (A, ADR 0024, PR `feat/share-notices`). Next: B, resumable syncs.
+- **2026-11-06**: Resumable large syncs (B, ADR 0025, PR `feat/resumable-sync`): rounds of 500 changes / 2 MiB, `More` message. Next: D, adopter docs.
