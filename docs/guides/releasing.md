@@ -49,7 +49,7 @@ gh attestation verify kith-relay-x86_64-unknown-linux-gnu.tar.gz --repo <owner>/
 gh attestation verify oci://ghcr.io/<owner>/kith-relay:<version> --repo <owner>/kith
 ```
 
-`SHA256SUMS` is attested too. The images also carry BuildKit's own SBOM and provenance
+Every file listed in `SHA256SUMS` is attested (`SHA256SUMS` itself is not). The images also carry BuildKit's own SBOM and provenance
 (`docker buildx imagetools inspect ghcr.io/<owner>/kith-relay:<version> --format '{{json .SBOM}}'`).
 
 ## Configuration
