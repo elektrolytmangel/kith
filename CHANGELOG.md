@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-11-06
+
+History compaction. **Compatible with 0.1.0-alpha.5**; see *Upgrading*.
+
 ### Added
 - **History compaction** (REQ-DATA-005, [ADR 0026](docs/adr/0026-history-compaction.md)): an admin sets a
   retention rule per object type (`setRetention`: `all` by default, `last:N`, `days:N`) and folds old
@@ -12,7 +16,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
   (new `updateFile`). Stores gain `delete` and `delete_chunk`; no format or protocol version changes.
 
 ### Upgrading
-- Upgrade **every device** before an admin sets a retention rule: older clients do not know snapshots.
+- Nothing to migrate: stored formats and the wire protocol are unchanged, and alpha.5 and alpha.6 devices and relays work
+  together. Compaction is off until an admin sets a retention rule.
+- Upgrade **every device** before an admin sets a rule: older clients do not know snapshots, show their bytes as
+  an ordinary change and never delete anything.
 - Custom `Store` implementations must add `delete` and `delete_chunk`.
 
 ## [0.1.0-alpha.5] - 2026-11-06
