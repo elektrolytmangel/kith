@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -19,15 +19,15 @@ authors = ["kith contributors"]
 
 [workspace.dependencies]
 # Internal crates (versioned together, see docs/guides/releasing.md)
-kith-core = { path = "crates/kith-core", version = "0.1.0-alpha.3" }
-kith-protocol = { path = "crates/kith-protocol", version = "0.1.0-alpha.3" }
-kith-crypto = { path = "crates/kith-crypto", version = "0.1.0-alpha.3" }
+kith-core = { path = "crates/kith-core", version = "0.1.0-alpha.4" }
+kith-protocol = { path = "crates/kith-protocol", version = "0.1.0-alpha.4" }
+kith-crypto = { path = "crates/kith-crypto", version = "0.1.0-alpha.4" }
 # default-features = false: only crates that need Automerge opt in (it is large on wasm).
-kith-merge = { path = "crates/kith-merge", version = "0.1.0-alpha.3", default-features = false }
-kith-store = { path = "crates/kith-store", version = "0.1.0-alpha.3" }
-kith-sync = { path = "crates/kith-sync", version = "0.1.0-alpha.3" }
-kith-client = { path = "crates/kith-client", version = "0.1.0-alpha.3" }
-kith-relay = { path = "crates/kith-relay", version = "0.1.0-alpha.3" }
+kith-merge = { path = "crates/kith-merge", version = "0.1.0-alpha.4", default-features = false }
+kith-store = { path = "crates/kith-store", version = "0.1.0-alpha.4" }
+kith-sync = { path = "crates/kith-sync", version = "0.1.0-alpha.4" }
+kith-client = { path = "crates/kith-client", version = "0.1.0-alpha.4" }
+kith-relay = { path = "crates/kith-relay", version = "0.1.0-alpha.4" }
 
 # External
 serde = { version = "1", features = ["derive"] }
