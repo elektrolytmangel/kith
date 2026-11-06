@@ -492,7 +492,7 @@ impl Invite {
     /// it wants to be added with (REQ-INV-002). A relay that swaps the KeyPackage
     /// cannot produce it.
     pub fn claim_proof(&self, key_package: &[u8]) -> [u8; 32] {
-        self.mac(b"kith/invite-claim/v1\0", key_package)
+        self.mac(b"kith/invite-claim/v1\0", key_package, &[])
     }
 
     /// Check a claim's proof in constant time.
@@ -506,17 +506,37 @@ impl Invite {
 
     /// A 6-digit code both devices can show (REQ-INV-003). If they match, the
     /// admin is adding the device the user holds, not one that obtained the link.
-    pub fn short_code(&self, key_package: &[u8]) -> String {
-        let m = self.mac(b"kith/invite-code/v1\0", key_package);
+    ///
+    /// `nonce` is the admin's random answer to the claim ([`Self::nonce_signed_bytes`]).
+    /// The claimer commits to its KeyPackage before the nonce exists, so someone who
+    /// has the link and sees another device's claim cannot search for a KeyPackage
+    /// of its own with the same code (one chance in a million per claim).
+    pub fn short_code(&self, key_package: &[u8], nonce: &[u8; 32]) -> String {
+        let m = self.mac(b"kith/invite-code/v2\0", key_package, nonce);
         let n = u32::from_be_bytes(m[..4].try_into().expect("4 bytes")) % 1_000_000;
         format!("{n:06}")
     }
 
-    fn mac(&self, domain: &[u8], key_package: &[u8]) -> [u8; 32] {
-        let mut msg = Vec::with_capacity(domain.len() + 16 + 32);
+    /// What the admin signs when it answers a claim with `nonce`: the org, the
+    /// invite, the claimed KeyPackage and the nonce. The claimer checks it, so only
+    /// an admin (or, for an own-device invite, its issuer) can choose the nonce.
+    pub fn nonce_signed_bytes(&self, key_package: &[u8], nonce: &[u8; 32]) -> Vec<u8> {
+        const DOMAIN: &[u8] = b"kith/invite-nonce/v1\0";
+        let mut out = Vec::with_capacity(DOMAIN.len() + 32 + 16 + 32 + 32);
+        out.extend_from_slice(DOMAIN);
+        out.extend_from_slice(self.org.as_bytes());
+        out.extend_from_slice(&self.token);
+        out.extend_from_slice(&Sha256::digest(key_package));
+        out.extend_from_slice(nonce);
+        out
+    }
+
+    fn mac(&self, domain: &[u8], key_package: &[u8], extra: &[u8]) -> [u8; 32] {
+        let mut msg = Vec::with_capacity(domain.len() + 16 + 32 + extra.len());
         msg.extend_from_slice(domain);
         msg.extend_from_slice(&self.token);
         msg.extend_from_slice(&Sha256::digest(key_package));
+        msg.extend_from_slice(extra);
         hmac_sha256(&self.secret, &msg)
     }
 }
@@ -820,11 +840,21 @@ mod tests {
         let mut other = inv.clone();
         other.secret[0] ^= 1;
         assert!(!other.verify_claim(b"kp-1", &proof), "needs the secret");
-        let code = inv.short_code(b"kp-1");
+        let n = [7u8; 32];
+        let code = inv.short_code(b"kp-1", &n);
         assert_eq!(code.len(), 6);
         assert!(code.bytes().all(|b| b.is_ascii_digit()));
-        assert_eq!(code, inv.short_code(b"kp-1"));
-        assert_ne!(code, other.short_code(b"kp-1"));
+        assert_eq!(code, inv.short_code(b"kp-1", &n));
+        assert_ne!(code, other.short_code(b"kp-1", &n));
+        // The admin's nonce changes it: it cannot be known before the claim is sent.
+        let codes: std::collections::HashSet<_> = (0..20u8)
+            .map(|i| inv.short_code(b"kp-1", &[i; 32]))
+            .collect();
+        assert!(codes.len() > 15);
+        assert_ne!(
+            inv.nonce_signed_bytes(b"kp-1", &n),
+            inv.nonce_signed_bytes(b"kp-2", &n)
+        );
     }
 
     /// RFC 4231 test cases 1 and 2 (HMAC-SHA256).

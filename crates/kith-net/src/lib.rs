@@ -19,7 +19,14 @@ use kith_client::{
     hello_frame,
 };
 use kith_protocol::{Frame, decode, encode};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{self, protocol::WebSocketConfig},
+};
+
+/// Largest WebSocket message (and frame) accepted from a relay. The relay takes at
+/// most 4 MiB per message by default and wraps it in a slightly larger frame.
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Network errors.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +40,9 @@ pub enum NetError {
     /// The relay closed the connection or refused us.
     #[error("relay refused: {0}")]
     Refused(String),
+    /// The relay URL is not `wss://` (plain `ws://` only reaches this machine).
+    #[error("insecure relay URL: {0}")]
+    InsecureUrl(String),
     /// Local client or storage failure.
     #[error(transparent)]
     Client(#[from] ClientError),
@@ -48,10 +58,21 @@ pub struct RelayConnection {
 }
 
 impl RelayConnection {
-    /// Connect to `url` (`ws://host:port/v1/ws`, or `wss://` with the `tls`
-    /// feature) and prove ownership of `signer`'s device key.
+    /// Connect to `url` and prove ownership of `signer`'s device key. The URL must
+    /// be `wss://` (feature `tls`, on by default); plain `ws://` is refused except
+    /// for a relay on this machine (`localhost`, `127.0.0.0/8`, `[::1]`), since
+    /// anyone on the path would see and could change the traffic.
     pub async fn connect(url: &str, signer: &(dyn Signer + Sync)) -> Result<Self, NetError> {
-        let (ws, _) = connect_async(url).await?;
+        check_url(url)?;
+        #[cfg(feature = "tls")]
+        {
+            // One provider for the process, also when several are compiled in.
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_MESSAGE_BYTES));
+        let (ws, _) = connect_async_with_config(url, Some(config), false).await?;
         let mut conn = Self { ws };
         conn.send(&hello_frame(signer)).await?;
         let nonce = match conn.recv().await? {
@@ -104,6 +125,34 @@ impl RelayConnection {
     pub async fn close(mut self) -> Result<(), NetError> {
         self.ws.close(None).await?;
         Ok(())
+    }
+}
+
+/// `wss://`, or `ws://` to this machine.
+fn check_url(url: &str) -> Result<(), NetError> {
+    let uri: tungstenite::http::Uri = url
+        .parse()
+        .map_err(|_| NetError::InsecureUrl(format!("{url}: not a URL")))?;
+    match uri.scheme_str() {
+        Some("wss") => Ok(()),
+        Some("ws") => {
+            let host = uri.host().unwrap_or_default();
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            let local = host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback());
+            if local {
+                Ok(())
+            } else {
+                Err(NetError::InsecureUrl(format!(
+                    "{url}: use wss:// (ws:// only for a relay on this machine)"
+                )))
+            }
+        }
+        _ => Err(NetError::InsecureUrl(format!(
+            "{url}: not a ws:// or wss:// URL"
+        ))),
     }
 }
 
@@ -162,9 +211,9 @@ impl<S: Store> LiveClient<S> {
     }
 
     /// Claim an invite link for this connection's org (connect with the link's
-    /// relay and org first). Returns the short code to show; wait for
-    /// `Event::Joined`.
-    pub async fn claim(&mut self, link: &str) -> Result<String, NetError> {
+    /// relay and org first). The short code to show arrives as
+    /// `Event::ClaimCode`; then wait for `Event::Joined`.
+    pub async fn claim(&mut self, link: &str) -> Result<(), NetError> {
         let claim = self.client.claim_invite(link)?;
         if claim.org != self.org {
             return Err(NetError::Protocol(format!(
@@ -173,7 +222,7 @@ impl<S: Store> LiveClient<S> {
             )));
         }
         self.conn.send(&claim.frame).await?;
-        Ok(claim.code)
+        Ok(())
     }
 
     /// Admit the device of an `Event::InviteClaimed` (sends commit and Welcome).
@@ -326,9 +375,14 @@ mod tests {
         let link = a.client_mut().create_invite(&org, &url, 60_000).unwrap();
         // The new device connects as pending (not in presence) and claims.
         let mut b = LiveClient::connect(&url, &org, new_client()).await.unwrap();
-        let code = b.claim(&link).await.unwrap();
+        b.claim(&link).await.unwrap();
         let (from, shown) = until(&mut a, |e| match e {
             Event::InviteClaimed { from, code, .. } => Some((from, code)),
+            _ => None,
+        })
+        .await;
+        let code = until(&mut b, |e| match e {
+            Event::ClaimCode { code, .. } => Some(code),
             _ => None,
         })
         .await;
@@ -479,7 +533,7 @@ mod tests {
         // Connect, then break the handshake by answering with a signature from another key.
         let claimed = DeviceKey::generate();
         let other = DeviceKey::generate();
-        let (ws, _) = connect_async(&url).await.unwrap();
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let mut conn = RelayConnection { ws };
         conn.send(&hello_frame(&claimed)).await.unwrap();
         let Some(Frame::Challenge { nonce }) = conn.recv().await.unwrap() else {
@@ -491,5 +545,76 @@ mod tests {
             other => panic!("expected auth-failed, got {other:?}"),
         }
         assert!(conn.recv().await.unwrap().is_none());
+    }
+
+    /// req: REQ-RELAY-004
+    #[tokio::test]
+    async fn plain_ws_is_refused_except_to_this_machine() {
+        for url in [
+            "ws://relay.example.com/v1/ws",
+            "ws://10.0.0.5:8080/v1/ws",
+            "http://relay.example.com/v1/ws",
+            "not a url",
+        ] {
+            match RelayConnection::connect(url, &DeviceKey::generate()).await {
+                Err(NetError::InsecureUrl(_)) => {}
+                other => panic!("{url}: {:?}", other.map(|_| ())),
+            }
+        }
+        for url in [
+            "ws://localhost:1/v1/ws",
+            "ws://127.0.0.1:1/v1/ws",
+            "ws://[::1]:1/v1/ws",
+            "wss://127.0.0.1:1/v1/ws",
+        ] {
+            check_url(url).unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+    }
+
+    /// The release builds can open wss:// connections: the TLS handshake starts
+    /// (and fails against a server that is not TLS) instead of the URL scheme being
+    /// unsupported or the crypto provider missing.
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn wss_starts_a_tls_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = sock.write_all(b"HTTP/1.1 400 not tls\r\n\r\n").await;
+            }
+        });
+        let err = RelayConnection::connect(
+            &format!("wss://127.0.0.1:{}/v1/ws", addr.port()),
+            &DeviceKey::generate(),
+        )
+        .await
+        .err()
+        .expect("not a TLS server");
+        let msg = err.to_string();
+        assert!(matches!(err, NetError::Connection(_)), "{msg}");
+        assert!(!msg.contains("URL"), "{msg}");
+    }
+
+    /// A relay message larger than the limit closes the connection instead of
+    /// being buffered.
+    #[tokio::test]
+    async fn oversized_relay_messages_are_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(sock).await.unwrap();
+            let _ = ws.next().await; // hello
+            let big = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+            let _ = ws.send(tungstenite::Message::Binary(big.into())).await;
+            let _ = ws.next().await;
+        });
+        let url = format!("ws://127.0.0.1:{}/v1/ws", addr.port());
+        match RelayConnection::connect(&url, &DeviceKey::generate()).await {
+            Err(NetError::Connection(tungstenite::Error::Capacity(_))) => {}
+            other => panic!("{:?}", other.map(|_| ())),
+        }
     }
 }

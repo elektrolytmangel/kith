@@ -41,6 +41,7 @@ const OUTER_COMMITS: u8 = 0x15;
 const OUTER_READD_NEEDED: u8 = 0x16;
 const OUTER_CLAIM: u8 = 0x17;
 const OUTER_CERT: u8 = 0x18;
+const OUTER_CLAIM_NONCE: u8 = 0x19;
 
 /// A parsed relay body (outer layer).
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +66,19 @@ pub(crate) enum Outer {
         proof: [u8; 32],
         /// The claimer's MLS KeyPackage.
         key_package: Vec<u8>,
+    },
+    /// The admin's answer to a valid claim, direct to the claimer: a random nonce
+    /// both sides mix into the short code, signed by the admin over
+    /// `Invite::nonce_signed_bytes`, with the admin's certificate chain (hex).
+    ClaimNonce {
+        /// The invite's token.
+        token: [u8; 16],
+        /// Random, chosen after the claim arrived.
+        nonce: [u8; 32],
+        /// The admin's Ed25519 signature.
+        signature: [u8; 64],
+        /// `CertChain::to_hex` of the admin.
+        chain: String,
     },
     /// A new membership certificate chain for the receiver (hex), e.g. admin rights.
     Cert(String),
@@ -119,6 +133,19 @@ pub(crate) fn outer_body(msg: &Outer) -> Vec<u8> {
             out.extend_from_slice(token);
             out.extend_from_slice(proof);
             out.extend_from_slice(key_package);
+            return out;
+        }
+        Outer::ClaimNonce {
+            token,
+            nonce,
+            signature,
+            chain,
+        } => {
+            let mut out = vec![OUTER_CLAIM_NONCE];
+            out.extend_from_slice(token);
+            out.extend_from_slice(nonce);
+            out.extend_from_slice(signature);
+            out.extend_from_slice(chain.as_bytes());
             return out;
         }
         Outer::Cert(chain) => (OUTER_CERT, chain.as_bytes()),
@@ -219,6 +246,19 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
                 key_package,
             }
         }
+        OUTER_CLAIM_NONCE => {
+            let token = r.take(16)?.try_into().expect("16 bytes");
+            let nonce = r.take(32)?.try_into().expect("32 bytes");
+            let signature = r.take(64)?.try_into().expect("64 bytes");
+            let chain = String::from_utf8(std::mem::take(&mut r.0).to_vec())
+                .map_err(|_| "certificate chain is not text")?;
+            Outer::ClaimNonce {
+                token,
+                nonce,
+                signature,
+                chain,
+            }
+        }
         OUTER_CERT => Outer::Cert(
             String::from_utf8(rest.to_vec()).map_err(|_| "certificate chain is not text")?,
         ),
@@ -263,6 +303,7 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
             | OUTER_READD_NEEDED
             | OUTER_WELCOME
             | OUTER_CLAIM
+            | OUTER_CLAIM_NONCE
             | OUTER_KEY_PACKAGE
     );
     if fixed && !r.0.is_empty() {
@@ -606,6 +647,12 @@ mod tests {
                 token: [1; 16],
                 proof: [2; 32],
                 key_package: vec![3],
+            },
+            Outer::ClaimNonce {
+                token: [1; 16],
+                nonce: [2; 32],
+                signature: [3; 64],
+                chain: "ef".into(),
             },
             Outer::Cert("cd".into()),
             Outer::KeyPackage {

@@ -55,6 +55,7 @@ const onEvent = (e) => {
     case "received":
     case "syncReceived": render(); break;
     case "inviteClaimed": $("code").textContent = `code ${e.code}: compare, then accepted`; client.acceptClaim(e.from); break;
+    case "claimCode": $("code").textContent = `code ${e.code}: compare it with the other device`; break;
     case "joined": status("joined the group"); $("invite").disabled = false; break;
   }
 };
@@ -78,7 +79,8 @@ $("join").onclick = () => {
   const { org, relay } = KithClient.parseInvite(link);
   localStorage.setItem(ORG_KEY, org);
   client.connect(relay, org, onEvent);
-  $("code").textContent = `code ${client.claimInvite(link)}: compare it with the other device`;
+  client.claimInvite(link);
+  $("code").textContent = "claimed: waiting for the other device's answer";
 };
 
 status("ready");

@@ -21,7 +21,9 @@ expires.
 - **Priority:** should | **Phase:** 5 | **Status:** implemented | **Verify:** manual | **Source:** design §Invitations
 
 Both devices should be able to display a short code to compare, defeating a
-relay that substitutes its own device.
+relay that substitutes its own device. The code includes a random value the admin
+chooses after the claim arrives, so it cannot be predicted when a claim is made
+(ADR 0023).
 
 ### REQ-INV-004: Device and user removal
 

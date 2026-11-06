@@ -83,11 +83,10 @@ public final class RelayConnection {
     }
 
     /// Claim an invite link (connect to its relay and org first, see `parseInvite`).
-    /// Returns the short code to show; `.joined` follows once the admin accepts.
-    public func claim(_ link: String) throws -> String {
-        let out = try session.claim(link: link)
-        send(out.frame)
-        return out.code
+    /// The admin's answer arrives as `.claimCode` (show its code); `.joined` follows
+    /// once the admin accepts.
+    public func claim(_ link: String) throws {
+        send(try session.claim(link: link))
     }
 
     /// Admit the device of an `.inviteClaimed` event.

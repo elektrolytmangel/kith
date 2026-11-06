@@ -120,7 +120,9 @@ if (process.env.KITH_RELAY_BIN) {
     // The new device connects as pending (no certificate yet) and claims.
     b.connect(url, kith.KithClient.parseInvite(invite).org, (e) => evB.push(e));
     // Sent right after the handshake (the client queues it until then).
-    const codeB = b.claimInvite(invite);
+    b.claimInvite(invite);
+    // The admin answers the claim; only then does b know its code.
+    const codeB = (await waitFor(evB, (e) => e.type === "claimCode", "b's short code")).code;
     await waitFor(evB, (e) => e.type === "joined", "b to join a's org");
     assert.equal(codes[b.deviceId()], codeB, "both screens show the same code");
     assert.equal(b.isMember(org), true);
@@ -199,9 +201,11 @@ if (process.env.KITH_RELAY_BIN) {
     d.connect(url, org, (e) => evD.push(e));
     const ownLink = b.createOwnDeviceInvite(org, url, 600);
     assert.throws(() => a.createOwnDeviceInvite("00".repeat(32), url, 600), /own devices|member|Forbidden/i);
-    const codeD = d.claimInvite(ownLink);
+    d.claimInvite(ownLink);
     const claimed = await waitFor(evB, (e) => e.type === "inviteClaimed" && e.from === d.deviceId(), "b to get d's claim");
-    assert.equal(claimed.code, codeD);
+    const codeD = await waitFor(evD, (e) => e.type === "claimCode", "d's short code");
+    assert.equal(claimed.code, codeD.code);
+    assert.equal(codeD.from, b.deviceId(), "the answer comes from the issuing member");
     b.acceptClaim(claimed.from);
     await waitFor(evD, (e) => e.type === "joined", "d to join as b's own device");
     assert.equal(d.isMember(org), true);

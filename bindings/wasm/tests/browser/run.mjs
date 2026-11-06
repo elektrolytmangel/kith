@@ -222,7 +222,7 @@ await test("two browsers sync through the relay and reconnect after a relay rest
     ([invite]) => {
       const { kith, c } = window.t;
       c.connect(kith.KithClient.parseInvite(invite).relay, kith.KithClient.parseInvite(invite).org, window.t.onEvent);
-      window.t.code = c.claimInvite(invite);
+      c.claimInvite(invite);
     },
     [invite],
   );

@@ -150,7 +150,8 @@ impl KithClient {
     /// `{type: "receipt", delivered}`, `{type: "relayError", code, message}`,
     /// `{type: "syncServed", from}`, `{type: "syncCompared", from, sending, wanting}`,
     /// `{type: "syncReceived", ...}`, group events
-    /// (`inviteClaimed` with `from` and `code`, `joined`, `certificateUpdated`,
+    /// (`inviteClaimed` with `from` and `code`, `claimCode` with `org`, `from` and
+    /// `code`, `joined`, `certificateUpdated`,
     /// `groupChanged`, `epochBehind`, `commitsServed`, `commitsApplied`,
     /// `reAddRequested`, `memberReAdded`, `fork`) and the connection's own events:
     /// `{type: "connected"}` (handshake started), `{type: "closed"}`,
@@ -250,10 +251,10 @@ impl KithClient {
     }
 
     /// Claim an invite link on the new device (connect to its relay and org first).
-    /// Returns the short code to show; a `joined` event follows once the admin
-    /// accepts.
+    /// The admin answers with a `claimCode` event (`code`: the short code to show);
+    /// a `joined` event follows once it accepts.
     #[wasm_bindgen(js_name = claimInvite)]
-    pub fn claim_invite(&self, link: &str) -> Result<String, JsError> {
+    pub fn claim_invite(&self, link: &str) -> Result<(), JsError> {
         let live = self.live()?;
         let claim = self.inner.borrow_mut().claim_invite(link).map_err(js_err)?;
         if claim.org != live.org() {
@@ -262,7 +263,7 @@ impl KithClient {
             ));
         }
         live.send(&[claim.frame]);
-        Ok(claim.code)
+        Ok(())
     }
 
     /// Admit the device of an `inviteClaimed` event (its `from`), after comparing
