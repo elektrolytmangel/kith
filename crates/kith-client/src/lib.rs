@@ -32,8 +32,8 @@ mod sync;
 
 pub use files::{FILE_TYPE, FileInfo, FileRef};
 
-pub use kith_core::membership::{CertChain, Invite, MembershipCert, Revocation};
 pub use compact::COMPACT_MIN_CHANGES;
+pub use kith_core::membership::{CertChain, Invite, MembershipCert, Revocation};
 pub use kith_core::policy::Retention;
 pub use kith_core::policy::{POLICY_TYPE, Policy, PolicyOp, Role, policy_object_id};
 use kith_core::snapshot;
