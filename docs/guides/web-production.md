@@ -74,8 +74,9 @@ event on large stores.
 - Offer backups: `exportBackup(passphrase)` and `KithClient.restoreBackup`. Restore only
   when the original device is gone (see [backups](integration.md#backups)).
 
-The IndexedDB database holds group secrets in the clear (the browser protects it by origin
-only). The same applies to anything else an XSS could read.
+The org and group state in IndexedDB is sealed with a key derived from the device key (ADR 0021),
+so a copy of the database alone is not enough; the browser itself protects it by origin only.
+Anything your own page can read, an XSS can read too. See the [threat model](threat-model.md).
 
 ## Content-Security-Policy
 

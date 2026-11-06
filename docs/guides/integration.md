@@ -1,5 +1,8 @@
 # Integrating kith into apps
 
+New here? Start with [Getting started](getting-started.md); security assumptions and limits are in the
+[threat model](threat-model.md).
+
 All platforms expose the same `KithClient` API: `deviceId`, `create`, `edit`,
 `history`, and `secretKey` / `withSecretKey` to keep the device identity across
 restarts (store the key in the platform's secure storage).
