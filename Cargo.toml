@@ -54,7 +54,7 @@ ed25519-dalek = "3"
 # Wipes secrets (org root keys, backup keys and contents) from memory when dropped.
 zeroize = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 axum = { version = "0.8", features = ["ws"] }
 tracing = "0.1"
