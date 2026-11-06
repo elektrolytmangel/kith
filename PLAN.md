@@ -22,7 +22,7 @@ plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 | Requirements as code | 43 requirements in `docs/requirements/`, traced to tests by `scripts/reqs.py` ([TRACEABILITY.md](docs/requirements/TRACEABILITY.md)). |
 | CI (`ci.yml`) | fmt, clippy, tests on Linux/macOS/Windows, MSRV 1.91, wasm32 per crate, npm build + Node smoke test, UniFFI generation, Swift package + `swift test`, Android AAR, relay image + `/healthz`, requirements check. |
 | Release (`release.yml`) | Tag `vX.Y.Z` → GitHub Release with relay + always-on binaries, npm tarball, Swift package + XCFramework, Android AAR, `SHA256SUMS`. GitHub Releases is the only publish target. Dry run verified 2026-11-03 ([run](https://github.com/elektrolytmangel/kith/actions/runs/41680667767)): every package built. |
-| Dependencies | Current as of 2026-11-04: ed25519-dalek 3, sha2 0.11, rusqlite 0.41, automerge 0.12, openmls 0.9, negentropy 0.5, chacha20poly1305 0.10, argon2 0.6, Gradle 9.8.2, AGP 9.5, JNA 5.19.1, Actions. No open Dependabot PRs. |
+| Dependencies | Current as of 2026-11-06: ed25519-dalek 3, sha2 0.11, rusqlite 0.41, automerge 0.12, openmls 0.9, negentropy 0.5, chacha20poly1305 0.11, tokio-tungstenite 0.30, playwright 1.64, argon2 0.6, Gradle 9.8.2, AGP 9.5.1, JNA 5.19.1, Actions. No open Dependabot PRs (#65-#68, #70 merged 2026-11-06). |
 | Template | `scripts/rename.py --name <n> --owner <o>` rebrands everything; tested on a copy. |
 
 ### What the library can do today (alpha, phases 1-7 and 8a/8b done)
@@ -424,3 +424,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: Compaction design prepared (ADR 0026, proposed) with five questions; direct p2p recorded as a later todo. Waiting for answers before implementing C.
 - **2026-11-06**: User answered the compaction questions (admins only, per-type policy retention, no full-history types, before the beta, documents + raw objects + file chunks). Implementing C.
 - **2026-11-06**: History compaction implemented (PR `feat/compaction`, ADR 0026): `kith_core::snapshot`, `Retention` + `SetRetention` policy op, `Store::delete`/`delete_chunk` (Memory, SQLite, IndexedDB), snapshot-aware Automerge merger, `Client::set_retention/compact/update_file`, wasm `setRetention/compact/updateFile`, FFI + Swift wrappers. Web smoke test (real relay, IndexedDB reopen) passes locally. Open: compaction of the policy object, squashing Automerge history, direct p2p.
+- **2026-11-06**: Dependabot #65, #66, #67, #70 merged (all green); #68 (chacha20poly1305 0.11) failed clippy on deprecated `XNonce::from_slice`, fixed in `sealed.rs` (`try_from`) and merged. Note: #66 (sbom-action) only runs in `release.yml`, so the next release dry run is its real test.
