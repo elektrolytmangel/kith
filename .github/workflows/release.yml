@@ -277,6 +277,10 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(needs.verify.outputs.version, '-') }}
       - id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # No build record artifact: github-release downloads every artifact as a
+          # release asset.
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: ctx
           target: ${{ matrix.target }}
