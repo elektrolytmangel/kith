@@ -112,8 +112,8 @@ roughly 12 s and 75 MiB (extrapolated, not measured).
 - **Download:** `kith_bg.wasm` is about 3.4 MiB, 1.3 MiB with gzip or brotli. Serve it compressed
   and with long-lived caching (the file name changes with the version).
 - **Memory:** the whole history is held in memory, roughly 0.75 KiB per change. Files also sit
-  in memory while the page is open. There is no compaction yet (REQ-DATA-005): plan for at most a few
-  ten thousand changes per device. Prefer documents (merged edits) over one object per
-  keystroke.
+  in memory while the page is open. Until an admin compacts (`setRetention` + `compact`, see [history compaction](integration.md#history-compaction))
+  nothing is dropped: plan for at most a few ten thousand changes per device. Prefer documents (merged
+  edits) over one object per keystroke.
 - **Start-up:** opening reads every change from IndexedDB and verifies its signature. Do it once,
   show UI first, and avoid reloading the page needlessly.

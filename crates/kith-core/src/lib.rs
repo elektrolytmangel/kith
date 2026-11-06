@@ -9,6 +9,7 @@ mod change;
 mod ids;
 pub mod membership;
 pub mod policy;
+pub mod snapshot;
 
 pub use change::{Change, ChangeError, Signer, UnsignedChange, verify_signature};
 pub use ids::{ChangeId, DeviceId, IdError, ObjectId, ObjectType, Scope, ScopeError};

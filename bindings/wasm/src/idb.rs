@@ -11,6 +11,10 @@
 //! second object store, `meta`, and are written through the same way. The client
 //! encrypts the secret ones (org and MLS state) before they get here (ADR 0021).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use js_sys::{Promise, Reflect, Uint8Array};
 use kith_client::{Change, ChangeId, MemoryStore, ObjectId, Scope, Store, StoreError};
 use kith_store::codec;
@@ -31,6 +35,11 @@ const DB_VERSION: u32 = 3;
 
 pub struct IdbStore {
     mem: MemoryStore,
+    /// IndexedDB key of each stored change, to delete it when a snapshot folds it
+    /// (REQ-DATA-005). A key shows up once the browser has written the row; a change
+    /// deleted before that stays in the database and is deleted again at the next
+    /// start, when the client applies its snapshots.
+    keys: Rc<RefCell<HashMap<ChangeId, JsValue>>>,
     db: IdbDatabase,
     /// Shared handler for failed background writes.
     on_write_error: Closure<dyn FnMut(Event)>,
@@ -95,14 +104,18 @@ impl IdbStore {
         let db: IdbDatabase = request_future(&open_req).await?.unchecked_into();
 
         let tx = db.transaction_with_str(STORE)?;
-        let rows = request_future(&tx.object_store(STORE)?.get_all()?).await?;
+        let rows_store = tx.object_store(STORE)?;
+        let row_keys = js_sys::Array::from(&request_future(&rows_store.get_all_keys()?).await?);
+        let rows = request_future(&rows_store.get_all()?).await?;
         let mut mem = MemoryStore::new();
-        for row in js_sys::Array::from(&rows).iter() {
+        let mut change_keys = HashMap::new();
+        for (key, row) in row_keys.iter().zip(js_sys::Array::from(&rows).iter()) {
             let change = codec::decode_change(&Uint8Array::new(&row).to_vec())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             change
                 .verify()
                 .map_err(|e| JsValue::from_str(&format!("stored change is invalid: {e}")))?;
+            change_keys.insert(change.change_id, key);
             mem.put(change)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
@@ -137,6 +150,7 @@ impl IdbStore {
         });
         Ok(Self {
             mem,
+            keys: Rc::new(RefCell::new(change_keys)),
             db,
             on_write_error,
         })
@@ -153,8 +167,17 @@ impl IdbStore {
     }
 
     fn persist(&self, change: &Change) -> Result<(), JsValue> {
-        self.write_tx(STORE)?
+        let req = self
+            .write_tx(STORE)?
             .add(&Uint8Array::from(codec::encode_change(change).as_slice()))?;
+        // Remember the row's key for `delete`, once the browser has assigned it.
+        let (keys, id, done) = (self.keys.clone(), change.change_id, req.clone());
+        let on_success = Closure::once_into_js(move |_: Event| {
+            if let Ok(key) = done.result() {
+                keys.borrow_mut().insert(id, key);
+            }
+        });
+        req.set_onsuccess(Some(on_success.unchecked_ref()));
         Ok(())
     }
 }
@@ -205,6 +228,27 @@ impl Store for IdbStore {
 
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         self.mem.get_meta(key)
+    }
+
+    fn delete(&mut self, ids: &[ChangeId]) -> Result<(), StoreError> {
+        let rows = self
+            .write_tx(STORE)
+            .map_err(|e| StoreError::Backend(js_message(&e)))?;
+        for id in ids {
+            if let Some(key) = self.keys.borrow_mut().remove(id) {
+                rows.delete(&key)
+                    .map_err(|e| StoreError::Backend(js_message(&e)))?;
+            }
+        }
+        self.mem.delete(ids)
+    }
+
+    fn delete_chunk(&mut self, id: &[u8; 32]) -> Result<(), StoreError> {
+        let key: String = id.iter().map(|b| format!("{b:02x}")).collect();
+        self.write_tx(CHUNKS)
+            .and_then(|s| s.delete(&JsValue::from_str(&key)))
+            .map_err(|e| StoreError::Backend(js_message(&e)))?;
+        self.mem.delete_chunk(id)
     }
 
     /// Chunks are kept in memory too (the `Store` API is synchronous), so very large

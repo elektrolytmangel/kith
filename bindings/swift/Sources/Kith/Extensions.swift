@@ -131,6 +131,17 @@ public final class RelayConnection {
         send(try session.setWriteRule(objectType: objectType, role: role))
     }
 
+    /// Set how much history objects of `objectType` keep: "all", "last:500" or
+    /// "days:90". Admins only. Nothing is folded until `compact()`.
+    public func setRetention(_ objectType: String, rule: String) throws {
+        send(try session.setRetention(objectType: objectType, rule: rule))
+    }
+
+    /// Fold old history into snapshots as the retention rules allow (admins only).
+    public func compact(minChanges: UInt32 = 0) throws {
+        for frame in try session.compact(minChanges: minChanges) { send(frame) }
+    }
+
     /// Rotate this device's group key; call it periodically (e.g. weekly).
     public func rotateKey() throws {
         send(try session.rotateKey())

@@ -25,14 +25,18 @@ pub use kith_crypto::{DeviceKey, GroupError, Groups};
 #[cfg(feature = "automerge")]
 pub use kith_merge::automerge_merger;
 mod backup;
+mod compact;
 mod files;
 mod org;
 mod sync;
 
 pub use files::{FILE_TYPE, FileInfo, FileRef};
 
+pub use compact::COMPACT_MIN_CHANGES;
 pub use kith_core::membership::{CertChain, Invite, MembershipCert, Revocation};
+pub use kith_core::policy::Retention;
 pub use kith_core::policy::{POLICY_TYPE, Policy, PolicyOp, Role, policy_object_id};
+use kith_core::snapshot;
 pub use org::ORGS_KEY;
 
 pub use kith_merge::{Materialized, MergeError, Merger};
@@ -478,6 +482,9 @@ pub struct Client<S: Store, K: Signer = DeviceKey> {
     invalid: std::collections::HashSet<ChangeId>,
     /// Quarantined changes per author (capped at [`MAX_QUARANTINE`]).
     quarantined: std::collections::HashMap<DeviceId, usize>,
+    /// IDs of changes that accepted snapshots cover (REQ-DATA-005, ADR 0026): deleted
+    /// from the store (except creations) and never stored again.
+    covered: std::collections::HashSet<ChangeId>,
 }
 
 impl<S: Store, K: Signer> Client<S, K> {
@@ -531,6 +538,7 @@ impl<S: Store, K: Signer> Client<S, K> {
             policies: Default::default(),
             invalid: Default::default(),
             quarantined: Default::default(),
+            covered: Default::default(),
         }
         .with_policies()
     }
@@ -609,6 +617,11 @@ impl<S: Store, K: Signer> Client<S, K> {
         if ty.as_str() == POLICY_TYPE {
             return Err(ClientError::Forbidden("use the policy methods".into()));
         }
+        if snapshot::is_snapshot(&payload) {
+            return Err(ClientError::Forbidden(
+                "payloads starting with the snapshot marker are reserved".into(),
+            ));
+        }
         self.check_scope(&scope)?;
         self.commit(scope, ObjectId::random(), ty, vec![], payload)
     }
@@ -656,19 +669,33 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Never blocks on a lock: concurrent edits become a fork that the merge
     /// layer resolves (REQ-DATA-004).
     pub fn edit(&mut self, object: ObjectId, payload: Vec<u8>) -> Result<Change, ClientError> {
-        let hist = self.history(&object)?;
-        let first = hist.first().ok_or(ClientError::UnknownObject(object))?;
-        let (ty, scope) = (first.body.object_type.clone(), first.body.scope.clone());
+        let (ty, scope) = self.object_meta(&object)?;
         if ty.as_str() == POLICY_TYPE {
             return Err(ClientError::Forbidden("use the policy methods".into()));
+        }
+        if snapshot::is_snapshot(&payload) {
+            return Err(ClientError::Forbidden(
+                "payloads starting with the snapshot marker are reserved".into(),
+            ));
         }
         let parents = self.valid_heads(&object)?;
         self.commit(scope, object, ty, parents, payload)
     }
 
+    /// Type and scope of an object, from any change of it we still store (a creation
+    /// change is always kept, see [`Self::compact`]).
+    fn object_meta(&self, object: &ObjectId) -> Result<(ObjectType, Scope), ClientError> {
+        self.store
+            .history(object)?
+            .into_iter()
+            .find(|c| !self.invalid.contains(&c.change_id))
+            .map(|c| (c.body.object_type, c.body.scope))
+            .ok_or(ClientError::UnknownObject(*object))
+    }
+
     /// Heads of an object among the changes the policy allows.
     fn valid_heads(&self, object: &ObjectId) -> Result<Vec<ChangeId>, ClientError> {
-        let hist = self.history(object)?;
+        let hist = self.merge_history(object)?;
         let mut heads: Vec<ChangeId> = hist.iter().map(|c| c.change_id).collect();
         for c in &hist {
             heads.retain(|h| !c.body.parents.contains(h));
@@ -688,6 +715,10 @@ impl<S: Store, K: Signer> Client<S, K> {
     /// Policy changes trigger a re-check of everything stored.
     pub fn receive(&mut self, change: Change) -> Result<bool, ClientError> {
         change.verify()?;
+        // Folded into a snapshot already (creations are always kept, ADR 0026).
+        if self.covered.contains(&change.change_id) && !change.is_creation() {
+            return Ok(false);
+        }
         // Only orgs we belong to; an object never moves between scopes.
         self.check_scope(&change.body.scope)?;
         if let Some(first) = self.store.history(&change.body.object_id)?.first()
@@ -746,7 +777,11 @@ impl<S: Store, K: Signer> Client<S, K> {
             self.invalid.insert(change.change_id);
             return Err(e);
         }
-        Ok(self.store.put(change)?)
+        let new = self.store.put(change.clone())?;
+        if new && snapshot::is_snapshot(&change.body.payload) {
+            self.apply_snapshot(&change)?;
+        }
+        Ok(new)
     }
 
     fn check_allowed(&self, change: &Change) -> Result<(), ClientError> {
@@ -762,6 +797,25 @@ impl<S: Store, K: Signer> Client<S, K> {
         }
         // The policy of the org the change belongs to.
         let org = change.body.scope.org_id().map(|o| o.to_hex());
+        if snapshot::is_snapshot(&change.body.payload) {
+            // Only admins fold history (ADR 0026); a snapshot an admin made before being
+            // restricted stays valid like their other seen changes (`kept`).
+            if org.is_none() || snapshot::Snapshot::decode(&change.body.payload).is_none() {
+                return Err(ClientError::Forbidden("malformed snapshot".into()));
+            }
+            if let Some(policy) = org.as_ref().and_then(|o| self.policies.get(o))
+                && policy.creator.is_some()
+                && !policy.is_admin_device(&change.author)
+                && !policy
+                    .kept
+                    .get(&change.author)
+                    .is_some_and(|k| k.contains(&change.change_id))
+            {
+                return Err(ClientError::Forbidden(
+                    "only admins may create snapshots".into(),
+                ));
+            }
+        }
         if let Some(policy) = org.as_ref().and_then(|o| self.policies.get(o))
             && policy.creator.is_some()
             && !policy.allows(change)
@@ -826,6 +880,13 @@ impl<S: Store, K: Signer> Client<S, K> {
                     .any(|p| p.accepted.contains(&c.change_id));
             if self.invalid.contains(&c.change_id) || rejected_policy {
                 *self.quarantined.entry(c.author).or_default() += 1;
+            }
+        }
+        // Snapshots (re)apply: delete what they cover, also what an earlier run missed.
+        self.covered.clear();
+        for c in &all {
+            if snapshot::is_snapshot(&c.body.payload) {
+                self.apply_snapshot(c)?;
             }
         }
         Ok(())
@@ -2839,17 +2900,26 @@ impl<S: Store, K: Signer> Client<S, K> {
         object: &ObjectId,
         merger: &M,
     ) -> Result<Materialized<M::State>, ClientError> {
-        let hist = self.history(object)?;
+        let hist = self.merge_history(object)?;
         if hist.is_empty() {
             return Err(ClientError::UnknownObject(*object));
         }
         Ok(merger.materialize(&hist)?)
     }
 
-    /// Change history of an object: the changes the policy allows.
+    /// Change history of an object: the changes the policy allows. Changes folded
+    /// into a snapshot are gone (REQ-DATA-005); snapshots themselves are not listed.
     pub fn history(&self, object: &ObjectId) -> Result<Vec<Change>, ClientError> {
+        let mut h = self.merge_history(object)?;
+        h.retain(|c| !snapshot::is_snapshot(&c.body.payload));
+        Ok(h)
+    }
+
+    /// Like [`Self::history`], but with the object's snapshots: what a [`Merger`]
+    /// needs, because a snapshot carries the payloads of the changes it covers.
+    fn merge_history(&self, object: &ObjectId) -> Result<Vec<Change>, ClientError> {
         let mut h = self.store.history(object)?;
-        h.retain(|c| !self.invalid.contains(&c.change_id));
+        h.retain(|c| !self.invalid.contains(&c.change_id) && !self.covered.contains(&c.change_id));
         Ok(h)
     }
 
