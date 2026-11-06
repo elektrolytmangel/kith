@@ -4,12 +4,31 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-11-06
+
+Notice sharing, batched sync rounds and adopter docs. **Compatible with 0.1.0-alpha.4** (same stored
+formats and wire protocol); see *Upgrading*.
+
+### Upgrading
+- Nothing to migrate: stored formats and the wire protocol are unchanged. Alpha.4 and alpha.5 devices and
+  relays work together, with one catch: an alpha.4 device catching up from an alpha.5 device gets one batch
+  (500 changes) per catch-up, because it ignores the `More` message. Upgrade all devices together, or call
+  `catchUp` again until nothing new arrives. Alpha.4 devices show the two new messages as `Rejected` events.
+- Removals made before alpha.5 are held only by the admin who issued them; removals from now on are
+  also held by the other admins and the always-on client.
+
 ### Added
 - Large catch-ups run in rounds of at most 500 changes / 2 MiB and continue where they stopped after an
-  interruption ([ADR 0025](docs/adr/0025-batched-sync-rounds.md)). Old clients ignore the new `More` message.
+  interruption ([ADR 0025](docs/adr/0025-batched-sync-rounds.md)). Old clients ignore the new `More` message (see *Upgrading*).
 - Revocation notices are shared with the other admins and the always-on client, so any of them can
   restore a restarted relay's list ([ADR 0024](docs/adr/0024-shared-revocation-notices.md)). Old clients
   show the new message as `Rejected` and keep working.
+
+### Documentation
+- New [Getting started](docs/guides/getting-started.md) and [Threat model and known limits](docs/guides/threat-model.md).
+- The web package is the supported platform; the Swift and Kotlin packages are non-production previews
+  (live sync never ran on real devices). History is never compacted yet (REQ-DATA-005, planned): see
+  the README and the guides for the limit.
 
 ## [0.1.0-alpha.4] - 2026-11-06
 
