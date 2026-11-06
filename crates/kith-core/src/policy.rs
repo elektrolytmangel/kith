@@ -110,6 +110,14 @@ pub enum PolicyOp {
         /// Minimum write role.
         write: Role,
     },
+    /// How much history objects of `object_type` keep (REQ-DATA-005, ADR 0026). Admins
+    /// create snapshots of what the rule lets go; the default keeps everything.
+    SetRetention {
+        /// The object type.
+        object_type: String,
+        /// The rule.
+        retention: Retention,
+    },
     /// Create subgroup `name` (scope `<org>/<name>`, read-restricted, REQ-PERM-003)
     /// or replace its member list. The author of the first `SetSubgroup` for a
     /// name is the subgroup's owner: the device that adds and removes members in
@@ -141,6 +149,52 @@ pub enum PolicyOp {
         /// Change IDs by `device` that remain valid.
         keep: Vec<ChangeId>,
     },
+}
+
+/// How much of an object's history is kept (REQ-DATA-005, ADR 0026).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Retention {
+    /// Keep every change (the default).
+    #[default]
+    KeepAll,
+    /// Keep the newest `n` changes of each object; fold the rest into snapshots.
+    /// `0` folds everything (documents), or keeps only the heads (raw objects).
+    KeepLast(u32),
+    /// Keep changes from the last `n` days.
+    KeepDays(u32),
+}
+
+impl Retention {
+    fn code(self) -> (u8, u32) {
+        match self {
+            Retention::KeepAll => (0, 0),
+            Retention::KeepLast(n) => (1, n),
+            Retention::KeepDays(n) => (2, n),
+        }
+    }
+
+    fn from_code(kind: u8, n: u32) -> Option<Self> {
+        Some(match kind {
+            0 if n == 0 => Retention::KeepAll,
+            1 => Retention::KeepLast(n),
+            2 => Retention::KeepDays(n),
+            _ => return None,
+        })
+    }
+
+    /// Parse `"all"`, `"last:500"` or `"days:90"`.
+    pub fn parse(s: &str) -> Option<Self> {
+        if s == "all" {
+            return Some(Retention::KeepAll);
+        }
+        let (kind, n) = s.split_once(':')?;
+        let n: u32 = n.parse().ok()?;
+        match kind {
+            "last" => Some(Retention::KeepLast(n)),
+            "days" => Some(Retention::KeepDays(n)),
+            _ => None,
+        }
+    }
 }
 
 /// Malformed policy payload.
@@ -181,6 +235,16 @@ impl PolicyOp {
             PolicyOp::SetRule { object_type, write } => {
                 w.push(2);
                 w.push(write.code());
+                w.extend_from_slice(object_type.as_bytes());
+            }
+            PolicyOp::SetRetention {
+                object_type,
+                retention,
+            } => {
+                w.push(6);
+                let (kind, n) = retention.code();
+                w.push(kind);
+                w.extend_from_slice(&n.to_be_bytes());
                 w.extend_from_slice(object_type.as_bytes());
             }
             PolicyOp::SetSubgroup {
@@ -266,6 +330,26 @@ impl PolicyOp {
                     return Err(PolicyError("object type"));
                 }
                 PolicyOp::SetRule { object_type, write }
+            }
+            6 => {
+                let kind = *rest.first().ok_or(PolicyError("retention"))?;
+                let n = u32::from_be_bytes(
+                    rest.get(1..5)
+                        .ok_or(PolicyError("retention"))?
+                        .try_into()
+                        .expect("4"),
+                );
+                let retention = Retention::from_code(kind, n).ok_or(PolicyError("retention"))?;
+                let object_type = std::str::from_utf8(&rest[5..])
+                    .map_err(|_| PolicyError("object type"))?
+                    .to_string();
+                if object_type.is_empty() || object_type == POLICY_TYPE {
+                    return Err(PolicyError("object type"));
+                }
+                PolicyOp::SetRetention {
+                    object_type,
+                    retention,
+                }
             }
             3 => {
                 let d = device(rest)?;
@@ -361,6 +445,8 @@ pub struct Policy {
     pub revoked: BTreeSet<DeviceId>,
     /// Minimum write role per object type (default editor).
     pub rules: BTreeMap<String, Role>,
+    /// History retention per object type (default: keep everything).
+    pub retention: BTreeMap<String, Retention>,
     /// Changes kept valid by restrictions, per restricted device.
     pub kept: BTreeMap<DeviceId, HashSet<ChangeId>>,
     /// Restricted devices → the admin who last restricted them. Only an admin at
@@ -409,6 +495,16 @@ impl Policy {
             return Role::Admin;
         }
         self.rules.get(object_type).copied().unwrap_or(Role::Editor)
+    }
+
+    /// How much history objects of `object_type` keep.
+    pub fn retention_for(&self, object_type: &str) -> Retention {
+        self.retention.get(object_type).copied().unwrap_or_default()
+    }
+
+    /// Is `device` an admin under this policy?
+    pub fn is_admin_device(&self, device: &DeviceId) -> bool {
+        self.is_admin(device)
     }
 
     /// May `change`'s author have made it, under this policy? (Policy changes
@@ -643,6 +739,13 @@ impl Policy {
                 self.rules.insert(object_type, write);
                 true
             }
+            PolicyOp::SetRetention {
+                object_type,
+                retention,
+            } => {
+                self.retention.insert(object_type, retention);
+                true
+            }
             PolicyOp::SetSubgroup {
                 name,
                 members,
@@ -789,6 +892,18 @@ mod tests {
             PolicyOp::SetRule {
                 object_type: "config".into(),
                 write: Role::Admin,
+            },
+            PolicyOp::SetRetention {
+                object_type: "note".into(),
+                retention: Retention::KeepLast(500),
+            },
+            PolicyOp::SetRetention {
+                object_type: "note".into(),
+                retention: Retention::KeepDays(90),
+            },
+            PolicyOp::SetRetention {
+                object_type: "note".into(),
+                retention: Retention::KeepAll,
             },
             PolicyOp::Restrict {
                 device: a.device_id(),

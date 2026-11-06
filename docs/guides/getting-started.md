@@ -104,9 +104,10 @@ A removed device cannot read anything sent afterwards, but keeps what it receive
 - [ ] **TLS and an approved-orgs list** on your relay ([Deployment](deployment.md),
       [Azure](deployment-azure.md)).
 - [ ] **One tab per database, CSP, persistent storage, size**: [Web apps in production](web-production.md).
-- [ ] **No compaction yet:** history is kept forever and held in memory (about 0.75 KiB per
-      change). Plan for a few ten thousand changes per device and prefer documents over one
-      object per keystroke.
+- [ ] **History grows until you compact it:** it is held in memory (about 0.75 KiB per change). Set a
+      retention rule per type and let an admin call `compact()` now and then
+      ([history compaction](integration.md#history-compaction)); without it plan for a few ten thousand
+      changes per device and prefer documents over one object per keystroke.
 - [ ] **Backups** (`exportBackup(passphrase)`) and an **always-on client** so data survives
       a lost device.
 - [ ] **Upgrades:** alphas can break stored data and the protocol; read the changelog's

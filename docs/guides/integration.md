@@ -12,10 +12,43 @@ Promise). `KithClient()` stays ephemeral. Invitations (links/QR) and permissions
 
 ## Limits to plan for
 
-- **No compaction yet (REQ-DATA-005).** Every change is kept forever and sent to new devices. The web store holds
-  the whole history in memory (about 0.75 KiB per change). Prefer documents (merged edits) over one object per
-  keystroke, and keep to a few ten thousand changes per device. Compaction is planned.
+- **History is kept until an admin compacts it.** Every change is sent to new devices, and the web store
+  holds the whole history in memory (about 0.75 KiB per change). Set a retention rule per type and
+  compact, see [History compaction](#history-compaction); otherwise keep to a few ten thousand changes
+  per device and prefer documents (merged edits) over one object per keystroke.
 - Syncing needs another member online; run the [always-on client](#always-on-client).
+
+## History compaction
+
+By default every change is kept. An admin can let an org fold old history into signed *snapshots*
+(REQ-DATA-005, [ADR 0026](../adr/0026-history-compaction.md)); every device then deletes what a
+snapshot covers and keeps only the IDs.
+
+```ts
+client.setRetention("acme.note", "last:500"); // admins; "all" (default), "last:N" or "days:N"
+client.compact();                              // admins; folds what the rules allow, returns the snapshots made
+```
+
+Call `compact()` now and then (on start, or once a day) from an admin's app; it does nothing when no
+rule applies or too little would be folded (`compact(minChanges)`, default 100).
+
+| Type of object | What a rule does |
+| --- | --- |
+| Documents (`createDocument`) | Old changes are repacked into snapshots; the content is unchanged. Automerge keeps its internal operation history, so documents shrink by the per-change overhead (about half for small edits), not to the size of the current state. |
+| Raw objects (`create`/`edit`) | Old changes are deleted; the **newest (head) changes stay**. Use it for types where old values do not matter (settings, "latest wins" records), **not** for operation logs. |
+| Files (`updateFile`) | Old versions are deleted together with their chunks, unless a kept version uses them. |
+
+Things to know:
+
+- Pick the rule per type; **`KeepAll` is the default**. Types that need an audit trail or undo stay on it.
+- **Upgrade every device before an admin sets a rule:** older clients do not know snapshots, show their
+  bytes as an ordinary change and never delete anything.
+- Folded history cannot be brought back, and a removed admin's unseen snapshots are dropped like their
+  other unseen changes.
+- A change larger than about 400 KiB cannot be folded. Subgroup objects are folded by an admin who is in
+  the subgroup. The policy object is not compacted.
+- Custom `Merger`s (Rust) get an object's snapshots in `history`; a snapshot payload starts with
+  `kith_core::snapshot::MAGIC` and `Snapshot::decode` reads its bundle.
 
 ## Documents
 

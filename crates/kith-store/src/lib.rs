@@ -46,6 +46,12 @@ pub trait Store {
         }
         Ok(out)
     }
+    /// Forget these changes completely (history compaction, REQ-DATA-005): after
+    /// this `get`, `contains`, `history` and the ID lists no longer know them. Unknown
+    /// IDs are ignored. Only the client calls it, for changes a snapshot covers.
+    fn delete(&mut self, ids: &[ChangeId]) -> Result<(), StoreError>;
+    /// Remove a file chunk (nothing happens if it is not stored).
+    fn delete_chunk(&mut self, id: &[u8; 32]) -> Result<(), StoreError>;
     /// Store an encrypted file chunk (REQ-FILE-001) under its ID (SHA-256 of `data`),
     /// tagged with the scope of the file it belongs to.
     fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError>;
@@ -95,6 +101,12 @@ impl<S: Store + ?Sized> Store for Box<S> {
     }
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         (**self).get_meta(key)
+    }
+    fn delete(&mut self, ids: &[ChangeId]) -> Result<(), StoreError> {
+        (**self).delete(ids)
+    }
+    fn delete_chunk(&mut self, id: &[u8; 32]) -> Result<(), StoreError> {
+        (**self).delete_chunk(id)
     }
     fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError> {
         (**self).put_chunk(id, scope, data)
@@ -165,6 +177,34 @@ impl Store for MemoryStore {
 
     fn scope_ids(&self, scope: &Scope) -> Result<Vec<ChangeId>, StoreError> {
         Ok(self.by_scope.get(scope).cloned().unwrap_or_default())
+    }
+
+    fn delete(&mut self, ids: &[ChangeId]) -> Result<(), StoreError> {
+        let gone: std::collections::HashSet<&ChangeId> = ids.iter().collect();
+        let mut objects = std::collections::BTreeSet::new();
+        let mut scopes = std::collections::HashSet::new();
+        for id in ids {
+            if let Some(c) = self.changes.remove(id) {
+                objects.insert(c.body.object_id);
+                scopes.insert(c.body.scope);
+            }
+        }
+        for o in objects {
+            if let Some(v) = self.by_object.get_mut(&o) {
+                v.retain(|id| !gone.contains(id));
+            }
+        }
+        for sc in scopes {
+            if let Some(v) = self.by_scope.get_mut(&sc) {
+                v.retain(|id| !gone.contains(id));
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_chunk(&mut self, id: &[u8; 32]) -> Result<(), StoreError> {
+        self.chunks.remove(id);
+        Ok(())
     }
 
     fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {

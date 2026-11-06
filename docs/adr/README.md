@@ -29,7 +29,7 @@ Open questions from the design doc that are waiting for an ADR:
 - [x] Short codes with the admin's nonce, one sync peer, native TLS: [ADR 0023](0023-claim-nonce-sync-peer-native-tls.md)
 - [x] Sharing revocation notices with other admins and the always-on client: [ADR 0024](0024-shared-revocation-notices.md)
 - [x] Batched sync rounds, resumable large syncs: [ADR 0025](0025-batched-sync-rounds.md)
-- [ ] History compaction (REQ-DATA-005): proposed, needs answers: [ADR 0026](0026-history-compaction.md)
+- [x] History compaction (REQ-DATA-005): [ADR 0026](0026-history-compaction.md)
 - [ ] Push token persistence (REQ-RELAY-007)
 - [x] Rule for changes concurrent with a revocation (REQ-PERM-004): [ADR 0006](0006-policy-object-roles-revocation.md)
 - [ ] Always-on client required or optional

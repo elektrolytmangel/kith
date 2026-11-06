@@ -722,6 +722,30 @@ impl RelaySession {
         encode_frame(&c.broadcast_frame(&self.org, &change)?)
     }
 
+    /// Set how much history objects of `object_type` keep: `all`, `last:500` or
+    /// `days:90`. Admins only. Send the returned frame.
+    pub fn set_retention(&self, object_type: String, rule: String) -> Result<Vec<u8>, KithError> {
+        let retention = kith_client::Retention::parse(&rule).ok_or_else(|| KithError::Failed {
+            msg: format!("unknown rule {rule:?}: use all, last:N or days:N"),
+        })?;
+        let mut c = self.client.lock();
+        let change = c.set_retention(&self.org, &object_type, retention)?;
+        encode_frame(&c.broadcast_frame(&self.org, &change)?)
+    }
+
+    /// Fold old history into snapshots as the retention rules allow (admins only,
+    /// REQ-DATA-005). A snapshot is made when it folds at least `min_changes` changes
+    /// (100 if 0). Send the returned frames.
+    pub fn compact(&self, min_changes: u32) -> Result<Vec<Vec<u8>>, KithError> {
+        let min = if min_changes == 0 {
+            kith_client::COMPACT_MIN_CHANGES
+        } else {
+            min_changes as usize
+        };
+        let frames = self.client.lock().compact_min(&self.org, min)?;
+        frames.iter().map(encode_frame).collect()
+    }
+
     /// A device's role: `viewer`, `editor`, `admin`, or `nil`/`null` if revoked.
     pub fn role_of(&self, device: String) -> Result<Option<String>, KithError> {
         let c = self.client.lock();

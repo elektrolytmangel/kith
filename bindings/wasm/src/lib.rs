@@ -528,6 +528,61 @@ impl KithClient {
         self.inner.borrow().document_json(&oid).map_err(js_err)
     }
 
+    /// Set how much history objects of `objectType` keep in the connected org:
+    /// `"all"` (default), `"last:500"` (the newest 500 changes of each object) or
+    /// `"days:90"`. Admins only. Nothing is folded until an admin calls `compact`.
+    #[wasm_bindgen(js_name = setRetention)]
+    pub fn set_retention(&self, object_type: &str, rule: &str) -> Result<(), JsError> {
+        let live = self.live()?;
+        let retention = kith_client::Retention::parse(rule)
+            .ok_or_else(|| JsError::new("rule must be \"all\", \"last:N\" or \"days:N\""))?;
+        let mut c = self.inner.borrow_mut();
+        let change = c
+            .set_retention(live.org(), object_type, retention)
+            .map_err(js_err)?;
+        let f = c.broadcast_frame(live.org(), &change).map_err(js_err)?;
+        live.send(&[f]);
+        Ok(())
+    }
+
+    /// Fold old history into snapshots as the org's retention rules allow (admins
+    /// only; REQ-DATA-005). A snapshot is made only when it folds at least
+    /// `minChanges` changes (default 100). Returns the number of snapshots made.
+    #[wasm_bindgen(js_name = compact)]
+    pub fn compact(&self, min_changes: Option<u32>) -> Result<u32, JsError> {
+        let live = self.live()?;
+        let frames = self
+            .inner
+            .borrow_mut()
+            .compact_min(
+                live.org(),
+                min_changes.map_or(kith_client::COMPACT_MIN_CHANGES, |n| n as usize),
+            )
+            .map_err(js_err)?;
+        live.send(&frames);
+        Ok(frames.len() as u32)
+    }
+
+    /// Replace a file's content with a new version; returns nothing. Broadcast when
+    /// connected. Old versions can be dropped with `setRetention` + `compact`.
+    #[wasm_bindgen(js_name = updateFile)]
+    pub fn update_file(
+        &mut self,
+        object_id: &str,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> Result<(), JsError> {
+        let oid = ObjectId::from_hex(object_id).map_err(js_err)?;
+        let c = self
+            .inner
+            .borrow_mut()
+            .update_file(oid, name, mime, data)
+            .map_err(js_err)?;
+        self.broadcast(&c);
+        Ok(())
+    }
+
     /// Store a file (encrypted, in chunks) in the default scope; returns its object
     /// ID. Broadcast to the other online devices when connected; they fetch the
     /// chunks with `fetchFile`.

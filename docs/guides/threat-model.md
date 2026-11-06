@@ -50,7 +50,7 @@ picture of who is online. It cannot make a device accept a forged change or a st
 | Limit | Effect | What to do |
 | --- | --- | --- |
 | **No independent audit** | Unknown flaws may remain | Trials only with users who accept alpha risk |
-| **No compaction** (REQ-DATA-005, planned) | History grows forever; the web store keeps it all in memory | Few ten thousand changes per device; documents, not keystroke objects |
+| **History grows until an admin compacts it** (REQ-DATA-005) | The web store keeps all history in memory; compaction is off by default and trusts admins (a snapshot cannot be checked once its changes are deleted) | Set retention per type, `compact()` regularly; few ten thousand changes per device otherwise |
 | **Formats may break between alphas** | Stored data or protocol may stop working after an update | Backup; read *Upgrading*; a promise starts at the first beta (ADR 0012) |
 | **Sync needs another member online** | A returning device with nobody online gets nothing | Run the always-on client |
 | **Relay revocation memory is RAM** (default) | After a relay restart a removed device can connect again until an admin or the always-on client repeats the notice (ADR 0013, 0024) | Optional persistence (ADR 0014); restart relays rarely |
