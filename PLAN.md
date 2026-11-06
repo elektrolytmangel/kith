@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (release PR `release/0.1.0-alpha.4` open; the user merges and tags)
+- **Last updated:** 2026-11-06 (release PR #71 merged; waiting for the user's tag `v0.1.0-alpha.4`)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
   allowlist (#57), optional revocation persistence (ADR 0014), the review fixes (ADRs 0016-0023), build and release
   hardening (#63). **Breaking for apps:** the invite short code now arrives as an event (`claimCode` / `ClaimCode`)
@@ -76,8 +76,10 @@ Work top to bottom; check items off here as they land.
    `create_own_device_invite` (web/FFI), `InviteClaim.to` routing, removal covers linked devices.
 3. **Road to a release users can use:** see the next section (agreed with the user 2026-11-04). Next open item: step 3
    there (real-device verification), then 4. The freeze point is decided (first beta), so step 2 can be finished: migrations and previous-protocol support at the freeze.
-4. **Next:** release `v0.1.0-alpha.4`: PR `release/0.1.0-alpha.4` (version bump, changelog with an *Upgrading* section); the user merges and tags.
-5. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
+4. **Next:** release `v0.1.0-alpha.4`: release PR #71 merged (dry run green); the user tags.
+5. **After the release:** the user publishes the security review's findings on GitHub; then add a short summary of the
+   review and its fixes here (*Road*, step 1) and to `CHANGELOG.md`.
+6. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
 ### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
