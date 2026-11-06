@@ -215,6 +215,32 @@ if (process.env.KITH_RELAY_BIN) {
     assert.equal(d.roleOf(org, d.deviceId()), "editor");
     assert.throws(() => d.createOwnDeviceInvite(org, url, 600), /linked/);
 
+    // History compaction (REQ-DATA-005): an admin folds old changes of a document;
+    // the content stays, and the deletion survives a reopen from IndexedDB.
+    {
+      const ckey = kith.generateSecretKey();
+      const p = await kith.KithClient.open("compact-db", ckey);
+      const porg = p.createOrg();
+      const evP = listen();
+      p.connect(url, porg, (e) => evP.push(e));
+      await waitFor(evP, (e) => e.type === "presence", "p online");
+      assert.throws(() => p.setRetention("acme.counter", "weekly"), /rule must be/);
+      p.setRetention("acme.counter", "last:3");
+      const doc = p.createDocument("acme.counter", JSON.stringify({ n: 0 }));
+      for (let i = 1; i <= 40; i++) p.updateDocument(doc, JSON.stringify({ n: i }));
+      assert.equal(p.historyLength(doc), 41);
+      assert.ok(p.compact(1) >= 1, "a snapshot was made");
+      assert.equal(JSON.parse(p.documentJson(doc)).n, 40);
+      assert.equal(p.historyLength(doc), 3);
+      p.disconnect();
+      p.free();
+      await new Promise((r) => setTimeout(r, 100)); // let the queued deletes commit
+      const again = await kith.KithClient.open("compact-db", ckey);
+      assert.equal(again.historyLength(doc), 3);
+      assert.equal(JSON.parse(again.documentJson(doc)).n, 40);
+      again.free();
+    }
+
     a.disconnect();
     b.disconnect();
     c.disconnect();

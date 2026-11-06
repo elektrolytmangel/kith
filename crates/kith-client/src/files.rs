@@ -145,16 +145,55 @@ impl<S: Store, K: Signer> Client<S, K> {
         self.create_in(scope, ObjectType::new(FILE_TYPE), r.encode())
     }
 
-    /// The file reference of a `kith.file` object.
+    /// The file reference of a `kith.file` object: its newest version.
     pub fn file_ref(&self, object: &ObjectId) -> Result<(Scope, FileRef), ClientError> {
         let hist = self.history(object)?;
         let first = hist.first().ok_or(ClientError::UnknownObject(*object))?;
         if first.body.object_type.as_str() != FILE_TYPE {
             return Err(ClientError::InvalidDocument("not a file".into()));
         }
-        let r = FileRef::decode(&first.body.payload)
+        // The newest change that is a file reference; one with another payload (from a
+        // buggy or hostile editor) must not hide the file.
+        let r = hist
+            .iter()
+            .filter_map(|c| {
+                Some((
+                    (c.body.timestamp_ms, c.change_id),
+                    FileRef::decode(&c.body.payload)?,
+                ))
+            })
+            .max_by_key(|(k, _)| *k)
+            .map(|(_, r)| r)
             .ok_or_else(|| ClientError::InvalidDocument("malformed file reference".into()))?;
         Ok((first.body.scope.clone(), r))
+    }
+
+    /// Replace the content of a file object with a new version (a new `kith.file`
+    /// change; REQ-DATA-005 can later drop the old versions and their chunks). Send
+    /// the returned change like any other.
+    pub fn update_file(
+        &mut self,
+        object: ObjectId,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> Result<Change, ClientError> {
+        let (ty, scope) = self.object_meta(&object)?;
+        if ty.as_str() != FILE_TYPE {
+            return Err(ClientError::InvalidDocument("not a file".into()));
+        }
+        let f = encrypt_file(data);
+        for (id, ct) in &f.chunks {
+            self.store.put_chunk(id, &scope, ct)?;
+        }
+        let r = FileRef {
+            name: name.into(),
+            mime: mime.into(),
+            size: f.size,
+            key: f.key,
+            chunks: f.chunks.iter().map(|(id, _)| *id).collect(),
+        };
+        self.edit(object, r.encode())
     }
 
     /// Chunks of a file this device does not have yet.
@@ -343,7 +382,12 @@ impl<S: Store, K: Signer> Client<S, K> {
             .collect();
         let mut frames = vec![];
         for object in affected {
-            let author = match self.history(&object)?.first() {
+            let author = match self
+                .store
+                .history(&object)?
+                .iter()
+                .find(|c| c.is_creation())
+            {
                 Some(c) if c.body.scope.as_str() == scope => c.author.to_hex(),
                 _ => continue,
             };

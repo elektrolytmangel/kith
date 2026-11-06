@@ -2649,3 +2649,219 @@ fn an_old_epoch_header_gets_the_missed_commits_once_and_only_for_members() {
     net.devs.push(client());
     assert_eq!(commits(&deliver(&mut net, 0, 3, body)), 0);
 }
+
+// ---- history compaction (REQ-DATA-005, ADR 0026) ----
+
+fn stored_bytes(c: &C) -> usize {
+    c.store()
+        .all_ids()
+        .unwrap()
+        .iter()
+        .map(|id| kith_store::codec::encode_change(&c.store().get(id).unwrap().unwrap()).len())
+        .sum()
+}
+
+/// req: REQ-DATA-005
+#[test]
+fn an_admin_folds_old_raw_changes_and_every_device_ends_with_the_same_history() {
+    let mut net = Net::org(4);
+    let rule = net.devs[0]
+        .set_retention(&ORG, "counter", Retention::KeepLast(5))
+        .unwrap();
+    spread(&mut net, 0, &rule);
+    // Device 3 is a member that sees none of it until it catches up.
+    net.offline.insert(3);
+    let c = net.devs[1]
+        .create(ObjectType::new("counter"), b"0".to_vec())
+        .unwrap();
+    spread(&mut net, 1, &c);
+    let oid = c.body.object_id;
+    let mut old = vec![];
+    for i in 1..=60 {
+        let e = net.devs[1].edit(oid, i.to_string().into_bytes()).unwrap();
+        spread(&mut net, 1, &e);
+        old.push(e);
+    }
+    assert_eq!(net.devs[2].history(&oid).unwrap().len(), 61);
+    let before = net.ids(2).len();
+    // Members cannot fold history.
+    assert!(matches!(
+        net.devs[1].compact_min(&ORG, 1),
+        Err(ClientError::NotAdmin(_))
+    ));
+    let frames = net.devs[0].compact_min(&ORG, 1).unwrap();
+    assert!(!frames.is_empty());
+    net.send(0, frames);
+    for d in 0..3 {
+        let h = net.devs[d].history(&oid).unwrap();
+        assert_eq!(h.len(), 5, "device {d} keeps the newest five");
+        assert_eq!(h.last().unwrap().body.payload, b"60");
+        assert!(
+            net.ids(d).len() < before - 40,
+            "device {d} deleted what was folded"
+        );
+    }
+    // A folded change that comes back is ignored.
+    assert!(!net.devs[0].receive(old[3].clone()).unwrap());
+    assert_eq!(net.devs[0].history(&oid).unwrap().len(), 5);
+    // Editing goes on from the remaining heads.
+    let e = net.devs[2].edit(oid, b"61".to_vec()).unwrap();
+    spread(&mut net, 2, &e);
+    assert_eq!(net.devs[1].history(&oid).unwrap().len(), 6);
+    // The member that was away gets the object without the folded changes.
+    net.offline.clear();
+    let f = net.devs[3].sync_request_frame(&ORG).unwrap();
+    net.send(3, vec![f]);
+    assert_eq!(net.devs[3].history(&oid).unwrap().len(), 6);
+    assert_eq!(net.ids(3), net.ids(0));
+    // A restart (state rebuilt from the stored snapshots) changes nothing.
+    net.devs[3].covered.clear();
+    net.devs[3].refresh_policies().unwrap();
+    net.devs[3].refresh_policies().unwrap();
+    assert!(!net.devs[3].covered.is_empty());
+    assert_eq!(net.devs[3].history(&oid).unwrap().len(), 6);
+    assert!(net.devs[3].objects(Some("counter")).unwrap().len() == 1);
+}
+
+/// req: REQ-DATA-005
+#[cfg(feature = "automerge")]
+#[test]
+fn documents_keep_their_content_when_history_is_folded() {
+    let mut net = Net::org(3);
+    let rule = net.devs[0]
+        .set_retention(&ORG, "note", Retention::KeepLast(10))
+        .unwrap();
+    spread(&mut net, 0, &rule);
+    let c = net.devs[1]
+        .create_document(ObjectType::new("note"), r#"{"n":0}"#)
+        .unwrap();
+    spread(&mut net, 1, &c);
+    let oid = c.body.object_id;
+    for i in 1..=120 {
+        let e = net.devs[1]
+            .update_document(oid, &format!(r#"{{"n":{i},"k{}":{i}}}"#, i % 7))
+            .unwrap()
+            .unwrap();
+        spread(&mut net, 1, &e);
+    }
+    let json = net.devs[2].document_json(&oid).unwrap();
+    let (bytes_before, ids_before) = (stored_bytes(&net.devs[2]), net.ids(2).len());
+    let frames = net.devs[0].compact_min(&ORG, 1).unwrap();
+    net.send(0, frames);
+    for d in 0..3 {
+        assert_eq!(net.devs[d].document_json(&oid).unwrap(), json, "device {d}");
+    }
+    assert!(net.ids(2).len() < ids_before / 4);
+    assert!(
+        stored_bytes(&net.devs[2]) < bytes_before,
+        "the snapshot is smaller"
+    );
+    // New edits merge with the folded content.
+    let e = net.devs[2]
+        .update_document(oid, r#"{"after":true}"#)
+        .unwrap()
+        .unwrap();
+    spread(&mut net, 2, &e);
+    for d in 0..3 {
+        let v: serde_json::Value =
+            serde_json::from_str(&net.devs[d].document_json(&oid).unwrap()).unwrap();
+        assert_eq!(v["after"], true, "device {d}");
+        assert_eq!(v["n"], 120, "device {d}");
+    }
+    // The state survives a rebuild from the stored snapshots.
+    net.devs[1].covered.clear();
+    net.devs[1].refresh_policies().unwrap();
+    assert_eq!(
+        net.devs[1].document_json(&oid).unwrap(),
+        net.devs[0].document_json(&oid).unwrap()
+    );
+}
+
+/// req: REQ-DATA-005
+#[test]
+fn only_admins_snapshots_count_and_apps_cannot_write_the_marker() {
+    let mut net = Net::org(2);
+    let rule = net.devs[0]
+        .set_retention(&ORG, "counter", Retention::KeepLast(0))
+        .unwrap();
+    spread(&mut net, 0, &rule);
+    let c = net.devs[1]
+        .create(ObjectType::new("counter"), b"0".to_vec())
+        .unwrap();
+    spread(&mut net, 1, &c);
+    let oid = c.body.object_id;
+    let e = net.devs[1].edit(oid, b"1".to_vec()).unwrap();
+    spread(&mut net, 1, &e);
+    let marker = snapshot::Snapshot {
+        covers: vec![e.change_id],
+        bundle: vec![],
+    }
+    .encode();
+    assert!(net.devs[1].edit(oid, marker.clone()).is_err());
+    assert!(
+        net.devs[1]
+            .create(ObjectType::new("counter"), marker.clone())
+            .is_err()
+    );
+    // A member signs one anyway; the admin refuses it and keeps everything.
+    let forged = Change::sign(
+        UnsignedChange {
+            scope: c.body.scope.clone(),
+            object_id: oid,
+            object_type: ObjectType::new("counter"),
+            parents: vec![e.change_id],
+            timestamp_ms: now_ms(),
+            payload: marker,
+        },
+        &net.devs[1].key,
+    );
+    assert!(matches!(
+        net.devs[0].receive(forged),
+        Err(ClientError::Forbidden(_))
+    ));
+    assert_eq!(net.devs[0].history(&oid).unwrap().len(), 2);
+    assert!(net.devs[0].covered.is_empty());
+}
+
+/// req: REQ-DATA-005
+#[test]
+fn old_file_versions_and_their_chunks_go_with_the_retention_rule() {
+    let mut net = Net::org(2);
+    let rule = net.devs[0]
+        .set_retention(&ORG, FILE_TYPE, Retention::KeepLast(1))
+        .unwrap();
+    spread(&mut net, 0, &rule);
+    let v1 = vec![1u8; 300_000];
+    let f = net.devs[0]
+        .add_file("a.bin", "application/octet-stream", &v1)
+        .unwrap();
+    spread(&mut net, 0, &f);
+    let oid = f.body.object_id;
+    let old_chunks = net.devs[0].file_ref(&oid).unwrap().1.chunks;
+    let v2 = vec![2u8; 300_000];
+    let u = net.devs[0]
+        .update_file(oid, "a.bin", "application/octet-stream", &v2)
+        .unwrap();
+    spread(&mut net, 0, &u);
+    let v3 = vec![3u8; 10];
+    let u = net.devs[0]
+        .update_file(oid, "a.bin", "application/octet-stream", &v3)
+        .unwrap();
+    spread(&mut net, 0, &u);
+    let v2_chunks = net.devs[0].file_ref(&oid).unwrap().1.chunks;
+    assert_eq!(net.devs[0].read_file(&oid).unwrap(), v3);
+    let frames = net.devs[0].compact_min(&ORG, 1).unwrap();
+    net.send(0, frames);
+    let kept = net.devs[0].file_ref(&oid).unwrap().1.chunks;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(net.devs[0].read_file(&oid).unwrap(), v3);
+    for gone in old_chunks
+        .iter()
+        .chain(&v2_chunks)
+        .filter(|c| !kept.contains(c))
+    {
+        assert!(net.devs[0].store().get_chunk(gone).unwrap().is_none());
+    }
+    assert!(net.devs[0].store().get_chunk(&kept[0]).unwrap().is_some());
+    assert_eq!(net.devs[1].history(&oid).unwrap().len(), 1);
+}

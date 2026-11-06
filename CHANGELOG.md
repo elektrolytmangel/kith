@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- **History compaction** (REQ-DATA-005, [ADR 0026](docs/adr/0026-history-compaction.md)): an admin sets a
+  retention rule per object type (`setRetention`: `all` by default, `last:N`, `days:N`) and folds old
+  history into signed snapshots (`compact`). Devices delete the folded changes and keep only their IDs.
+  Raw objects keep their newest changes, documents keep their content, old file versions lose their chunks
+  (new `updateFile`). Stores gain `delete` and `delete_chunk`; no format or protocol version changes.
+
+### Upgrading
+- Upgrade **every device** before an admin sets a retention rule: older clients do not know snapshots.
+- Custom `Store` implementations must add `delete` and `delete_chunk`.
+
 ## [0.1.0-alpha.5] - 2026-11-06
 
 Notice sharing, batched sync rounds and adopter docs. **Compatible with 0.1.0-alpha.4** (same stored

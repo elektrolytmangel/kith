@@ -103,8 +103,8 @@ read-restricted subgroups, encrypted files, encrypted backups, and an always-on 
 
 Start with [Getting started](docs/guides/getting-started.md) and read the [threat model](docs/guides/threat-model.md) before real data goes in.
 
-Known limits: history is never compacted (REQ-DATA-005, planned), so the whole history sits in memory on the web
-(plan for a few ten thousand changes per device); sync needs another member online (run the always-on client);
+Known limits: history is kept in full until an admin sets a retention rule and compacts it (REQ-DATA-005), so
+the whole history sits in memory on the web (plan for a few ten thousand changes per device); sync needs another member online (run the always-on client);
 no independent security audit yet. See the
 [traceability matrix](docs/requirements/TRACEABILITY.md) for per-requirement status.
 

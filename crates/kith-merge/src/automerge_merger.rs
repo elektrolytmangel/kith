@@ -38,6 +38,21 @@ impl Merger for AutomergeMerger {
         // One entry per Automerge change; kith changes carrying the same one share it.
         let mut parsed: HashMap<ChangeHash, (automerge::Change, Vec<ChangeId>)> = HashMap::new();
         for c in history {
+            // A snapshot carries the payloads of the changes it covers (ADR 0026);
+            // they go through the same checks as any other change.
+            if kith_core::snapshot::is_snapshot(&c.body.payload) {
+                match kith_core::snapshot::Snapshot::decode(&c.body.payload) {
+                    Some(snap) => {
+                        for payload in &snap.bundle {
+                            if let Some(ac) = parse(payload) {
+                                parsed.entry(ac.hash()).or_insert_with(|| (ac, Vec::new()));
+                            }
+                        }
+                    }
+                    None => skipped.push(c.change_id),
+                }
+                continue;
+            }
             match parse(&c.body.payload) {
                 Some(ac) => parsed
                     .entry(ac.hash())
@@ -63,6 +78,11 @@ impl Merger for AutomergeMerger {
             skipped,
         })
     }
+}
+
+/// True if `payload` is one Automerge change that [`AutomergeMerger`] can read.
+pub fn is_change(payload: &[u8]) -> bool {
+    parse(payload).is_some()
 }
 
 /// Parse a payload as one Automerge change, refusing anything that is not a change

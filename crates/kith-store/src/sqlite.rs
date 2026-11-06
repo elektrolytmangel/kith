@@ -364,6 +364,39 @@ impl Store for SqliteStore {
             .map_err(backend)
     }
 
+    fn delete(&mut self, ids: &[ChangeId]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction().map_err(backend)?;
+        for id in ids {
+            let id = id.as_bytes().as_slice();
+            let object: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT object_id FROM changes WHERE change_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            let Some(object) = object else { continue };
+            tx.execute("DELETE FROM changes WHERE change_id = ?1", [id])
+                .map_err(backend)?;
+            tx.execute("DELETE FROM change_parents WHERE change_id = ?1", [id])
+                .map_err(backend)?;
+            tx.execute(
+                "UPDATE objects SET change_count = change_count - 1 WHERE object_id = ?1",
+                [object.as_slice()],
+            )
+            .map_err(backend)?;
+        }
+        tx.commit().map_err(backend)
+    }
+
+    fn delete_chunk(&mut self, id: &[u8; 32]) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM chunks WHERE id = ?1", [id.as_slice()])
+            .map_err(backend)?;
+        Ok(())
+    }
+
     fn put_chunk(&mut self, id: &[u8; 32], scope: &Scope, data: &[u8]) -> Result<(), StoreError> {
         self.conn
             .execute(
@@ -497,6 +530,35 @@ mod tests {
             p.push(suffix);
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    /// req: REQ-DATA-005
+    #[test]
+    fn deleted_changes_and_chunks_are_gone_from_both_stores() {
+        fn check(s: &mut dyn Store) {
+            let key = DeviceKey::generate();
+            let o = ObjectId::random();
+            let a = change(&key, o, vec![], b"a");
+            let b = change(&key, o, vec![a.change_id], b"b");
+            let c = change(&key, o, vec![b.change_id], b"c");
+            for x in [&a, &b, &c] {
+                s.put(x.clone()).unwrap();
+            }
+            s.put_chunk(&[7; 32], &Scope::local(), b"data").unwrap();
+            s.delete(&[a.change_id, b.change_id, ChangeId([9; 32])])
+                .unwrap();
+            s.delete_chunk(&[7; 32]).unwrap();
+            assert!(!s.contains(&a.change_id).unwrap());
+            assert!(s.get(&b.change_id).unwrap().is_none());
+            assert_eq!(s.history(&o).unwrap(), vec![c.clone()]);
+            assert_eq!(s.all_ids().unwrap(), vec![c.change_id]);
+            assert_eq!(s.scope_ids(&Scope::local()).unwrap(), vec![c.change_id]);
+            assert!(s.get_chunk(&[7; 32]).unwrap().is_none());
+            // A deleted change can be stored again (a peer may send it).
+            assert!(s.put(a).unwrap());
+        }
+        check(&mut SqliteStore::open_in_memory().unwrap());
+        check(&mut crate::MemoryStore::new());
     }
 
     /// req: REQ-STORE-001

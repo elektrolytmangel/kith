@@ -39,13 +39,16 @@ at most 100 levels ([ADR 0020](../adr/0020-checked-automerge-changes.md)).
 
 ### REQ-DATA-005: Compaction
 
-- **Priority:** should | **Phase:** 8 | **Status:** proposed | **Verify:** test | **Source:** design §Risks
+- **Priority:** should | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** design §Risks
 
 Clients should support snapshots plus pruning of old changes under a per-type
 policy agreed by the organization.
 
-**Not built yet (decided 2026-11-06: later).** Until then history only grows; the guides tell adopters to plan for it.
-Design proposed in [ADR 0026](../adr/0026-history-compaction.md) (signed snapshots, tombstones, per-type retention in the policy); waiting for decisions.
+Admins fold old history into signed snapshots as the policy's per-type retention rule allows
+(`setRetention`, `compact`; ADR 0026). Devices delete what a snapshot covers and keep only the IDs.
+Raw objects keep their heads, documents keep their content (the snapshot repacks the changes), and old
+file versions lose their chunks. The default keeps everything. Limits: Automerge documents keep their
+internal operation history; a snapshot is at most 400 KiB.
 
 ### REQ-DATA-006: Encrypted backups
 

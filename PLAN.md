@@ -82,8 +82,8 @@ Work top to bottom; check items off here as they land.
    - [x] B: resumable large syncs (REQ-SYNC-005 partial: batched rounds, ADR 0025, PR `feat/resumable-sync`; no direct p2p).
    - [x] D: adopter docs: `docs/guides/getting-started.md` (web walk-through, mobile marked non-production) and `docs/guides/threat-model.md` (PR `docs/adopter-guides`).
    - **Later (todo): direct peer-to-peer transfer** for large syncs (rest of REQ-SYNC-005; user 2026-11-06: skip for now).
-   - **Next: C, history compaction (REQ-DATA-005).** Design proposed in ADR 0026 (PR `docs/compaction-design`); implement
-     after the user answers the questions under *Open questions*. Limitation is documented in README, integration guide and web production guide.
+   - [x] C: history compaction (REQ-DATA-005, ADR 0026, PR `feat/compaction`): admin-made snapshots, per-type retention in the policy,
+     raw objects / documents / file versions + chunks. Unreleased (next release: alpha.6; upgrade all devices before setting a rule). Limitation is documented in README, integration guide and web production guide.
 7. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
@@ -205,9 +205,7 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
    - Later: compaction (REQ-DATA-005), push wake-ups (REQ-RELAY-007), security review.
 ### Open questions for the user
 
-- **Compaction (ADR 0026, recommended answers first):** (1) who may compact: admins only / any editor; (2) retention: per type in the
-  policy (default keep everything; last N, D days, snapshot only) / one org-wide setting; (3) do any types need full history;
-  (4) before the first beta (recommended) or after; (5) first step: documents only (recommended) / also raw objects and file chunks.
+- *(none open.)* Compaction questions answered 2026-11-06, see *Decisions*.
 
 - **Azure plan:** all six steps done. Never deployed to real Azure (managed identity path, Bicep): the first deploy is the test.
   Step 2 used the defaults: allowlist in an Azure Table (live reload every 30 s), Table over Blob.
@@ -269,6 +267,7 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 | Format freeze point = the first beta (`0.2.0-beta.1`, after the security review and device verification): from then on a release reads the previous release's data and speaks the previous protocol. Alphas may keep breaking | User decision (2026-11-04) | ADR 0012 |
 | Mobile (Swift/Kotlin) is non-production; no real-device verification planned. Web is the production target | User decision (2026-11-06) | README, integration guide |
 | History compaction (REQ-DATA-005) is a later todo; the limit is documented, not fixed | User decision (2026-11-06) | Next steps 6 |
+| Compaction (REQ-DATA-005, ADR 0026): only admins create snapshots; retention is set per type in the policy (default keep everything); no type needs full history yet; built before the first beta; first step covers documents, raw objects and file chunks | User decision (2026-11-06) | ADR 0026 |
 | Push wake-ups (REQ-RELAY-007) stay unplanned: only background apps need them | User decision (2026-11-04) | Road to a release |
 | CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. requirement edits run only `requirements.yml` | User request (2026-11-04) | `ci.yml` |
 | Distribution: nothing outside GitHub (no npm/Maven/crates.io). Relay and always-on client ship as containers on GitHub Packages (ghcr.io), built from the release binaries | User decision (2026-11-04), replaces the package-registry idea | Road to a release, step 5 |
@@ -423,3 +422,5 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: #75 (A) and #76 (B) merged. Adopter docs (D): getting started, threat model (PR `docs/adopter-guides`). All four items the user picked are done; open: C compaction (later), Firefox/WebKit browser tests, automatic `catchUp` after reconnect, direct p2p for REQ-SYNC-005.
 - **2026-11-06**: User: release now, prepare C (compaction), skip direct p2p (todo for later). Release PR `release/0.1.0-alpha.5`.
 - **2026-11-06**: Compaction design prepared (ADR 0026, proposed) with five questions; direct p2p recorded as a later todo. Waiting for answers before implementing C.
+- **2026-11-06**: User answered the compaction questions (admins only, per-type policy retention, no full-history types, before the beta, documents + raw objects + file chunks). Implementing C.
+- **2026-11-06**: History compaction implemented (PR `feat/compaction`, ADR 0026): `kith_core::snapshot`, `Retention` + `SetRetention` policy op, `Store::delete`/`delete_chunk` (Memory, SQLite, IndexedDB), snapshot-aware Automerge merger, `Client::set_retention/compact/update_file`, wasm `setRetention/compact/updateFile`, FFI + Swift wrappers. Web smoke test (real relay, IndexedDB reopen) passes locally. Open: compaction of the policy object, squashing Automerge history, direct p2p.
