@@ -4,8 +4,8 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (release PR `release/0.1.0-alpha.5` open; the user merges and tags)
-- **Version:** `v0.1.0-alpha.4` released (2026-11-06). Next: `v0.1.0-alpha.5` (notice sharing ADR 0024, batched sync
+- **Last updated:** 2026-11-06 (release PR #78 merged; the user tags `v0.1.0-alpha.5`; compaction design waits for answers)
+- **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` is on `main`, untagged (notice sharing ADR 0024, batched sync
   rounds ADR 0025, adopter docs). Compatible with alpha.4 (an alpha.4 device gets one batch per catch-up from an alpha.5
   peer, see the changelog's *Upgrading*). Both ghcr.io packages are public.
 - **State of `main`:** all review fixes merged. Locally checked: fmt, clippy (workspace, sqlite, azure-state),
@@ -82,8 +82,8 @@ Work top to bottom; check items off here as they land.
    - [x] B: resumable large syncs (REQ-SYNC-005 partial: batched rounds, ADR 0025, PR `feat/resumable-sync`; no direct p2p).
    - [x] D: adopter docs: `docs/guides/getting-started.md` (web walk-through, mobile marked non-production) and `docs/guides/threat-model.md` (PR `docs/adopter-guides`).
    - **Later (todo): direct peer-to-peer transfer** for large syncs (rest of REQ-SYNC-005; user 2026-11-06: skip for now).
-   - **Next: C, history compaction (REQ-DATA-005).** Needs a design decision first (retention per type,
-     verifiable snapshots). Limitation is documented in README, integration guide and web production guide.
+   - **Next: C, history compaction (REQ-DATA-005).** Design proposed in ADR 0026 (PR `docs/compaction-design`); implement
+     after the user answers the questions under *Open questions*. Limitation is documented in README, integration guide and web production guide.
 7. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
