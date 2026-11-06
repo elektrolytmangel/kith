@@ -82,9 +82,10 @@ pub fn open(key: &[u8; 32], label: &str, sealed: &[u8]) -> Result<Vec<u8>, SealE
         return Err(SealError::Decrypt);
     }
     let (nonce, ct) = rest.split_at(NONCE_LEN);
+    let nonce = XNonce::try_from(nonce).map_err(|_| SealError::Decrypt)?;
     XChaCha20Poly1305::new(key.into())
         .decrypt(
-            XNonce::from_slice(nonce),
+            &nonce,
             Payload {
                 msg: ct,
                 aad: &aad(label),
