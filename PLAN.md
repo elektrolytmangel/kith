@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (`v0.1.0-alpha.4` tagged; security advisories published)
+- **Last updated:** 2026-11-06 (alpha.4 tagged, packages public; working through notice sharing, resumable syncs, adopter docs)
 - **Version:** `v0.1.0-alpha.4` (2026-11-06): review fixes, relay revocation and allowlist, build and release
   hardening. Not compatible with alpha.3 (see the changelog's *Upgrading*).
   Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
@@ -72,11 +72,18 @@ Work top to bottom; check items off here as they land.
 2. [x] **REQ-ID-002, users with several devices** (option A decided 2026-11-04: the member signs its own device's
    certificate; ADR 0011, PR `feat/own-devices`): `LinkDevice` policy op, own-device certificates (chains of up to 3),
    `create_own_device_invite` (web/FFI), `InviteClaim.to` routing, removal covers linked devices.
-3. **Road to a release users can use:** see the next section (agreed with the user 2026-11-04). Next open item: step 3
-   there (real-device verification), then 4. The freeze point is decided (first beta), so step 2 can be finished: migrations and previous-protocol support at the freeze.
+3. **Road to a release users can use:** see the next section. Real-device verification is **skipped** (user, 2026-11-06):
+   Swift/Kotlin stay non-production previews, only web is production-ready. Migrations and previous-protocol support land at the freeze (first beta).
 4. [x] Release `v0.1.0-alpha.4` (#71, tagged by the user 2026-11-06).
 5. [x] Security review findings published (9 advisories, see *Road*, step 1) and summarized in `CHANGELOG.md`.
-6. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
+6. **In progress (user, 2026-11-06; one PR each, in this order):**
+   - [ ] E: housekeeping (PLAN, README status, docs state the limits: compaction, mobile non-production).
+   - [ ] A: share revocation notices between admins and the always-on client (ADR 0013 gap).
+   - [ ] B: resumable large syncs (REQ-SYNC-005).
+   - [ ] D: adopter docs (per-platform getting started, threat model and known limits).
+   - **Later (todo): C, history compaction (REQ-DATA-005).** Needs a design decision first (retention per type,
+     verifiable snapshots). Limitation is documented in README, integration guide and web production guide.
+7. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
 ### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
@@ -95,7 +102,7 @@ Blockers, in suggested order:
    in [CHANGELOG.md](CHANGELOG.md). Open: an independent audit. Nothing is claimed safe for real data until then.
 2. [~] **Compatibility promise** (ADR 0012 accepted, golden tests for the change envelope and store codec in #50): versioned wire/storage formats with migrations (alpha.1 data already breaks on
    `main`), a stated semver policy, and the first non-alpha version number.
-3. [ ] **Run on real devices:** Swift/Kotlin live-sync glue against a relay (REQ-SYNC-004), the `partial` platform
+3. [-] **Run on real devices (skipped, user 2026-11-06: mobile SDKs ship as non-production; only web is production-ready):** Swift/Kotlin live-sync glue against a relay (REQ-SYNC-004), the `partial` platform
    requirements (REQ-PLAT-002..005, REQ-RELAY-001).
 4. [~] **Closing known gaps:** [x] relay-level certificate revocation (REQ-INV-004, ADR 0013, PR `feat/relay-revocation`; notice sharing between admins open), always-on client as the supported
    way to sync offline devices (push wake-ups REQ-RELAY-007 later), resumable large syncs (REQ-SYNC-005),
@@ -256,6 +263,8 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 | Revocation persistence is an opt-in relay feature (`KITH_RELAY_PERSIST_REVOCATIONS`, Azure Table); default stays RAM-only | User request (2026-11-05) | ADR 0014 |
 | Relay revocation: admin-signed notices, held in RAM only, repeated by the issuing admin on announce (not short-lived certificates, no on-disk list) | User choice (2026-11-05) | ADR 0013 |
 | Format freeze point = the first beta (`0.2.0-beta.1`, after the security review and device verification): from then on a release reads the previous release's data and speaks the previous protocol. Alphas may keep breaking | User decision (2026-11-04) | ADR 0012 |
+| Mobile (Swift/Kotlin) is non-production; no real-device verification planned. Web is the production target | User decision (2026-11-06) | README, integration guide |
+| History compaction (REQ-DATA-005) is a later todo; the limit is documented, not fixed | User decision (2026-11-06) | Next steps 6 |
 | Push wake-ups (REQ-RELAY-007) stay unplanned: only background apps need them | User decision (2026-11-04) | Road to a release |
 | CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. requirement edits run only `requirements.yml` | User request (2026-11-04) | `ci.yml` |
 | Distribution: nothing outside GitHub (no npm/Maven/crates.io). Relay and always-on client ship as containers on GitHub Packages (ghcr.io), built from the release binaries | User decision (2026-11-04), replaces the package-registry idea | Road to a release, step 5 |
@@ -404,3 +413,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: Review fixes merged (ADRs 0016-0023: Welcome checks, commit authorization, relay revocation rules and limits, checked Automerge changes, sealed stored secrets, admission and secret hygiene, invite short code with the admin's nonce, one sync peer, native TLS on by default). The always-on client can now reach `wss://` relays (it had no TLS backend). Dependabot: `examples/web-vite` removed again (its kith-wasm dependency is a local path). Next: release by the user.
 - **2026-11-06**: Release PR `release/0.1.0-alpha.4` (version bump, changelog incl. upgrade notes: stores from alpha.3 can't be opened, all devices and the relay upgrade together, invite code as an event). Release dry run on the branch before merge.
 - **2026-11-06**: `v0.1.0-alpha.4` tagged; the 9 security advisories published by the user. Summary added to *Road* step 1 and the alpha.4 changelog (*Security*).
+- **2026-11-06**: User: alpha.4 tagged, packages public, advisories done. Skip real-device verification (mobile non-production, web only). Do E, A, B, D in that order; C (compaction) later, documented as a limit. Branch `docs/housekeeping`.

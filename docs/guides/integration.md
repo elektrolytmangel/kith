@@ -7,6 +7,13 @@ restarts (store the key in the platform's secure storage).
 file on Swift and Kotlin (`dbPath`), in IndexedDB on the web (`dbName`, returns a
 Promise). `KithClient()` stays ephemeral. Invitations (links/QR) and permissions come in later phases.
 
+## Limits to plan for
+
+- **No compaction yet (REQ-DATA-005).** Every change is kept forever and sent to new devices. The web store holds
+  the whole history in memory (about 0.75 KiB per change). Prefer documents (merged edits) over one object per
+  keystroke, and keep to a few ten thousand changes per device. Compaction is planned.
+- Syncing needs another member online; run the [always-on client](#always-on-client).
+
 ## Documents
 
 `create`/`edit` store opaque bytes: concurrent edits of one object stay a fork that
@@ -213,6 +220,9 @@ for the main process, prefer the Rust crate through a native module.
 
 ## iOS / macOS
 
+> **Non-production.** The Swift package is a preview: it is built and tested in CI, but the live-sync glue has
+> not been run on real devices (REQ-SYNC-004). Only the web package is supported for production.
+
 Unzip `kith-swift-package.zip` from the release into your project and add it
 as a local package (Xcode: *Add Package Dependencies → Add Local*). Its
 `Package.swift` fetches `KithFFI.xcframework.zip` from the same release and
@@ -253,6 +263,9 @@ Keep the device key in the Keychain: after the first launch save
 identity with `try KithClient.withSecretKey(secretKey: data)`.
 
 ## Android
+
+> **Non-production.** The Android AAR is a preview: it is built in CI, but the live-sync glue has not been run
+> on real devices (REQ-SYNC-004). Only the web package is supported for production.
 
 ```kotlin
 // Copy kith-android-0.1.0-alpha.4.aar from the release into app/libs/.

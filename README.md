@@ -92,11 +92,18 @@ built from `apps/relay-server/Dockerfile`.
 
 Current state, decisions and next steps: [PLAN.md](PLAN.md).
 
-Alpha. Working today on Rust, web, Swift and Kotlin: signed change history, SQLite /
-IndexedDB persistence, JSON documents that merge (Automerge), live sync and catch-up
-(range-based reconciliation) through an authenticated relay, and end-to-end
-encryption with one MLS group per organization, and invitations with membership
-certificates the relay checks. Not yet: permissions, files, an always-on client. See the
+Alpha. **Web is the supported platform** (npm package, IndexedDB, browser tests in CI). The Swift and Kotlin
+packages are released as **non-production** previews: they compile and are tested in CI, but their live-sync
+glue has not been run on real devices, so don't ship them to users yet.
+
+Working today: signed change history, SQLite / IndexedDB persistence, JSON documents that merge
+(Automerge), live sync and catch-up through an authenticated relay, end-to-end encryption (one MLS
+group per organization), invitations with membership certificates the relay checks, roles and write rules,
+read-restricted subgroups, encrypted files, encrypted backups, and an always-on client.
+
+Known limits: history is never compacted (REQ-DATA-005, planned), so the whole history sits in memory on the web
+(plan for a few ten thousand changes per device); sync needs another member online (run the always-on client);
+no independent security audit yet. See the
 [traceability matrix](docs/requirements/TRACEABILITY.md) for per-requirement status.
 
 ## License
