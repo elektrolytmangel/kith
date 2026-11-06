@@ -28,6 +28,8 @@ updates:
     directory: /deploy
     schedule: { interval: monthly }
   - package-ecosystem: npm
-    directories: [/bindings/wasm/tests, /bindings/wasm/tests/browser, /examples/web-vite]
+    # examples/web-vite depends on the locally built package (file: path), which
+    # Dependabot cannot resolve.
+    directories: [/bindings/wasm/tests, /bindings/wasm/tests/browser]
     schedule:
       interval: weekly

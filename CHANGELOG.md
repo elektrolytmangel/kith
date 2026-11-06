@@ -23,7 +23,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ### Changed
 - Build and release: GitHub Actions pinned to commit SHAs, base images (Dockerfiles, Compose) pinned to digests,
   `cargo deny` checks advisories, licenses and sources (`deny.toml`, on dependency changes and weekly), Dependabot
-  covers every npm, Docker and Compose directory. Releases carry an SPDX SBOM and signed build provenance for every
+  covers the Docker and Compose files and the npm test packages. Releases carry an SPDX SBOM and signed build provenance for every
   file and image (`gh attestation verify`, see [releasing.md](docs/guides/releasing.md#verifying-a-release)).
 - Azure template: the relay's identity gets *Storage Table Data Contributor* on its tables only, not on the storage
   account. Existing deployments keep the old account-wide assignment until it is deleted

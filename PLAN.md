@@ -4,11 +4,14 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-05 (build and release hardening: pinned Actions/images, cargo deny, attestations, SBOM)
+- **Last updated:** 2026-11-06 (review fixes merged, ADRs 0016-0023; next: release by the user)
 - **Version:** `v0.1.0-alpha.3` released (2026-11-05). `main` carries unreleased: relay revocation (#55), relay org
-  allowlist (#57). Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
-- **State of `main` (16e991b, #57 merged):** CI green on all 12 jobs on #57. Locally checked: fmt, clippy (incl. wasm32),
-  workspace tests, wasm32 per crate, MSRV 1.91, npm smoke test against the real relay.
+  allowlist (#57), optional revocation persistence (ADR 0014), the review fixes (ADRs 0016-0023), build and release
+  hardening (#63). **Breaking for apps:** the invite short code now arrives as an event (`claimCode` / `ClaimCode`)
+  instead of being returned by `claimInvite` / `claim`; old and new clients can't admit each other (ADR 0023).
+  Whether the two ghcr.io packages are public is the user's step (see *Publishing the images*).
+- **State of `main` (54b3dc7):** all review fixes merged. Locally checked: fmt, clippy (workspace, sqlite, azure-state),
+  workspace tests x3, MSRV 1.91, wasm32, `cargo deny`, npm smoke test and browser tests against the real relay.
 - **Repository:** <https://github.com/elektrolytmangel/kith> (public, MIT)
 
 ## Where things stand
@@ -56,8 +59,9 @@ Works, on Rust, web (npm), Swift and Kotlin unless noted:
 | Sync needs another member online | Run the always-on client (`kith-always-on`) | REQ-SYNC-006 |
 | Swift/Kotlin live-sync glue is only compiled in CI, never run against a relay | Unverified on devices | REQ-SYNC-004 |
 
-Fine for: building and testing an integration, and trials with users who accept alpha risk. No security review
-yet, and formats may still break between alphas.
+Fine for: building and testing an integration, and trials with users who accept alpha risk. Reviewed in
+2026-11 (internal and external review, fixes merged); no independent audit yet, and formats may still break
+between alphas.
 
 ## Plan
 
@@ -72,7 +76,8 @@ Work top to bottom; check items off here as they land.
    `create_own_device_invite` (web/FFI), `InviteClaim.to` routing, removal covers linked devices.
 3. **Road to a release users can use:** see the next section (agreed with the user 2026-11-04). Next open item: step 3
    there (real-device verification), then 4. The freeze point is decided (first beta), so step 2 can be finished: migrations and previous-protocol support at the freeze.
-4. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
+4. **Next:** the user releases (version bump PR + tag); the release notes include the API change above.
+5. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
 
 ### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
@@ -83,8 +88,9 @@ Work top to bottom; check items off here as they land.
 
 Blockers, in suggested order:
 
-1. [ ] **Security review** of the crypto and protocol (MLS use, certificates, policy, backups, relay). Nothing is
-   claimed safe for real data until this is done.
+1. [~] **Security review** of the crypto and protocol (MLS use, certificates, policy, backups, relay). Internal
+   and external review done 2026-11-05/06, fixes merged (ADRs 0016-0023); a summary follows with the next
+   release. Open: an independent audit. Nothing is claimed safe for real data until then.
 2. [~] **Compatibility promise** (ADR 0012 accepted, golden tests for the change envelope and store codec in #50): versioned wire/storage formats with migrations (alpha.1 data already breaks on
    `main`), a stated semver policy, and the first non-alpha version number.
 3. [ ] **Run on real devices:** Swift/Kotlin live-sync glue against a relay (REQ-SYNC-004), the `partial` platform
@@ -243,6 +249,8 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 
 | Decision | Why | Where |
 | --- | --- | --- |
+| Native client (`kith-net`): TLS on by default, `ws://` only to this machine, 16 MiB messages | Relays outside the machine need TLS; plain `ws://` exposes the traffic | ADR 0023 |
+| Invite short code includes a random value the admin signs after the claim; delivered as an event | The code can't be predicted when a claim is made | ADR 0023 |
 | Revocation persistence is an opt-in relay feature (`KITH_RELAY_PERSIST_REVOCATIONS`, Azure Table); default stays RAM-only | User request (2026-11-05) | ADR 0014 |
 | Relay revocation: admin-signed notices, held in RAM only, repeated by the issuing admin on announce (not short-lived certificates, no on-disk list) | User choice (2026-11-05) | ADR 0013 |
 | Format freeze point = the first beta (`0.2.0-beta.1`, after the security review and device verification): from then on a release reads the previous release's data and speaks the previous protocol. Alphas may keep breaking | User decision (2026-11-04) | ADR 0012 |
@@ -391,3 +399,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-05**: #61 merged. User asked for step 3 as an opt-in: revocation persistence (ADR 0014, PR `feat/persist-revocations`). Azure plan complete. Next: road step 4 gaps (REQ-SYNC-005), security review prep, or the user's first real Azure deploy.
 - **2026-11-05**: CI on `main` red since the relay-limits merge (wasm browser test every run, kith-net join test intermittently): both tests raced the relay registering an announce (now checked off the lock). Tests now wait for presence, like the others (PR `test/wait-for-relay-membership`). No product change; integration guide notes when live changes start reaching a new device.
 - **2026-11-05**: Build and release hardening (PR `chore/supply-chain`): Actions pinned to SHAs, base images to digests, `cargo deny` workflow (`deny.toml`, weekly + on dependency changes; three build-time/unused-curve advisories ignored with reasons), Dependabot covers all npm/Docker/Compose dirs, release SBOM + build provenance attestations, Azure role scoped to the two tables (old account-wide assignment must be deleted by hand on existing deployments).
+- **2026-11-06**: Review fixes merged (ADRs 0016-0023: Welcome checks, commit authorization, relay revocation rules and limits, checked Automerge changes, sealed stored secrets, admission and secret hygiene, invite short code with the admin's nonce, one sync peer, native TLS on by default). The always-on client can now reach `wss://` relays (it had no TLS backend). Dependabot: `examples/web-vite` removed again (its kith-wasm dependency is a local path). Next: release by the user.
