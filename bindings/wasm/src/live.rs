@@ -5,7 +5,10 @@
 //! `Client::handle_frame`); this module only moves frames between the socket and
 //! the client and turns events into plain JS objects for the app's callback.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use kith_client::{Change, Client, Event, Store, hello_frame};
@@ -72,7 +75,8 @@ struct Shared {
 ///
 /// A relay connection that reconnects by itself (1 s, doubling, up to 30 s, with
 /// jitter) until `close` is called. Changes made while offline stay in the store;
-/// they reach peers through catch-up after the next `connected` event.
+/// they reach peers through the automatic catch-up after the next `connected` event
+/// (sent once a `presence` event shows another device online).
 pub struct Live {
     shared: Rc<RefCell<Shared>>,
     org: String,
@@ -313,13 +317,17 @@ fn open_socket(shared: &Rc<RefCell<Shared>>) -> Result<Conn, JsValue> {
     };
 
     let outbox: Outbox = Rc::new(RefCell::new(Some(Vec::new())));
+    // Set by each handshake: the next `presence` with another device online
+    // triggers one automatic catch-up for this connection.
+    let catch_up_due = Rc::new(Cell::new(false));
     let on_message = {
-        let (ws, client, on_event, org, outbox) = (
+        let (ws, client, on_event, org, outbox, catch_up_due) = (
             ws.clone(),
             client.clone(),
             on_event.clone(),
             org.to_string(),
             outbox.clone(),
+            catch_up_due.clone(),
         );
         Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
             let data = e.data();
@@ -349,6 +357,7 @@ fn open_socket(shared: &Rc<RefCell<Shared>>) -> Result<Conn, JsValue> {
                 for queued in outbox.borrow_mut().take().unwrap_or_default() {
                     send_frame(&ws, &queued);
                 }
+                catch_up_due.set(true);
                 emit(&on_event, simple_event("connected"));
                 return;
             }
@@ -358,6 +367,16 @@ fn open_socket(shared: &Rc<RefCell<Shared>>) -> Result<Conn, JsValue> {
                 Ok(h) => {
                     for reply in &h.replies {
                         send_frame(&ws, reply);
+                    }
+                    // After a (re)connect, exchange what was missed with one peer.
+                    if let Event::Presence { online, .. } = &h.event
+                        && online.len() > 1
+                        && catch_up_due.replace(false)
+                    {
+                        let frames = client.borrow_mut().sync_request_frames(&org);
+                        for frame in frames.unwrap_or_default() {
+                            send_frame(&ws, &frame);
+                        }
                     }
                     if let Some(o) = to_js(h.event) {
                         emit(&on_event, o);

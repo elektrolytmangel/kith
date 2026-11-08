@@ -79,11 +79,12 @@ stops someone who got hold of the link from joining unseen.
 ## 5. Offline and catching up
 
 Changes are always written locally first. A device that was offline receives only what
-arrives while it is online, so after (re)connecting call `catchUp()` once a `presence` event
-shows another device:
+arrives while it is online. After every (re)connect the client runs one catch-up by itself as
+soon as a `presence` event shows another device online. Call `catchUp()` yourself for
+further rounds (for example on a timer or when the tab becomes visible):
 
 ```ts
-case "presence": if (e.online.length > 1) client.catchUp(); break;
+document.addEventListener("visibilitychange", () => { if (!document.hidden) client.catchUp(); });
 ```
 
 The two compare what they have and exchange the difference (large histories in batches,

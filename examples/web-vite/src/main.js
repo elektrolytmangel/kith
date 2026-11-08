@@ -51,7 +51,6 @@ const onEvent = (e) => {
   switch (e.type) {
     case "connected": status("connected"); break;
     case "reconnecting": status(`offline, retrying in ${Math.round(e.delayMs / 1000)} s (attempt ${e.attempt})`); break;
-    case "presence": if (e.online.length > 1) client.catchUp(); break; // another device is online
     case "received":
     case "syncReceived": render(); break;
     case "inviteClaimed": $("code").textContent = `code ${e.code}: compare, then accepted`; client.acceptClaim(e.from); break;
