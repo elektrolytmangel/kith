@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-06 (release PR `release/0.1.0-alpha.6` open; the user tags `v0.1.0-alpha.5` first if not yet done, then `v0.1.0-alpha.6`)
+- **Last updated:** 2026-11-08 (road to prod agreed: auto `catchUp`, migrations + freeze, `0.2.0-beta.1`, real-app test, then gaps; see *Road to production*)
 - **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
   `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
   Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
@@ -86,6 +86,22 @@ Work top to bottom; check items off here as they land.
      raw objects / documents / file versions + chunks. In `v0.1.0-alpha.6` (release PR `release/0.1.0-alpha.6`). Limitation is documented in README, integration guide and web production guide.
 7. **Unplanned:** push wake-ups (REQ-RELAY-007, only for apps in the background), moving subgroup ownership; mark the repository as a
    template (owner only).
+
+### Road to production (user agreed 2026-11-08; one PR each, in this order)
+
+Prod = web only, hosted by the user with `KITH_RELAY_PERSIST_REVOCATIONS=true` (Azure Table) and the always-on client.
+
+1. [ ] **Automatic `catchUp` after a reconnect** (web `connect`, also `kith-net`/always-on if not already periodic); `reconnecting` / `connected` events stay.
+2. [ ] **Migrations and the freeze** (ADR 0012 rule 5): migration framework for SQLite (`user_version`) and IndexedDB, fixture databases
+   from the freeze version kept in tests, relay accepts the previous `PROTOCOL_VERSION`, backups restore across versions, changelog
+   section. Alpha data does **not** migrate (alphas may break).
+3. [ ] **Release `v0.2.0-beta.1`** (release PR; the user tags). This is the format baseline.
+4. [ ] **The user tests beta.1 in a real app outside this repo** (incl. Firefox and WebKit, Safari eviction, multi-tab). Findings come back as issues.
+5. [ ] **Fill the gaps found**, then the independent audit (outside our control), then the first non-beta release.
+
+Parked until the real app shows a need (decide after step 4): `SharedWorker` helper in `kith-web.js` so several tabs can use one client;
+lazy-loading web store (history is held in memory; 50k changes = 38 MiB, 6 s); compaction of the policy object and Automerge history squashing.
+Safari 7-day eviction is already documented (`threat-model.md`, `web-production.md`).
 
 ### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
 
@@ -265,6 +281,7 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 | Revocation persistence is an opt-in relay feature (`KITH_RELAY_PERSIST_REVOCATIONS`, Azure Table); default stays RAM-only | User request (2026-11-05) | ADR 0014 |
 | Relay revocation: admin-signed notices, held in RAM only, repeated by the issuing admin on announce (not short-lived certificates, no on-disk list) | User choice (2026-11-05) | ADR 0013 |
 | Format freeze point = the first beta (`0.2.0-beta.1`, after the security review and device verification): from then on a release reads the previous release's data and speaks the previous protocol. Alphas may keep breaking | User decision (2026-11-04) | ADR 0012 |
+| Prod target: web, hosted with revocation persistence on and the always-on client; Firefox/WebKit tested in the user's first real app; first beta (`0.2.0-beta.1`) after auto `catchUp` + migrations, then a real-app test, then gap fixes and release | User decision (2026-11-08) | Road to production |
 | Mobile (Swift/Kotlin) is non-production; no real-device verification planned. Web is the production target | User decision (2026-11-06) | README, integration guide |
 | History compaction (REQ-DATA-005) is a later todo; the limit is documented, not fixed | User decision (2026-11-06) | Next steps 6 |
 | Compaction (REQ-DATA-005, ADR 0026): only admins create snapshots; retention is set per type in the policy (default keep everything); no type needs full history yet; built before the first beta; first step covers documents, raw objects and file chunks | User decision (2026-11-06) | ADR 0026 |
@@ -426,3 +443,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: History compaction implemented (PR `feat/compaction`, ADR 0026): `kith_core::snapshot`, `Retention` + `SetRetention` policy op, `Store::delete`/`delete_chunk` (Memory, SQLite, IndexedDB), snapshot-aware Automerge merger, `Client::set_retention/compact/update_file`, wasm `setRetention/compact/updateFile`, FFI + Swift wrappers. Web smoke test (real relay, IndexedDB reopen) passes locally. Open: compaction of the policy object, squashing Automerge history, direct p2p.
 - **2026-11-06**: Dependabot #65, #66, #67, #70 merged (all green); #68 (chacha20poly1305 0.11) failed clippy on deprecated `XNonce::from_slice`, fixed in `sealed.rs` (`try_from`) and merged. Note: #66 (sbom-action) only runs in `release.yml`, so the next release dry run is its real test.
 - **2026-11-06**: #80 merged (C). Release PR `release/0.1.0-alpha.6` (version bump, changelog).
+- **2026-11-08**: User asked what is missing for prod. Answered from PLAN; user's decisions recorded (*Road to production*). Next: auto `catchUp` after reconnect.
