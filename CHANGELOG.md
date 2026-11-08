@@ -5,6 +5,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- **Compatibility machinery for the freeze** ([ADR 0012](docs/adr/0012-format-stability.md)): SQLite schema migration
+  steps (none needed yet), a relay that accepts a range of protocol versions (`MIN_PROTOCOL_VERSION`), and fixture tests
+  (SQLite database, backup file) that every later release must keep passing. No format changed.
 - **Automatic catch-up after a (re)connect** (web, REQ-PLAT-007): once a `presence` event shows another device online,
   the client runs one `catchUp` by itself. Calling `catchUp()` yourself still works; no format or protocol change.
 

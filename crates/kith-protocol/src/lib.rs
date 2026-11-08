@@ -10,6 +10,16 @@ use serde::{Deserialize, Serialize};
 /// Protocol version announced in [`Frame::Hello`].
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// Oldest protocol version a relay still accepts in [`Frame::Hello`] (ADR 0012: from the first
+/// beta on, a relay serves the previous version too). Raise [`PROTOCOL_VERSION`] for a wire
+/// change and keep this at the previous release's version.
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
+
+/// Whether a relay serves a client that announced `version`.
+pub fn supports_version(version: u16) -> bool {
+    (MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
+}
+
 /// Maximum size of a single frame body in bytes. Larger data goes through
 /// the large-file path (chunked, peer-to-peer where possible).
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;

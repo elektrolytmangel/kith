@@ -12,7 +12,20 @@ use crate::{Store, StoreError};
 
 /// 2: `meta` table (MLS state). 3: `scope` column (phase 6b; older envelopes
 /// do not verify any more, so older non-empty databases are refused).
-const SCHEMA_VERSION: i64 = 3;
+/// Current schema (`PRAGMA user_version`). Version 3 is the format baseline of the first beta
+/// (ADR 0012): every later schema change adds a step to [`MIGRATIONS`] instead of editing it.
+const SCHEMA_VERSION: i64 = FIRST_MIGRATABLE + MIGRATIONS.len() as i64;
+
+/// Oldest schema this version can still read. Databases from before it come from an alpha.
+const FIRST_MIGRATABLE: i64 = 3;
+
+/// One schema upgrade step, run inside a transaction.
+type Migration = fn(&Connection) -> rusqlite::Result<()>;
+
+/// `MIGRATIONS[i]` upgrades schema `FIRST_MIGRATABLE + i` to the next one. Empty: nothing has
+/// changed since the baseline. A new step needs a fixture database of the old version in
+/// `tests/fixtures/` (see `fixture_of_the_baseline_opens`).
+const MIGRATIONS: &[Migration] = &[];
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS changes (
@@ -85,6 +98,22 @@ pub struct SqliteStore {
     conn: Connection,
 }
 
+/// Run the steps from schema `from` up to the end of `steps`, each in its own transaction that
+/// also records the new version, so a failed step leaves the database at the last good version.
+fn migrate(conn: &Connection, from: i64, steps: &[Migration]) -> Result<(), StoreError> {
+    let first =
+        usize::try_from(from - FIRST_MIGRATABLE).map_err(|e| StoreError::Backend(e.to_string()))?;
+    for (i, step) in steps.iter().enumerate().skip(first) {
+        let next = FIRST_MIGRATABLE + i as i64 + 1;
+        let tx = conn.unchecked_transaction().map_err(backend)?;
+        step(&tx).map_err(backend)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {next};"))
+            .map_err(backend)?;
+        tx.commit().map_err(backend)?;
+    }
+    Ok(())
+}
+
 impl SqliteStore {
     /// Open (creating if needed) the database file at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -126,6 +155,9 @@ impl SqliteStore {
                 "DROP TABLE IF EXISTS changes; DROP TABLE IF EXISTS change_parents; DROP TABLE IF EXISTS objects;",
             )
             .map_err(backend)?;
+        }
+        if version >= FIRST_MIGRATABLE {
+            migrate(&conn, version, MIGRATIONS)?;
         }
         conn.execute_batch(SCHEMA).map_err(backend)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
@@ -681,5 +713,111 @@ mod tests {
         }
         assert!(SqliteStore::open(&path).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// req: REQ-STORE-002
+    #[test]
+    fn migration_steps_run_in_order_and_failures_roll_back() {
+        fn add_column(c: &Connection) -> rusqlite::Result<()> {
+            c.execute_batch("ALTER TABLE t ADD COLUMN extra TEXT;")
+        }
+        fn fill(c: &Connection) -> rusqlite::Result<()> {
+            c.execute_batch("UPDATE t SET extra = 'x';")
+        }
+        fn broken(c: &Connection) -> rusqlite::Result<()> {
+            c.execute_batch("ALTER TABLE t ADD COLUMN gone TEXT; SELECT * FROM missing;")
+        }
+        let version = |c: &Connection| -> i64 {
+            c.query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        let db = || {
+            let c = Connection::open_in_memory().unwrap();
+            c.execute_batch(
+                "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1); PRAGMA user_version = 3;",
+            )
+            .unwrap();
+            c
+        };
+        let c = db();
+        migrate(&c, 3, &[add_column, fill]).unwrap();
+        assert_eq!(version(&c), 5);
+        let extra: String = c
+            .query_row("SELECT extra FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(extra, "x");
+        // Starting one step in only runs the rest.
+        let c = db();
+        c.execute_batch("ALTER TABLE t ADD COLUMN extra TEXT; PRAGMA user_version = 4;")
+            .unwrap();
+        migrate(&c, 4, &[add_column, fill]).unwrap();
+        assert_eq!(version(&c), 5);
+        // A failing step keeps the last good version and undoes its own changes.
+        let c = db();
+        assert!(migrate(&c, 3, &[add_column, broken]).is_err());
+        assert_eq!(version(&c), 4);
+        assert!(c.prepare("SELECT gone FROM t").is_err());
+    }
+
+    /// req: REQ-STORE-002
+    #[test]
+    fn fixture_of_the_baseline_opens() {
+        // Written by the first beta's code (`write_fixture` below); must keep opening forever.
+        let dir = temp_path("fixture");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/schema-3.db"),
+            &dir,
+        )
+        .unwrap();
+        let s = SqliteStore::open(&dir).unwrap();
+        let ids = s.all_ids().unwrap();
+        assert_eq!(ids.len(), 2);
+        for id in &ids {
+            s.get(id).unwrap().unwrap().verify().unwrap();
+        }
+        let key = DeviceKey::from_secret_bytes(&[7; 32]);
+        let oid = fixture_object();
+        let history = s.history(&oid).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].author, kith_core::Signer::device_id(&key));
+        assert_eq!(history[1].body.payload, b"second");
+        assert_eq!(s.get_meta("note").unwrap(), Some(b"meta".to_vec()));
+        assert_eq!(
+            s.get_chunk(&[9; 32]).unwrap(),
+            Some((Scope::local(), b"chunk".to_vec()))
+        );
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(s);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", dir.display()));
+        }
+    }
+
+    fn fixture_object() -> ObjectId {
+        ObjectId::from_hex(&"ab".repeat(16)).unwrap()
+    }
+
+    /// Regenerates the fixture: `cargo test -p kith-store --features sqlite -- --ignored write_fixture`.
+    /// Only for a new schema version (keep the old file under its own name).
+    #[test]
+    #[ignore]
+    fn write_fixture() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/schema-3.db");
+        let _ = std::fs::remove_file(path);
+        let key = DeviceKey::from_secret_bytes(&[7; 32]);
+        let mut s = SqliteStore::open(path).unwrap();
+        let first = change(&key, fixture_object(), vec![], b"first");
+        let second = change(&key, fixture_object(), vec![first.change_id], b"second");
+        s.put(first).unwrap();
+        s.put(second).unwrap();
+        s.put_meta("note", b"meta").unwrap();
+        s.put_chunk(&[9; 32], &Scope::local(), b"chunk").unwrap();
+        s.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")
+            .unwrap();
     }
 }
