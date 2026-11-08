@@ -448,3 +448,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-08**: #84 merged. Freeze mechanics (PR `feat/freeze-migrations`, ADR 0012 *Freeze baseline*). Next: release PR `release/0.2.0-beta.1`.
 - **2026-11-08**: #85 merged (freeze mechanics). Release PR `release/0.2.0-beta.1` (version bump, changelog). Next: user tags; real-app test.
 - **2026-11-08**: `v0.2.0-beta.1` released (release run green). Azure template default image bumped from `0.1.0-alpha.3` to `0.2.0-beta.1` (PR `chore/azure-beta1`). An existing deployment must be redeployed (`az deployment group create`, or `az containerapp update --image`); I did not touch any real Azure resources.
+- **2026-11-08**: User: enable all relay features in the Azure template. `persistRevocations` now defaults to `true` (allowlist was already on; the other relay vars are limits with defaults). PR `chore/azure-persist`. Existing deployments get the `revocations` table + role on redeploy.

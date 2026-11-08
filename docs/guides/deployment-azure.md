@@ -72,10 +72,9 @@ az containerapp hostname bind -g kith-rg -n kith-relay --hostname relay.example.
 - **Cost:** one replica at 0.5 vCPU / 1 GiB is always on (Container Apps cannot scale a WebSocket relay to zero without
   dropping connections), plus Log Analytics ingestion and a few cents of storage. Check the
   [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/) for your region.
-- **Revocation notices** are held in RAM by default ([ADR 0013](../adr/0013-relay-revocation.md)): a relay restart
-  forgets them until the issuing admin reconnects. Set `persistRevocations = true` to keep them in the `revocations`
-  table ([ADR 0014](../adr/0014-optional-revocation-persistence.md)); the relay then stores the IDs of removed devices
-  and their signed notices, and re-verifies them at start.
+- **Revocation notices** are kept in the `revocations` table by default (`persistRevocations = true`, [ADR 0014](../adr/0014-optional-revocation-persistence.md)). The relay stores the IDs of removed devices and their signed notices, and re-verifies them at start.
+  With `persistRevocations = false` they are held in RAM only ([ADR 0013](../adr/0013-relay-revocation.md)), and a relay
+  restart forgets them until the issuing admin reconnects.
 - **Deployments made before table-scoped roles:** the relay's identity used to hold *Storage Table Data Contributor*
   on the whole storage account. Deploying the current template adds the per-table assignments but does not remove
   the old one; delete it once (Azure portal: storage account → *Access control (IAM)* → *Role assignments*, or

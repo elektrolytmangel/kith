@@ -21,8 +21,8 @@ param registryPassword string = ''
 @description('Table that holds the approved org IDs (one row per org: PartitionKey "org", RowKey = org ID).')
 param allowedOrgsTable string = 'allowedorgs'
 
-@description('Keep revocation notices in a table so a relay restart does not forget them (ADR 0014). Off: RAM only.')
-param persistRevocations bool = false
+@description('Keep revocation notices in a table so a relay restart does not forget them (ADR 0014). Set false for RAM only.')
+param persistRevocations bool = true
 
 @description('How often the relay re-reads the table, in seconds.')
 param allowlistRefreshSecs int = 30
