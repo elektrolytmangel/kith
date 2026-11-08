@@ -10,7 +10,7 @@ Compatible with beta.1: no format or protocol change. Upgrade the relay first, t
 
 ### Added
 - **Open mode for the relay** (`KITH_RELAY_OPEN_ORGS=true`, REQ-RELAY-009, Bicep `openOrgs`): serves every org while keeping the Azure
-  state for revocation persistence. Until now the Azure state made an empty approved-org list refuse everyone. No format or protocol change.
+  state for revocation persistence. The Azure template turns it on by default (`openOrgs = true`; set `false` to keep approving orgs one by one: an existing deployment becomes open when redeployed with this template). Until now the Azure state made an empty approved-org list refuse everyone. No format or protocol change.
 
 ## [0.2.0-beta.1] - 2026-11-08
 
