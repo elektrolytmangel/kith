@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-08 (relay open mode `KITH_RELAY_OPEN_ORGS` + Bicep `openOrgs` in PR `feat/open-mode`; app-approval proposal (quotas) added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
+- **Last updated:** 2026-11-08 (release PR `release/0.2.0-beta.2`: the first beta.2 tag failed because `Cargo.toml` was still beta.1; the user must delete and re-create the tag on the merge commit; quotas recorded as a todo; `v0.2.0-beta.2` tagged by the user; relay open mode `KITH_RELAY_OPEN_ORGS` + Bicep `openOrgs` in PR `feat/open-mode`; app-approval proposal (quotas) added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
 - **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
   `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
   Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
@@ -223,12 +223,12 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
 
 - *(none open.)* Compaction questions answered 2026-11-06, see *Decisions*.
 
-- **Approve applications, not orgs (asked 2026-11-08; proposal, not decided).** Use case: a scrum-poker app, no login, every room = one
-  org; approving org IDs by hand does not scale. An app-key attestation was considered and **dropped**: without a login, any signer endpoint is
-  an open mint, so it authorizes nobody. Proposal instead: **open-with-quotas mode** in the relay (keeps `KITH_RELAY_ALLOWED_ORGS` for private
-  relays): cap on active orgs, per-source-IP rate of new orgs (`X-Forwarded-For` behind the ingress), device cap per org, idle orgs forgotten
+- **Todo (user 2026-11-08: record it, do not build yet): relay quotas for open mode.** Use case: a scrum-poker app, no login, every room = one
+  org. Open mode (`KITH_RELAY_OPEN_ORGS`, REQ-RELAY-009, merged) serves every org, so only the abuse limits protect the relay. An app-key
+  attestation was considered and dropped: without a login, any signer endpoint is an open mint. Planned instead (new requirement, so REQ-RELAY-010;
+  ADR first): cap on active orgs, per-source-IP rate of new orgs (`X-Forwarded-For` behind the ingress), device cap per org, idle orgs forgotten
   (RAM only), optional deny list. Separate applications = separate relay deployments. Real gating would need identity (login, captcha/PoW,
-  invites from members): not for this use case. Question: go with quotas? Next if agreed: ADR + REQ-RELAY-009.
+  invites from members).
 
 - **Azure plan:** all six steps done. Never deployed to real Azure (managed identity path, Bicep): the first deploy is the test.
   Step 2 used the defaults: allowlist in an Azure Table (live reload every 30 s), Table over Blob.
@@ -459,3 +459,5 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-08**: User: enable all relay features in the Azure template. `persistRevocations` now defaults to `true` (allowlist was already on; the other relay vars are limits with defaults). PR `chore/azure-persist`. Existing deployments get the `revocations` table + role on redeploy.
 - **2026-11-08**: User asked for approving applications instead of single orgs (scrum-poker rooms = one org each). App attestation dropped (no login = open mint); proposal is relay quotas, under *Open questions*; awaiting the user's choice. PR `docs/plan-app-approval`.
 - **2026-11-08**: User chose an explicit open mode (option 3). `OpenOrgs` store wrapper, `KITH_RELAY_OPEN_ORGS`, Bicep `openOrgs` (skips the `allowedorgs` table, role and env), REQ-RELAY-009, guide + changelog (PR `feat/open-mode`, stacked on `docs/plan-app-approval` #89, whose merge the classifier denied). Checked locally: fmt, clippy (workspace + azure-state), relay tests; `az bicep` not available here, CI's Bicep job is the check. Open: relay quotas for open mode (see *Open questions*); a release carries it, the user tags.
+- **2026-11-08**: #90 merged (open mode). User tagged `v0.2.0-beta.2`; quotas for open mode recorded as a todo, not built. Azure template default image is still `0.2.0-beta.1` (pinned tag, no auto-update).
+- **2026-11-08**: `v0.2.0-beta.2` tag failed the release check (tag did not match `Cargo.toml` 0.2.0-beta.1: the tag was set before the version bump). Release PR `release/0.2.0-beta.2` (version bump, changelog, Azure default image). The user deletes the bad tag (`git push origin :refs/tags/v0.2.0-beta.2`) and re-tags the merge commit. Pitfall: bump the version in a release PR *before* tagging.
