@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-08 (road to prod agreed: auto `catchUp`, migrations + freeze, `0.2.0-beta.1`, real-app test, then gaps; see *Road to production*)
+- **Last updated:** 2026-11-08 (release PR `release/0.2.0-beta.1` open; the user tags `v0.2.0-beta.1`, then tests it in a real app; see *Road to production*)
 - **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
   `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
   Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
@@ -92,10 +92,10 @@ Work top to bottom; check items off here as they land.
 Prod = web only, hosted by the user with `KITH_RELAY_PERSIST_REVOCATIONS=true` (Azure Table) and the always-on client.
 
 1. [x] **Automatic `catchUp` after a reconnect** (PR `feat/auto-catch-up`: web `connect` runs one catch-up per connection on the first `presence` with another device; always-on already catches up on every connect + periodically; Swift/Kotlin stay manual; browser test no longer calls `catchUp`).
-2. [~] **Migrations and the freeze** (PR `feat/freeze-migrations`: baseline = current markers, no bump; SQLite `MIGRATIONS` + fixture db, relay version range, backup fixture, ADR 0012 section; IndexedDB upgrade is by-hand review) (ADR 0012 rule 5): migration framework for SQLite (`user_version`) and IndexedDB, fixture databases
+2. [x] **Migrations and the freeze** (#85) (PR `feat/freeze-migrations`: baseline = current markers, no bump; SQLite `MIGRATIONS` + fixture db, relay version range, backup fixture, ADR 0012 section; IndexedDB upgrade is by-hand review) (ADR 0012 rule 5): migration framework for SQLite (`user_version`) and IndexedDB, fixture databases
    from the freeze version kept in tests, relay accepts the previous `PROTOCOL_VERSION`, backups restore across versions, changelog
    section. Alpha data does **not** migrate (alphas may break).
-3. [ ] **Release `v0.2.0-beta.1`** (release PR; the user tags). This is the format baseline.
+3. [~] **Release `v0.2.0-beta.1`** (release PR `release/0.2.0-beta.1`; the user tags; run the release dry run on the branch first). This is the format baseline.
 4. [ ] **The user tests beta.1 in a real app outside this repo** (incl. Firefox and WebKit, Safari eviction, multi-tab). Findings come back as issues.
 5. [ ] **Fill the gaps found**, then the independent audit (outside our control), then the first non-beta release.
 
@@ -446,3 +446,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-08**: User asked what is missing for prod. Answered from PLAN; user's decisions recorded (*Road to production*). Next: auto `catchUp` after reconnect.
 - **2026-11-08**: User: alpha data may break, no alpha.6 migration. Automatic catch-up after reconnect in the web client (PR `feat/auto-catch-up`). Next: migrations + freeze.
 - **2026-11-08**: #84 merged. Freeze mechanics (PR `feat/freeze-migrations`, ADR 0012 *Freeze baseline*). Next: release PR `release/0.2.0-beta.1`.
+- **2026-11-08**: #85 merged (freeze mechanics). Release PR `release/0.2.0-beta.1` (version bump, changelog). Next: user tags; real-app test.

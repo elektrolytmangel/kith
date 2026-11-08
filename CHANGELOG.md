@@ -4,6 +4,16 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.2.0-beta.1] - 2026-11-08
+
+**The format baseline.** From this release on, a release reads the data of the previous one and a relay accepts
+the previous protocol version ([ADR 0012](docs/adr/0012-format-stability.md), *Freeze baseline*). Nothing in
+the formats changed since alpha.6, so alpha.6 data and devices still work, but alphas are not covered by the promise.
+
+### Upgrading
+- No migration needed from alpha.6; upgrade the relay first, then the devices. Every later release keeps reading
+  beta.1 stores, backups and the beta.1 protocol.
+
 ### Added
 - **Compatibility machinery for the freeze** ([ADR 0012](docs/adr/0012-format-stability.md)): SQLite schema migration
   steps (none needed yet), a relay that accepts a range of protocol versions (`MIN_PROTOCOL_VERSION`), and fixture tests
