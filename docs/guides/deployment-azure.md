@@ -36,7 +36,16 @@ Check it: `curl https://<fqdn>/healthz` prints `ok`.
 Parameters worth knowing: `image`, `allowedIpRanges` (CIDRs; empty allows everyone, which devices need),
 `relaySettings` (any `KITH_RELAY_*` limit, see [integration.md](integration.md#relay)), `allowlistRefreshSecs`.
 
+## Serve every organization (open mode)
+
+If your app creates an org per room, approving each org by hand does not work. Deploy with `param openOrgs = true`
+(sets `KITH_RELAY_OPEN_ORGS=true`): the `allowedorgs` table is neither created nor read, and any org may announce. Revocation
+persistence stays on. Anyone who can reach the relay can then use it, so rely on the abuse limits (`relaySettings`) and
+`allowedIpRanges` where you can. Switching an existing deployment to open mode leaves its old `allowedorgs` table in place (unused).
+
 ## Approve an organization
+
+(Skip this section in open mode.)
 
 The table starts **empty, and an empty table approves nobody**: the relay refuses every `announce` until you add
 an org. One row per org: `PartitionKey` = `org`, `RowKey` = the org ID.

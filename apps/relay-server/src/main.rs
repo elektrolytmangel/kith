@@ -7,8 +7,8 @@ use std::sync::Arc;
 use kith_relay_server::{
     Limits, app, new_state_with, parse_allowed_orgs,
     state::{
-        StateStore, StaticState, load_revocations, refresh_allowlist, spawn_allowlist_refresh,
-        spawn_revocation_writer,
+        OpenOrgs, StateStore, StaticState, load_revocations, refresh_allowlist,
+        spawn_allowlist_refresh, spawn_revocation_writer,
     },
 };
 
@@ -73,8 +73,27 @@ async fn main() {
     .expect("server");
 }
 
-/// Azure Table Storage if configured, else the fixed list from `KITH_RELAY_ALLOWED_ORGS`.
+/// The store from [`configured_store`], with the approved-org list switched off when
+/// `KITH_RELAY_OPEN_ORGS=true` (REQ-RELAY-009). Revocation persistence is unaffected.
 fn state_store() -> Arc<dyn StateStore> {
+    let store = configured_store();
+    if !std::env::var("KITH_RELAY_OPEN_ORGS")
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+    {
+        return store;
+    }
+    if std::env::var("KITH_RELAY_ALLOWED_ORGS").is_ok_and(|v| parse_allowed_orgs(&v).is_some()) {
+        tracing::error!(
+            "KITH_RELAY_OPEN_ORGS=true contradicts KITH_RELAY_ALLOWED_ORGS: set only one"
+        );
+        std::process::exit(1);
+    }
+    tracing::warn!("KITH_RELAY_OPEN_ORGS=true: serving every organization (no approval list)");
+    Arc::new(OpenOrgs(store))
+}
+
+/// Azure Table Storage if configured, else the fixed list from `KITH_RELAY_ALLOWED_ORGS`.
+fn configured_store() -> Arc<dyn StateStore> {
     let azure_set = std::env::var_os("KITH_RELAY_AZURE_STORAGE_ACCOUNT").is_some()
         || std::env::var_os("KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING").is_some();
     if azure_set {
