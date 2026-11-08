@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-08 (release PR `release/0.2.0-beta.1` open; the user tags `v0.2.0-beta.1`, then tests it in a real app; see *Road to production*)
+- **Last updated:** 2026-11-08 (`v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
 - **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
   `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
   Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
@@ -447,3 +447,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-08**: User: alpha data may break, no alpha.6 migration. Automatic catch-up after reconnect in the web client (PR `feat/auto-catch-up`). Next: migrations + freeze.
 - **2026-11-08**: #84 merged. Freeze mechanics (PR `feat/freeze-migrations`, ADR 0012 *Freeze baseline*). Next: release PR `release/0.2.0-beta.1`.
 - **2026-11-08**: #85 merged (freeze mechanics). Release PR `release/0.2.0-beta.1` (version bump, changelog). Next: user tags; real-app test.
+- **2026-11-08**: `v0.2.0-beta.1` released (release run green). Azure template default image bumped from `0.1.0-alpha.3` to `0.2.0-beta.1` (PR `chore/azure-beta1`). An existing deployment must be redeployed (`az deployment group create`, or `az containerapp update --image`); I did not touch any real Azure resources.

@@ -2,7 +2,7 @@
 using 'main.bicep'
 
 param name = 'kith'
-param image = 'ghcr.io/elektrolytmangel/kith-relay:0.1.0-alpha.3'
+param image = 'ghcr.io/elektrolytmangel/kith-relay:0.2.0-beta.1'
 
 // Optional:
 // param persistRevocations = true
