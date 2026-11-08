@@ -58,6 +58,37 @@ impl StateStore for StaticState {
     }
 }
 
+/// Serves every org whatever the wrapped store lists (REQ-RELAY-009, `KITH_RELAY_OPEN_ORGS=true`).
+///
+/// Only the approved-org list is switched off: the inner store is never asked for it, so its table
+/// need not exist, and revocation notices still go to and come from the inner store.
+pub struct OpenOrgs(pub Arc<dyn StateStore>);
+
+impl StateStore for OpenOrgs {
+    fn allowed_orgs(&self) -> BoxFuture<'_, Result<Option<HashSet<String>>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn refreshes(&self) -> bool {
+        false
+    }
+
+    fn keeps_revocations(&self) -> bool {
+        self.0.keeps_revocations()
+    }
+
+    fn revocations(&self) -> BoxFuture<'_, Result<Vec<RevocationRecord>, String>> {
+        self.0.revocations()
+    }
+
+    fn save_revocation<'a>(
+        &'a self,
+        rec: &'a RevocationRecord,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        self.0.save_revocation(rec)
+    }
+}
+
 /// Read the allowlist once and apply it. On error the previous list stays in force.
 pub async fn refresh_allowlist(state: &Shared, store: &dyn StateStore) -> Result<(), String> {
     let orgs = store.allowed_orgs().await?;

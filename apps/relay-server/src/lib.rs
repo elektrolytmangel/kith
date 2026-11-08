@@ -9,6 +9,8 @@
 //! - `KITH_RELAY_AZURE_STORAGE_ACCOUNT` / `KITH_RELAY_AZURE_STORAGE_CONNECTION_STRING`
 //!   (feature `azure-state`): read the approved orgs from an Azure Table instead, re-read
 //!   every `KITH_RELAY_ALLOWLIST_REFRESH_SECS` (default 30). See [`state`].
+//! - `KITH_RELAY_OPEN_ORGS=true`: serve every org even with the Azure state; the list is not read
+//!   (REQ-RELAY-009). Not combinable with `KITH_RELAY_ALLOWED_ORGS`.
 //! - `KITH_RELAY_PERSIST_REVOCATIONS=true` (with the Azure state): keep revocation notices in a table
 //!   and reload them at start (ADR 0014).
 //! - `RUST_LOG`: log filter, default `info`
@@ -1451,6 +1453,47 @@ mod tests {
         // Lifting the restriction serves the org again.
         set_allowed_orgs(&state, parse_allowed_orgs(""));
         join(&mut b, &other_root, &kb).await;
+    }
+
+    /// req: REQ-RELAY-009
+    #[tokio::test]
+    async fn open_mode_ignores_the_list_but_keeps_revocation_storage() {
+        use crate::state::{BoxFuture, OpenOrgs, RevocationRecord, StateStore, refresh_allowlist};
+        /// A configured store with an empty list (approves nobody) that keeps revocations.
+        struct Closed;
+        impl StateStore for Closed {
+            fn allowed_orgs(&self) -> BoxFuture<'_, Result<Option<HashSet<String>>, String>> {
+                Box::pin(async { Ok(Some(HashSet::new())) })
+            }
+            fn keeps_revocations(&self) -> bool {
+                true
+            }
+            fn save_revocation<'a>(
+                &'a self,
+                _rec: &'a RevocationRecord,
+            ) -> BoxFuture<'a, Result<(), String>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        let state = new_state(Duration::from_secs(10));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+        let served = state.clone();
+        tokio::spawn(async move { axum::serve(listener, app(served)).await.unwrap() });
+        let (root, key) = (DeviceKey::generate(), DeviceKey::generate());
+
+        // Closed store: nobody is approved.
+        refresh_allowlist(&state, &Closed).await.unwrap();
+        let mut a = login(&url, &key).await;
+        announce(&mut a, &org_id(&root), proof(&root, &key, true)).await;
+        expect_error(next_frame(&mut a).await, "org-not-allowed");
+
+        // Open mode over the same store: the list is not consulted, persistence is kept.
+        let open = OpenOrgs(Arc::new(Closed));
+        assert!(open.keeps_revocations());
+        assert!(!open.refreshes());
+        refresh_allowlist(&state, &open).await.unwrap();
+        join(&mut a, &root, &key).await;
     }
 
     /// req: REQ-RELAY-008

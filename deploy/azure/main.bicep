@@ -21,6 +21,9 @@ param registryPassword string = ''
 @description('Table that holds the approved org IDs (one row per org: PartitionKey "org", RowKey = org ID).')
 param allowedOrgsTable string = 'allowedorgs'
 
+@description('Serve every organization: the approved-org table is not created or read. For apps that create an org per room (REQ-RELAY-009). The abuse limits still apply.')
+param openOrgs bool = false
+
 @description('Keep revocation notices in a table so a relay restart does not forget them (ADR 0014). Set false for RAM only.')
 param persistRevocations bool = true
 
@@ -77,7 +80,7 @@ resource tables 'Microsoft.Storage/storageAccounts/tableServices@2023-05-01' = {
   name: 'default'
 }
 
-resource allowedOrgs 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+resource allowedOrgs 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = if (!openOrgs) {
   parent: tables
   name: allowedOrgsTable
 }
@@ -89,7 +92,7 @@ resource revocations 'Microsoft.Storage/storageAccounts/tableServices/tables@202
 
 // The relay's identity gets data access to its two tables only, not to the
 // whole storage account (it never creates tables or touches other data).
-resource relayCanUseAllowedOrgs 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource relayCanUseAllowedOrgs 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!openOrgs) {
   scope: allowedOrgs
   name: guid(allowedOrgs.id, identity.id, tableContributor)
   properties: {
@@ -127,13 +130,15 @@ resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
 var relayEnv = [
   { name: 'KITH_RELAY_ADDR', value: '0.0.0.0:8080' }
   { name: 'KITH_RELAY_AZURE_STORAGE_ACCOUNT', value: storage.name }
-  { name: 'KITH_RELAY_AZURE_ALLOWED_ORGS_TABLE', value: allowedOrgsTable }
-  { name: 'KITH_RELAY_ALLOWLIST_REFRESH_SECS', value: string(allowlistRefreshSecs) }
   // The ingress proxy appends the client address; count connections per client, not per proxy.
   { name: 'KITH_RELAY_CLIENT_IP_HEADER', value: 'x-forwarded-for' }
   { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
 ]
 
+var allowlistEnv = openOrgs ? [{ name: 'KITH_RELAY_OPEN_ORGS', value: 'true' }] : [
+  { name: 'KITH_RELAY_AZURE_ALLOWED_ORGS_TABLE', value: allowedOrgsTable }
+  { name: 'KITH_RELAY_ALLOWLIST_REFRESH_SECS', value: string(allowlistRefreshSecs) }
+]
 var persistEnv = persistRevocations ? [{ name: 'KITH_RELAY_PERSIST_REVOCATIONS', value: 'true' }] : []
 var extraEnv = [for item in items(relaySettings): { name: item.key, value: item.value }]
 
@@ -178,7 +183,7 @@ resource relay 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'relay'
           image: image
           resources: { cpu: json(cpu), memory: memory }
-          env: concat(relayEnv, persistEnv, extraEnv)
+          env: concat(relayEnv, allowlistEnv, persistEnv, extraEnv)
           probes: [
             {
               type: 'Liveness'

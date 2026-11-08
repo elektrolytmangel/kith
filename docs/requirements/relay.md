@@ -82,3 +82,18 @@ missing table approves nobody; a failed read keeps the last list.
 
 With `KITH_RELAY_PERSIST_REVOCATIONS=true` the relay also keeps accepted revocation notices
 (REQ-INV-004) in that store and reloads them, verified again, at start (ADR 0014).
+
+### REQ-RELAY-009: Open mode with persistent state
+
+- **Priority:** should | **Phase:** 8 | **Status:** implemented | **Verify:** test | **Source:** operator request (2026-11-08)
+
+An operator must be able to serve every organization while still using the Azure
+Table state for revocation notices (REQ-RELAY-008 couples them otherwise: with the
+Azure state an empty list approves nobody). Applications that create an org per
+room cannot approve each org by hand.
+
+`KITH_RELAY_OPEN_ORGS=true` switches the approved-org list off: the relay never reads
+the `allowedorgs` table (it need not exist), and `announce` is not refused with
+`org-not-allowed`. Revocation persistence (`KITH_RELAY_PERSIST_REVOCATIONS`, ADR 0014)
+is unchanged. The relay refuses to start if `KITH_RELAY_ALLOWED_ORGS` is also set, and
+logs a warning when open mode is on. The abuse limits (REQ-RELAY-006) still apply.
