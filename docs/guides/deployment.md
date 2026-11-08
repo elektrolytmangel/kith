@@ -8,7 +8,7 @@ release binaries (Linux, amd64 and arm64). Nothing is published anywhere else.
 | `ghcr.io/elektrolytmangel/kith-relay` | `kith-relay`, port 8080 (plain WebSocket) | none: RAM only |
 | `ghcr.io/elektrolytmangel/kith-always-on` | `kith-always-on --data /data` | the volume `/data` |
 
-Tags are the release version without the `v` (`0.2.0-beta.1`). `latest` exists
+Tags are the release version without the `v` (`0.2.0-beta.2`). `latest` exists
 only for non-pre-releases. Images exist from `0.1.0-alpha.3` on.
 
 ## Relay

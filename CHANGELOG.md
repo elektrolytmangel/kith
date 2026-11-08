@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.2.0-beta.2] - 2026-11-08
+
+Compatible with beta.1: no format or protocol change. Upgrade the relay first, then the devices (or only the relay).
+
 ### Added
 - **Open mode for the relay** (`KITH_RELAY_OPEN_ORGS=true`, REQ-RELAY-009, Bicep `openOrgs`): serves every org while keeping the Azure
   state for revocation persistence. Until now the Azure state made an empty approved-org list refuse everyone. No format or protocol change.

@@ -190,7 +190,7 @@ is public, so no token is needed (for private projects started from this templat
 ## Web
 
 ```sh
-npm install https://github.com/elektrolytmangel/kith/releases/download/v0.2.0-beta.1/kith-wasm-0.2.0-beta.1.tgz
+npm install https://github.com/elektrolytmangel/kith/releases/download/v0.2.0-beta.2/kith-wasm-0.2.0-beta.2.tgz
 ```
 
 ```ts
@@ -304,9 +304,9 @@ identity with `try KithClient.withSecretKey(secretKey: data)`.
 > on real devices (REQ-SYNC-004). Only the web package is supported for production.
 
 ```kotlin
-// Copy kith-android-0.2.0-beta.1.aar from the release into app/libs/.
+// Copy kith-android-0.2.0-beta.2.aar from the release into app/libs/.
 dependencies {
-    implementation(files("libs/kith-android-0.2.0-beta.1.aar"))
+    implementation(files("libs/kith-android-0.2.0-beta.2.aar"))
     // A local AAR doesn't carry its dependencies; the generated code needs JNA.
     implementation("net.java.dev.jna:jna:5.15.0@aar")
 }
@@ -352,7 +352,7 @@ Keystore key) and restore with `KithClient.withSecretKey(bytes)`.
 
 ```toml
 [dependencies]
-kith-client = { git = "https://github.com/elektrolytmangel/kith", tag = "v0.2.0-beta.1" }
+kith-client = { git = "https://github.com/elektrolytmangel/kith", tag = "v0.2.0-beta.2" }
 ```
 
 ```rust
@@ -414,7 +414,7 @@ Binaries are release assets (`kith-always-on-<target>.tar.gz`); in Rust, use the
 
 ```sh
 # Binary from the release (Linux/macOS/Windows, x86_64 and arm64)
-curl -fsSL https://github.com/elektrolytmangel/kith/releases/download/v0.2.0-beta.1/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -fsSL https://github.com/elektrolytmangel/kith/releases/download/v0.2.0-beta.2/kith-relay-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 ./kith-relay
 
 # or as a container from GitHub Packages (docs/guides/deployment.md), or built from source
