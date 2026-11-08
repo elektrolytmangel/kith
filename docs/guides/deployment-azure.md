@@ -6,10 +6,10 @@
 | --- | --- |
 | Container App `<name>-relay` | the relay image, **exactly one replica** (it is an in-memory router; two would split the devices), external HTTPS ingress, health probes |
 | Container Apps environment + Log Analytics | logs (`ContainerAppConsoleLogs_CL`) |
-| Storage account + table `allowedorgs` | the list of approved organizations |
+| Storage account + tables | `revocations` (notices of removed devices) and, only with `openOrgs = false`, `allowedorgs` (approved organizations) |
 | User-assigned managed identity | reads and writes the relay's tables (*Storage Table Data Contributor* on each table, not on the account). The account has shared-key access disabled: no key exists |
 
-The relay still stores nothing about your users' data. Only the approved-org list is durable.
+The relay still stores nothing about your users' data. Only revocation notices and, if you turn it on, the approved-org list are durable.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ The relay still stores nothing about your users' data. Only the approved-org lis
 - The relay image. The Linux images from a release include the Azure Table support:
   `ghcr.io/<owner>/kith-relay:<version>`. A new ghcr.io package is private until you make it public (package
   settings on GitHub); otherwise pass `registryServer`, `registryUsername`, `registryPassword`.
-- The org IDs to approve (each org's root public key in hex; your app shows it as the org ID).
+- Only with `openOrgs = false`: the org IDs to approve (each org's root public key in hex; your app shows it as the org ID).
 
 ## Deploy
 
@@ -36,16 +36,16 @@ Check it: `curl https://<fqdn>/healthz` prints `ok`.
 Parameters worth knowing: `image`, `allowedIpRanges` (CIDRs; empty allows everyone, which devices need),
 `relaySettings` (any `KITH_RELAY_*` limit, see [integration.md](integration.md#relay)), `allowlistRefreshSecs`.
 
-## Serve every organization (open mode)
+## Serve every organization (open mode, the default)
 
-If your app creates an org per room, approving each org by hand does not work. Deploy with `param openOrgs = true`
+If your app creates an org per room, approving each org by hand does not work, so `openOrgs` is `true` by default
 (sets `KITH_RELAY_OPEN_ORGS=true`): the `allowedorgs` table is neither created nor read, and any org may announce. Revocation
 persistence stays on. Anyone who can reach the relay can then use it, so rely on the abuse limits (`relaySettings`) and
-`allowedIpRanges` where you can. Switching an existing deployment to open mode leaves its old `allowedorgs` table in place (unused).
+`allowedIpRanges` where you can. Redeploying an older deployment with the new default switches it to open mode and leaves its old `allowedorgs` table in place (unused).
 
 ## Approve an organization
 
-(Skip this section in open mode.)
+Only with `param openOrgs = false` (the default is open mode, see above).
 
 The table starts **empty, and an empty table approves nobody**: the relay refuses every `announce` until you add
 an org. One row per org: `PartitionKey` = `org`, `RowKey` = the org ID.

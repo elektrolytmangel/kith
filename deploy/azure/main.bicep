@@ -21,8 +21,8 @@ param registryPassword string = ''
 @description('Table that holds the approved org IDs (one row per org: PartitionKey "org", RowKey = org ID).')
 param allowedOrgsTable string = 'allowedorgs'
 
-@description('Serve every organization: the approved-org table is not created or read. For apps that create an org per room (REQ-RELAY-009). The abuse limits still apply.')
-param openOrgs bool = false
+@description('Serve every organization (default): the approved-org table is not created or read. Set false to approve orgs one by one. For apps that create an org per room (REQ-RELAY-009). The abuse limits still apply.')
+param openOrgs bool = true
 
 @description('Keep revocation notices in a table so a relay restart does not forget them (ADR 0014). Set false for RAM only.')
 param persistRevocations bool = true
