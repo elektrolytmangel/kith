@@ -159,7 +159,8 @@ impl KithClient {
     ///
     /// The connection reconnects by itself (1 s, doubling to 30 s, at once when the
     /// browser comes back online) until `disconnect`. Changes made while offline are
-    /// stored; after `connected` and a `presence` event call `catchUp` to exchange them.
+    /// stored; after every (re)connect one catch-up with an online peer runs by itself (as soon
+    /// as a `presence` event shows another device); call `catchUp` for further rounds.
     ///
     /// Every body is encrypted for `org`'s MLS group: the device must be a member
     /// (`createOrg` on the first device; others join with an invite: `createInvite`,

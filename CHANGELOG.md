@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- **Automatic catch-up after a (re)connect** (web, REQ-PLAT-007): once a `presence` event shows another device online,
+  the client runs one `catchUp` by itself. Calling `catchUp()` yourself still works; no format or protocol change.
+
 ## [0.1.0-alpha.6] - 2026-11-06
 
 History compaction. **Compatible with 0.1.0-alpha.5**; see *Upgrading*.

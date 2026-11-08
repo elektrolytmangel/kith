@@ -91,7 +91,7 @@ Work top to bottom; check items off here as they land.
 
 Prod = web only, hosted by the user with `KITH_RELAY_PERSIST_REVOCATIONS=true` (Azure Table) and the always-on client.
 
-1. [ ] **Automatic `catchUp` after a reconnect** (web `connect`, also `kith-net`/always-on if not already periodic); `reconnecting` / `connected` events stay.
+1. [~] **Automatic `catchUp` after a reconnect** (PR `feat/auto-catch-up`: web `connect` runs one catch-up per connection on the first `presence` with another device; always-on already catches up on every connect + periodically; Swift/Kotlin stay manual; browser test no longer calls `catchUp`).
 2. [ ] **Migrations and the freeze** (ADR 0012 rule 5): migration framework for SQLite (`user_version`) and IndexedDB, fixture databases
    from the freeze version kept in tests, relay accepts the previous `PROTOCOL_VERSION`, backups restore across versions, changelog
    section. Alpha data does **not** migrate (alphas may break).
@@ -444,3 +444,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-06**: Dependabot #65, #66, #67, #70 merged (all green); #68 (chacha20poly1305 0.11) failed clippy on deprecated `XNonce::from_slice`, fixed in `sealed.rs` (`try_from`) and merged. Note: #66 (sbom-action) only runs in `release.yml`, so the next release dry run is its real test.
 - **2026-11-06**: #80 merged (C). Release PR `release/0.1.0-alpha.6` (version bump, changelog).
 - **2026-11-08**: User asked what is missing for prod. Answered from PLAN; user's decisions recorded (*Road to production*). Next: auto `catchUp` after reconnect.
+- **2026-11-08**: User: alpha data may break, no alpha.6 migration. Automatic catch-up after reconnect in the web client (PR `feat/auto-catch-up`). Next: migrations + freeze.

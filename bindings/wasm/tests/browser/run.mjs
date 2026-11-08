@@ -260,8 +260,7 @@ await test("two browsers sync through the relay and reconnect after a relay rest
   await afterRestart(a, markA, "connected");
   await afterRestart(b, markB, "connected");
   await afterRestart(b, markB, "presence", 2);
-  // After reconnecting, catch-up exchanges what was missed.
-  await b.evaluate(() => window.t.c.catchUp());
+  // After reconnecting, the automatic catch-up exchanges what was missed (no catchUp call).
   await b.waitForFunction((o) => window.t.c.historyLength(o) === 2, obj, { timeout: 20000 });
   assert.deepEqual(a.problems.filter((p) => !/WebSocket|ERR_CONNECTION/.test(p)), []);
   await ctxA.close();

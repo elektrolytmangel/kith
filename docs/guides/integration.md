@@ -244,8 +244,8 @@ client.catchUp(); // after connecting, once a "presence" event shows another dev
 ```
 
 The connection reconnects by itself and reports `connected`, `closed` and
-`reconnecting` events; call `catchUp()` again after a reconnect once a `presence` event shows
-another device.
+`reconnecting` events. After each (re)connect the web client runs one catch-up by itself once a
+`presence` event shows another device (Swift and Kotlin: call `catchUp` yourself).
 
 Live updates only reach devices that are online at the same time. Node 22+ has a global
 `WebSocket`; older Node needs a polyfill.

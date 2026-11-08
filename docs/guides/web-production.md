@@ -42,8 +42,9 @@ immediately when the browser fires `online`, until you call `disconnect()`.
 | `error` | socket error (a `closed` follows) |
 
 Changes made while offline are stored locally and not queued on the socket. After
-`connected`, wait for a `presence` event with another device online and call
-`catchUp()` (the example does this): both sides exchange what they missed. Background
+`connected`, the client waits for a `presence` event with another device online and runs
+one catch-up by itself: both sides exchange what they missed. `catchUp()` stays available
+for further rounds. Background
 tabs throttle timers, so a reconnect can take up to a minute there.
 
 The relay does not check the `Origin` header: any page can open a socket, but it still
