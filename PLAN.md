@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-08 (app-approval proposal added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
+- **Last updated:** 2026-11-08 (app-approval proposal (quotas) added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
 - **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
   `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
   Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
@@ -223,15 +223,12 @@ invitations, #35-#37 policy, scopes, subgroups, #38-#39 always-on client and fil
 
 - *(none open.)* Compaction questions answered 2026-11-06, see *Decisions*.
 
-- **Approve applications, not orgs (asked 2026-11-08; proposal, not decided).** Use case: a scrum-poker app where every room is its own
-  org, so approving org IDs by hand does not scale. Today the relay only knows org IDs (`KITH_RELAY_ALLOWED_ORGS` / `allowedorgs`).
-  Proposal: an **application attestation**. The operator holds an app key; the relay allowlists *app public keys*. An org is served if its
-  root key carries an attestation `app_key signs (org_id, expiry)`, sent with the membership chain on `announce` (stateless check, like the
-  certificate chain). Who signs, since the client cannot hold the app key (a web bundle is public)? (a) a small signer endpoint of the app
-  (e.g. an Azure Function; the relay itself needs no Functions) that issues attestations with its own rate limit/captcha; (b) no backend:
-  the app key ships in the client = anyone can mint orgs, so combine with (c). (c) per-app quotas in the relay (max orgs and devices per app
-  key, a small deny list for abusive orgs/apps). Cheaper fallback: an `Origin` allowlist for browser clients (soft, spoofable by non-browsers).
-  Questions: signer endpoint OK (a), or no backend (b+c)? Keep per-org approval as well? Next if agreed: ADR + REQ-RELAY-009.
+- **Approve applications, not orgs (asked 2026-11-08; proposal, not decided).** Use case: a scrum-poker app, no login, every room = one
+  org; approving org IDs by hand does not scale. An app-key attestation was considered and **dropped**: without a login, any signer endpoint is
+  an open mint, so it authorizes nobody. Proposal instead: **open-with-quotas mode** in the relay (keeps `KITH_RELAY_ALLOWED_ORGS` for private
+  relays): cap on active orgs, per-source-IP rate of new orgs (`X-Forwarded-For` behind the ingress), device cap per org, idle orgs forgotten
+  (RAM only), optional deny list. Separate applications = separate relay deployments. Real gating would need identity (login, captcha/PoW,
+  invites from members): not for this use case. Question: go with quotas? Next if agreed: ADR + REQ-RELAY-009.
 
 - **Azure plan:** all six steps done. Never deployed to real Azure (managed identity path, Bicep): the first deploy is the test.
   Step 2 used the defaults: allowlist in an Azure Table (live reload every 30 s), Table over Blob.
@@ -459,4 +456,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-08**: #85 merged (freeze mechanics). Release PR `release/0.2.0-beta.1` (version bump, changelog). Next: user tags; real-app test.
 - **2026-11-08**: `v0.2.0-beta.1` released (release run green). Azure template default image bumped from `0.1.0-alpha.3` to `0.2.0-beta.1` (PR `chore/azure-beta1`). An existing deployment must be redeployed (`az deployment group create`, or `az containerapp update --image`); I did not touch any real Azure resources.
 - **2026-11-08**: User: enable all relay features in the Azure template. `persistRevocations` now defaults to `true` (allowlist was already on; the other relay vars are limits with defaults). PR `chore/azure-persist`. Existing deployments get the `revocations` table + role on redeploy.
-- **2026-11-08**: User asked for approving applications instead of single orgs (scrum-poker rooms = one org each). Proposal written under *Open questions* (app attestation + quotas); awaiting the user's choice. PR `docs/plan-app-approval`.
+- **2026-11-08**: User asked for approving applications instead of single orgs (scrum-poker rooms = one org each). App attestation dropped (no login = open mint); proposal is relay quotas, under *Open questions*; awaiting the user's choice. PR `docs/plan-app-approval`.
