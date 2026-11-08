@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-08 (Azure template: `openOrgs` now defaults to true, PR `chore/azure-open-default`; release PR `release/0.2.0-beta.2`: the first beta.2 tag failed because `Cargo.toml` was still beta.1; the user must delete and re-create the tag on the merge commit; quotas recorded as a todo; `v0.2.0-beta.2` tagged by the user; relay open mode `KITH_RELAY_OPEN_ORGS` + Bicep `openOrgs` in PR `feat/open-mode`; app-approval proposal (quotas) added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
+- **Last updated:** 2026-11-08 (CI path allowlist, PR `ci/path-allowlist`; Azure template: `openOrgs` now defaults to true, PR `chore/azure-open-default`; release PR `release/0.2.0-beta.2`: the first beta.2 tag failed because `Cargo.toml` was still beta.1; the user must delete and re-create the tag on the merge commit; quotas recorded as a todo; `v0.2.0-beta.2` tagged by the user; relay open mode `KITH_RELAY_OPEN_ORGS` + Bicep `openOrgs` in PR `feat/open-mode`; app-approval proposal (quotas) added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
 - **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
   `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
   Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
@@ -294,7 +294,7 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 | History compaction (REQ-DATA-005) is a later todo; the limit is documented, not fixed | User decision (2026-11-06) | Next steps 6 |
 | Compaction (REQ-DATA-005, ADR 0026): only admins create snapshots; retention is set per type in the policy (default keep everything); no type needs full history yet; built before the first beta; first step covers documents, raw objects and file chunks | User decision (2026-11-06) | ADR 0026 |
 | Push wake-ups (REQ-RELAY-007) stay unplanned: only background apps need them | User decision (2026-11-04) | Road to a release |
-| CI does not run for docs-only changes (Markdown, `docs/**`, PLAN, requirements); such PRs have no checks and are merged directly. requirement edits run only `requirements.yml` | User request (2026-11-04) | `ci.yml` |
+| CI runs only when build inputs change (allowlist in `ci.yml`: Cargo files, `crates/ apps/ bindings/ examples/ scripts/`, ci.yml itself). Docs, `deploy/**` (bicep.yml lints), other workflows, dependabot, templates, `docker/` start no CI; such PRs have no checks and are merged directly. Requirement edits run only `requirements.yml`. A new top-level code dir must be added to the list | User request (2026-11-04, widened 2026-11-08: "CI must not run for YAML/deploy edits, shipping should be fast") | `ci.yml` |
 | Distribution: nothing outside GitHub (no npm/Maven/crates.io). Relay and always-on client ship as containers on GitHub Packages (ghcr.io), built from the release binaries | User decision (2026-11-04), replaces the package-registry idea | Road to a release, step 5 |
 | Users with several devices (REQ-ID-002): any member may admit its own extra device (same user, same role, never admin this way); admitting others stays admin-only. The member itself signs the device's relay certificate (option A) | User choice (2026-11-04) | ADR 0011 |
 | Phase 8 scope: relay abuse limits first, then encrypted backups; compaction and push wake-ups later | User choice (2026-11-04) | Phase 8 |
@@ -364,7 +364,7 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 
 ## Working agreements
 
-- Branch from `main`, open a PR, wait for CI (docs-only PRs have none, merge directly). **Once every check is green the agent merges its own PR**
+- Branch from `main`, open a PR, wait for CI (PRs that touch no build input have none, merge directly). **Once every check is green the agent merges its own PR**
   (`gh pr merge --merge --delete-branch`; decided 2026-11-04). Never merge on red or pending checks, never
   force-push. Tags and releases stay the user's.
 - `gh` is logged in as `finocchio-42` (push access, not admin).
@@ -462,3 +462,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-08**: #90 merged (open mode). User tagged `v0.2.0-beta.2`; quotas for open mode recorded as a todo, not built. Azure template default image is still `0.2.0-beta.1` (pinned tag, no auto-update).
 - **2026-11-08**: `v0.2.0-beta.2` tag failed the release check (tag did not match `Cargo.toml` 0.2.0-beta.1: the tag was set before the version bump). Release PR `release/0.2.0-beta.2` (version bump, changelog, Azure default image). The user deletes the bad tag (`git push origin :refs/tags/v0.2.0-beta.2`) and re-tags the merge commit. Pitfall: bump the version in a release PR *before* tagging.
 - **2026-11-08**: User: open mode is the Azure template default (`openOrgs = true`; Bicep + param example + guide + changelog, PR `chore/azure-open-default`). Redeploying an existing deployment makes it open. The user re-tags `v0.2.0-beta.2` after this merge.
+- **2026-11-08**: #93 merged (Azure open mode default). User: CI must not run for YAML/deploy edits. `ci.yml` now has a path allowlist instead of `paths-ignore` (PR `ci/path-allowlist`); `requirements.yml` also runs on its own file. The user still has to delete and re-create the `v0.2.0-beta.2` tag after the merge.

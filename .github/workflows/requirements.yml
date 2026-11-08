@@ -9,11 +9,13 @@ on:
     paths:
       - "docs/requirements/**"
       - "scripts/reqs.py"
+      - ".github/workflows/requirements.yml"
   push:
     branches: [main]
     paths:
       - "docs/requirements/**"
       - "scripts/reqs.py"
+      - ".github/workflows/requirements.yml"
   workflow_dispatch:
 
 concurrency:
