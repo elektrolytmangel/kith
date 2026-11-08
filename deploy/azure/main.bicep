@@ -10,7 +10,7 @@ param name string = 'kith'
 param location string = resourceGroup().location
 
 @description('Relay image. The Linux images from the release include the Azure Table state.')
-param image string = 'ghcr.io/elektrolytmangel/kith-relay:0.1.0-alpha.3'
+param image string = 'ghcr.io/elektrolytmangel/kith-relay:0.2.0-beta.1'
 
 @description('Credentials for a private registry. Leave empty for a public ghcr.io package.')
 param registryServer string = ''
