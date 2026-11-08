@@ -81,3 +81,5 @@ wire protocol or the change envelope always need an ADR and a minor bump,
 plus a `PROTOCOL_VERSION` bump when old and new clients can't talk to each other.
 Every persisted or exchanged format carries a version marker and a golden test; see
 [ADR 0012](../adr/0012-format-stability.md). Breaks are listed under *Breaking* in the changelog.
+From `0.2.0-beta.1` on, a release reads the previous release's data and the relay accepts the previous
+protocol version (migration steps and fixtures: ADR 0012, *Freeze baseline*). Upgrade the relay first.

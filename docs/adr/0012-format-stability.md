@@ -44,3 +44,28 @@ version, a rule for changing it, and a test that fails when it changes by accide
 
 - Accidental format changes fail CI instead of corrupting users' data.
 - Until the first beta, rule 4 applies.
+
+## Freeze baseline (2026-11-08)
+
+The formats in the inventory above, **as they are in `0.2.0-beta.1`**, are the baseline. alpha data is not
+migrated (alphas may break, user decision 2026-11-08). Nothing was bumped for the freeze: the markers
+(SQLite schema 3, IndexedDB 3, protocol 1, change envelope v2, backup v1, …) simply become the first
+version a later release must still read. Mechanics, all in place:
+
+- **SQLite:** `MIGRATIONS` in `kith-store/src/sqlite.rs`. Step `i` upgrades schema `3 + i` to the next in its own
+  transaction (a failing step leaves the last good version). `SCHEMA_VERSION` is derived from the list, so a
+  schema change without a step cannot compile. Every step needs a fixture database of the old schema in
+  `crates/kith-store/tests/fixtures/` (keep `schema-3.db`; `fixture_of_the_baseline_opens` is the guard).
+- **IndexedDB:** change `DB_VERSION` and branch on the old version in `onupgradeneeded` (`idb.rs`); never edit what
+  version 3 creates. Not testable in CI beyond the smoke tests: review by hand.
+- **Relay protocol:** `kith_protocol::MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION` is what a relay accepts in `Hello`.
+  A wire change bumps `PROTOCOL_VERSION` and keeps `MIN_PROTOCOL_VERSION` at the previous release's version, so
+  the relay must keep serving the old behaviour for that version. Clients speak only the newest version, so
+  the relay is upgraded first.
+- **Backups:** `crates/kith-client/tests/fixtures/backup-v1.bin` must keep restoring
+  (`a_backup_from_the_baseline_still_restores`). The Argon2 cost is not stored in the file: changing it needs a
+  new magic (`kith-backup/v2`), with v1 still readable.
+- **Golden tests** for the change envelope and store codec stay as they are.
+
+Fixtures are regenerated only for a *new* version (ignored tests `write_fixture`, `write_backup_fixture`); the old
+file stays.

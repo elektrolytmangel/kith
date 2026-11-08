@@ -50,7 +50,9 @@ use axum::{
 };
 use kith_core::membership::{CertChain, Revocation};
 use kith_core::{DeviceId, verify_signature};
-use kith_protocol::{Frame, PROTOCOL_VERSION, auth_message, decode, encode};
+use kith_protocol::{
+    Frame, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, auth_message, decode, encode, supports_version,
+};
 use kith_relay::{Role, Route, RoutingTable};
 use tokio::sync::{Notify, mpsc};
 
@@ -739,10 +741,13 @@ fn handle(checked: Checked, session: &mut Session, conn_id: u64, tx: &Tx, state:
     // Handshake first: nothing else is accepted before the device is authenticated.
     match (&*session, checked) {
         (Session::New, Checked::Frame(Frame::Hello { version, device })) => {
-            if version != PROTOCOL_VERSION {
+            if !supports_version(version) {
                 send(
                     tx,
-                    error("version", format!("relay speaks v{PROTOCOL_VERSION}")),
+                    error(
+                        "version",
+                        format!("relay speaks v{MIN_PROTOCOL_VERSION} to v{PROTOCOL_VERSION}"),
+                    ),
                 );
                 return Flow::Close;
             }
@@ -1578,6 +1583,40 @@ mod tests {
         )
         .await;
         expect_error(next_frame(&mut ws).await, "bad-device");
+    }
+
+    /// req: REQ-RELAY-004
+    #[tokio::test]
+    async fn protocol_versions_outside_the_supported_range_are_refused() {
+        let url = start(Duration::from_secs(10)).await;
+        for version in [MIN_PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1] {
+            let mut ws = connect(&url).await;
+            let key = DeviceKey::generate();
+            send_frame(
+                &mut ws,
+                &Frame::Hello {
+                    version,
+                    device: key.device_id().to_hex(),
+                },
+            )
+            .await;
+            expect_error(next_frame(&mut ws).await, "version");
+        }
+        // The oldest supported version still gets its challenge.
+        let mut ws = connect(&url).await;
+        let key = DeviceKey::generate();
+        send_frame(
+            &mut ws,
+            &Frame::Hello {
+                version: MIN_PROTOCOL_VERSION,
+                device: key.device_id().to_hex(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            next_frame(&mut ws).await,
+            Some(Frame::Challenge { .. })
+        ));
     }
 
     /// req: REQ-RELAY-004

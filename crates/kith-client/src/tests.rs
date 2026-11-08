@@ -1923,6 +1923,42 @@ fn a_misbehaving_member_cannot_fill_our_storage() {
 
 // ---- backups (phase 8b) ----
 
+const BACKUP_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/backup-v1.bin");
+
+/// A backup written by the first beta's code must restore in every later release (ADR 0012).
+/// The Argon2 cost is not stored in the file: changing it needs a new backup magic.
+///
+/// req: REQ-DATA-006
+#[test]
+fn a_backup_from_the_baseline_still_restores() {
+    let backup = std::fs::read(BACKUP_FIXTURE).unwrap();
+    let c = Client::import_backup(&backup, "fixture passphrase", MemoryStore::new()).unwrap();
+    assert_eq!(
+        c.device_id(),
+        DeviceKey::from_secret_bytes(&[5; 32]).device_id()
+    );
+    let ids = c.store().all_ids().unwrap();
+    assert_eq!(ids.len(), 1);
+    let change = c.store().get(&ids[0]).unwrap().unwrap();
+    change.verify().unwrap();
+    assert_eq!(change.body.payload, b"baseline note");
+}
+
+/// Regenerates the fixture (only for a new backup version; keep the old file):
+/// `cargo test -p kith-client -- --ignored write_backup_fixture`.
+#[test]
+#[ignore]
+fn write_backup_fixture() {
+    let mut c = Client::new(DeviceKey::from_secret_bytes(&[5; 32]), MemoryStore::new()).unwrap();
+    c.create(ObjectType::new("note"), b"baseline note".to_vec())
+        .unwrap();
+    std::fs::write(
+        BACKUP_FIXTURE,
+        c.export_backup("fixture passphrase").unwrap(),
+    )
+    .unwrap();
+}
+
 /// req: REQ-DATA-006
 #[test]
 fn a_device_restored_from_a_backup_rejoins_and_catches_up() {
