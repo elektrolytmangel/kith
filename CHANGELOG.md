@@ -4,10 +4,27 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.2.0-beta.3] - 2026-11-09
+
+Compatible with beta.2: no format or protocol change. Upgrade the relay first, then the devices (or only the relay).
+
 ### Added
 - **Multi-use invites** (REQ-INV-005): `createMultiInvite(org, relay, ttlSeconds, maxUses)` (Rust `create_multi_invite`) makes one link
   that up to `maxUses` (1 to 1000) devices can use. The admin still admits or rejects each claim; every admission uses one,
   and `parseInvite` reports `uses`. Additive: one-time links are unchanged (no `uses` in the link), the admin's saved state is read by older versions, and an older client ignores `uses`.
+
+### Fixed
+- **Mobile bindings (Swift/Kotlin):** every call now takes the client lock through the poison-tolerant helper. Eight methods
+  still used a plain `lock().unwrap()`, so one panic in any call would have made every later call panic across the FFI boundary.
+
+### Internal
+- No behaviour change, covered by new tests written first: `kith-client` and the relay server are split into modules by concern
+  (the largest files were 3,100 and 2,700 lines), the two long message handlers have one method per message kind, and tests live
+  in sibling `tests.rs` files.
+- Parsers return typed errors (`ParseError`, `OrgStateError`; the wording of `Rejected` reasons is unchanged) and avoid
+  `try_into().expect(..)`. `clippy::unwrap_used` / `expect_used` are CI warnings in library code.
+- Fuzz targets (`fuzz/`, cargo-fuzz) for the relay body parsers, saved org state, policy ops, certificates and invite links,
+  the change codec and compaction snapshots run weekly in CI. CI also fails when a production file passes 1,100 lines.
 
 ## [0.2.0-beta.2] - 2026-11-08
 
