@@ -529,7 +529,9 @@ impl<S: Store, K: Signer> Client<S, K> {
             None => vec![],
         };
         let orgs = match open(ORGS_KEY)? {
-            Some(bytes) => org::Orgs::from_bytes(&bytes).map_err(GroupError::Corrupt)?,
+            Some(bytes) => {
+                org::Orgs::from_bytes(&bytes).map_err(|e| GroupError::Corrupt(e.to_string()))?
+            }
             None => org::Orgs::default(),
         };
         Self {

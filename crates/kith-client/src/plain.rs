@@ -89,7 +89,7 @@ impl<S: Store, K: Signer> Client<S, K> {
         use sync::Message;
         let msg = match sync::parse(plaintext) {
             Ok(m) => m,
-            Err(e) => return Ok(Handled::rejected(&org, &from, e)),
+            Err(e) => return Ok(Handled::rejected(&org, &from, e.to_string())),
         };
         match msg {
             Message::Change(change) => self.on_change(org, &scope, from, change),

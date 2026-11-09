@@ -219,8 +219,62 @@ pub(crate) fn commits_bodies(
     bodies
 }
 
-pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
-    let (&kind, rest) = body.split_first().ok_or("empty body")?;
+/// Why a relay body could not be parsed. The wording is user-visible (it becomes
+/// the `reason` of [`crate::Event::Rejected`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ParseError {
+    /// No bytes at all.
+    #[error("empty body")]
+    EmptyBody,
+    /// A fixed-size field is cut short.
+    #[error("truncated")]
+    Truncated,
+    /// Bytes after the end of a message that has a fixed layout.
+    #[error("trailing bytes")]
+    TrailingBytes,
+    /// A message kind that needs a payload has none.
+    #[error("empty payload")]
+    EmptyPayload,
+    /// A Welcome without the MLS message.
+    #[error("empty welcome")]
+    EmptyWelcome,
+    /// A KeyPackage message without a KeyPackage.
+    #[error("empty key package")]
+    EmptyKeyPackage,
+    /// A group key of length zero.
+    #[error("empty group")]
+    EmptyGroup,
+    /// A certificate chain that is not UTF-8.
+    #[error("certificate chain is not text")]
+    ChainNotText,
+    /// A group key that is not UTF-8.
+    #[error("group is not text")]
+    GroupNotText,
+    /// Revocation notices that are not UTF-8.
+    #[error("notices are not text")]
+    NoticesNotText,
+    /// More notices than one message may carry.
+    #[error("too many notices")]
+    TooManyNotices,
+    /// A count field larger than the data that follows (what is counted).
+    #[error("{0} count exceeds data")]
+    CountExceedsData(&'static str),
+    /// A pre-MLS plaintext body (ADR 0004).
+    #[error("unencrypted body refused")]
+    Unencrypted,
+    /// An outer kind byte nobody sends.
+    #[error("unknown body kind {0}")]
+    UnknownBodyKind(u8),
+    /// An inner kind byte nobody sends.
+    #[error("unknown message kind {0}")]
+    UnknownMessageKind(u8),
+    /// A change that does not decode (the codec's message).
+    #[error("{0}")]
+    Change(String),
+}
+
+pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, ParseError> {
+    let (&kind, rest) = body.split_first().ok_or(ParseError::EmptyBody)?;
     let mut r = Reader(rest);
     let msg = match kind {
         OUTER_APP => Outer::App(rest.to_vec()),
@@ -229,18 +283,18 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
             let n = r.u32()? as usize;
             let welcome = r.take(n)?.to_vec();
             let chain = String::from_utf8(std::mem::take(&mut r.0).to_vec())
-                .map_err(|_| "certificate chain is not text")?;
+                .map_err(|_| ParseError::ChainNotText)?;
             if welcome.is_empty() {
-                return Err("empty welcome".into());
+                return Err(ParseError::EmptyWelcome);
             }
             Outer::Welcome { welcome, chain }
         }
         OUTER_CLAIM => {
-            let token = r.take(16)?.try_into().expect("16 bytes");
-            let proof = r.take(32)?.try_into().expect("32 bytes");
+            let token = r.array()?;
+            let proof = r.array()?;
             let key_package = std::mem::take(&mut r.0).to_vec();
             if key_package.is_empty() {
-                return Err("empty key package".into());
+                return Err(ParseError::EmptyKeyPackage);
             }
             Outer::Claim {
                 token,
@@ -249,11 +303,11 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
             }
         }
         OUTER_CLAIM_NONCE => {
-            let token = r.take(16)?.try_into().expect("16 bytes");
-            let nonce = r.take(32)?.try_into().expect("32 bytes");
-            let signature = r.take(64)?.try_into().expect("64 bytes");
+            let token = r.array()?;
+            let nonce = r.array()?;
+            let signature = r.array()?;
             let chain = String::from_utf8(std::mem::take(&mut r.0).to_vec())
-                .map_err(|_| "certificate chain is not text")?;
+                .map_err(|_| ParseError::ChainNotText)?;
             Outer::ClaimNonce {
                 token,
                 nonce,
@@ -261,14 +315,14 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
                 chain,
             }
         }
-        OUTER_CERT => Outer::Cert(
-            String::from_utf8(rest.to_vec()).map_err(|_| "certificate chain is not text")?,
-        ),
+        OUTER_CERT => {
+            Outer::Cert(String::from_utf8(rest.to_vec()).map_err(|_| ParseError::ChainNotText)?)
+        }
         OUTER_KEY_PACKAGE => {
             let group = r.group()?;
             let key_package = std::mem::take(&mut r.0).to_vec();
             if key_package.is_empty() {
-                return Err("empty key package".into());
+                return Err(ParseError::EmptyKeyPackage);
             }
             Outer::KeyPackage { group, key_package }
         }
@@ -276,18 +330,18 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
             let group = r.group()?;
             Outer::CommitRequest {
                 group,
-                epoch: u64::from_be_bytes(r.take(8)?.try_into().expect("8 bytes")),
+                epoch: u64::from_be_bytes(r.array::<8>()?),
             }
         }
         OUTER_COMMITS => {
             let group = r.group()?;
             let n = r.u32()? as usize;
             if n > r.0.len() / 36 {
-                return Err("commit count exceeds data".into());
+                return Err(ParseError::CountExceedsData("commit"));
             }
             let mut cs = Vec::with_capacity(n);
             for _ in 0..n {
-                let committer = DeviceId(r.take(32)?.try_into().expect("32 bytes"));
+                let committer = DeviceId(r.array()?);
                 let len = r.u32()? as usize;
                 cs.push((committer, r.take(len)?.to_vec()));
             }
@@ -295,8 +349,8 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
         }
         OUTER_READD_NEEDED => Outer::ReaddNeeded { group: r.group()? },
         // 1..=3 were plaintext data bodies before MLS (hard break, ADR 0004).
-        1..=3 => return Err("unencrypted body refused".into()),
-        other => return Err(format!("unknown body kind {other}")),
+        1..=3 => return Err(ParseError::Unencrypted),
+        other => return Err(ParseError::UnknownBodyKind(other)),
     };
     let fixed = matches!(
         kind,
@@ -309,10 +363,10 @@ pub(crate) fn parse_outer(body: &[u8]) -> Result<Outer, String> {
             | OUTER_KEY_PACKAGE
     );
     if fixed && !r.0.is_empty() {
-        return Err("trailing bytes".into());
+        return Err(ParseError::TrailingBytes);
     }
     if !fixed && rest.is_empty() {
-        return Err("empty payload".into());
+        return Err(ParseError::EmptyPayload);
     }
     Ok(msg)
 }
@@ -478,24 +532,25 @@ fn put_ids(out: &mut Vec<u8>, ids: &[ChangeId]) {
     }
 }
 
-pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
-    let (&kind, rest) = body.split_first().ok_or("empty body")?;
+pub(crate) fn parse(body: &[u8]) -> Result<Message, ParseError> {
+    let (&kind, rest) = body.split_first().ok_or(ParseError::EmptyBody)?;
     let mut r = Reader(rest);
     let msg = match kind {
-        KIND_CHANGE => {
-            Message::Change(kith_store::codec::decode_change(rest).map_err(|e| e.to_string())?)
-        }
+        KIND_CHANGE => Message::Change(
+            kith_store::codec::decode_change(rest)
+                .map_err(|e| ParseError::Change(e.to_string()))?,
+        ),
         KIND_QUERY => Message::Query(rest.to_vec()),
         KIND_CHUNK_WANT | KIND_CHUNK_MISSING => {
             let n = r.u32()? as usize;
             if n > r.0.len() / 32 {
-                return Err("chunk count exceeds data".into());
+                return Err(ParseError::CountExceedsData("chunk"));
             }
             let ids = (0..n)
-                .map(|_| Ok(r.take(32)?.try_into().expect("32 bytes")))
-                .collect::<Result<Vec<[u8; 32]>, String>>()?;
+                .map(|_| r.array())
+                .collect::<Result<Vec<[u8; 32]>, ParseError>>()?;
             if !r.0.is_empty() {
-                return Err("trailing bytes".into());
+                return Err(ParseError::TrailingBytes);
             }
             if kind == KIND_CHUNK_WANT {
                 Message::ChunkWant(ids)
@@ -506,31 +561,31 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
         KIND_CHUNKS => {
             let n = r.u32()? as usize;
             if n > r.0.len() / 36 {
-                return Err("chunk count exceeds data".into());
+                return Err(ParseError::CountExceedsData("chunk"));
             }
             let mut out = Vec::with_capacity(n);
             for _ in 0..n {
-                let id: [u8; 32] = r.take(32)?.try_into().expect("32 bytes");
+                let id: [u8; 32] = r.array()?;
                 let len = r.u32()? as usize;
                 out.push((id, r.take(len)?.to_vec()));
             }
             if !r.0.is_empty() {
-                return Err("trailing bytes".into());
+                return Err(ParseError::TrailingBytes);
             }
             Message::Chunks(out)
         }
         KIND_REPLY => Message::Reply(rest.to_vec()),
         KIND_MORE => {
             if !rest.is_empty() {
-                return Err("trailing bytes".into());
+                return Err(ParseError::TrailingBytes);
             }
             Message::More
         }
         KIND_NOTICES => {
-            let text = std::str::from_utf8(rest).map_err(|_| "notices are not text")?;
+            let text = std::str::from_utf8(rest).map_err(|_| ParseError::NoticesNotText)?;
             let lines: Vec<String> = text.lines().map(str::to_owned).collect();
             if lines.len() > MAX_NOTICES_PER_MESSAGE {
-                return Err("too many notices".into());
+                return Err(ParseError::TooManyNotices);
             }
             Message::Notices(lines)
         }
@@ -538,7 +593,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
             let want = r.ids()?;
             let n = r.u32()? as usize;
             if n > r.0.len() / 4 {
-                return Err("change count exceeds data".into());
+                return Err(ParseError::CountExceedsData("change"));
             }
             let mut changes = Vec::with_capacity(n);
             for _ in 0..n {
@@ -547,10 +602,10 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
             }
             Message::Offer { want, changes }
         }
-        other => return Err(format!("unknown message kind {other}")),
+        other => return Err(ParseError::UnknownMessageKind(other)),
     };
     if kind == KIND_OFFER && !r.0.is_empty() {
-        return Err("trailing bytes".into());
+        return Err(ParseError::TrailingBytes);
     }
     Ok(msg)
 }
@@ -558,43 +613,40 @@ pub(crate) fn parse(body: &[u8]) -> Result<Message, String> {
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], ParseError> {
         if self.0.len() < n {
-            return Err("truncated".into());
+            return Err(ParseError::Truncated);
         }
         let (head, rest) = self.0.split_at(n);
         self.0 = rest;
         Ok(head)
     }
 
-    fn u32(&mut self) -> Result<u32, String> {
-        Ok(u32::from_be_bytes(
-            self.take(4)?.try_into().expect("4 bytes"),
-        ))
+    /// The next `N` bytes as an array.
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], ParseError> {
+        <[u8; N]>::try_from(self.take(N)?).map_err(|_| ParseError::Truncated)
     }
 
-    fn group(&mut self) -> Result<String, String> {
+    fn u32(&mut self) -> Result<u32, ParseError> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+
+    fn group(&mut self) -> Result<String, ParseError> {
         let n = self.take(1)?[0] as usize;
-        let g = String::from_utf8(self.take(n)?.to_vec()).map_err(|_| "group is not text")?;
+        let g = String::from_utf8(self.take(n)?.to_vec()).map_err(|_| ParseError::GroupNotText)?;
         if g.is_empty() {
-            return Err("empty group".into());
+            return Err(ParseError::EmptyGroup);
         }
         Ok(g)
     }
 
-    fn ids(&mut self) -> Result<Vec<ChangeId>, String> {
+    fn ids(&mut self) -> Result<Vec<ChangeId>, ParseError> {
         let n = self.u32()? as usize;
         // 32 bytes per ID: a huge count fails here instead of allocating.
         if n > self.0.len() / ChangeId::LEN {
-            return Err("id count exceeds data".into());
+            return Err(ParseError::CountExceedsData("id"));
         }
-        (0..n)
-            .map(|_| {
-                Ok(ChangeId(
-                    self.take(ChangeId::LEN)?.try_into().expect("32 bytes"),
-                ))
-            })
-            .collect()
+        (0..n).map(|_| Ok(ChangeId(self.array()?))).collect()
     }
 }
 
@@ -768,5 +820,174 @@ mod tests {
     #[test]
     fn empty_offer_is_still_one_body() {
         assert_eq!(offer_bodies(&[], &[]).len(), 1);
+    }
+
+    /// The wording of a parse error is user-visible (`Event::Rejected`): keep it.
+    #[test]
+    fn parse_errors_keep_their_wording() {
+        let outer = |b: &[u8]| parse_outer(b).unwrap_err().to_string();
+        let inner = |b: &[u8]| parse(b).err().expect("an error").to_string();
+        let with = |kind: u8, rest: &[u8]| [&[kind][..], rest].concat();
+
+        assert_eq!(outer(&[]), "empty body");
+        assert_eq!(outer(&[OUTER_APP]), "empty payload");
+        assert_eq!(outer(&[1, 2]), "unencrypted body refused");
+        assert_eq!(outer(&[0x99, 1]), "unknown body kind 153");
+        assert_eq!(outer(&with(OUTER_WELCOME, &[0, 0, 0, 5, 1])), "truncated");
+        assert_eq!(outer(&with(OUTER_WELCOME, &[0, 0, 0, 0])), "empty welcome");
+        assert_eq!(
+            outer(&with(OUTER_WELCOME, &[0, 0, 0, 1, 9, 0xff])),
+            "certificate chain is not text"
+        );
+        assert_eq!(outer(&with(OUTER_CLAIM, &[0; 48])), "empty key package");
+        assert_eq!(outer(&with(OUTER_CLAIM, &[0; 47])), "truncated");
+        assert_eq!(outer(&with(OUTER_CLAIM_NONCE, &[0; 111])), "truncated");
+        assert_eq!(
+            outer(&with(OUTER_CERT, &[0xff])),
+            "certificate chain is not text"
+        );
+        assert_eq!(
+            outer(&with(OUTER_KEY_PACKAGE, &[1, b'g'])),
+            "empty key package"
+        );
+        assert_eq!(outer(&with(OUTER_KEY_PACKAGE, &[0])), "empty group");
+        assert_eq!(
+            outer(&with(OUTER_KEY_PACKAGE, &[1, 0xff, 1])),
+            "group is not text"
+        );
+        assert_eq!(
+            outer(&with(OUTER_COMMIT_REQUEST, &[1, b'g', 0, 0])),
+            "truncated"
+        );
+        assert_eq!(
+            outer(&with(OUTER_COMMITS, &[1, b'g', 0, 0, 0, 9])),
+            "commit count exceeds data"
+        );
+        assert_eq!(
+            outer(&with(OUTER_READD_NEEDED, &[1, b'g', 9])),
+            "trailing bytes"
+        );
+
+        assert_eq!(inner(&[]), "empty body");
+        assert_eq!(inner(&[99]), "unknown message kind 99");
+        assert_eq!(inner(&with(KIND_MORE, &[1])), "trailing bytes");
+        assert_eq!(inner(&with(KIND_NOTICES, &[0xff])), "notices are not text");
+        assert_eq!(
+            inner(&with(
+                KIND_NOTICES,
+                "a\n".repeat(MAX_NOTICES_PER_MESSAGE + 1).as_bytes()
+            )),
+            "too many notices"
+        );
+        assert_eq!(
+            inner(&with(KIND_CHUNK_WANT, &[0, 0, 0, 9])),
+            "chunk count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_CHUNK_WANT, &[0, 0, 0, 0, 1])),
+            "trailing bytes"
+        );
+        assert_eq!(inner(&with(KIND_CHUNK_WANT, &[0, 0])), "truncated");
+        assert_eq!(
+            inner(&with(KIND_CHUNKS, &[0, 0, 0, 9])),
+            "chunk count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_CHUNKS, &[0, 0, 0, 0, 1])),
+            "trailing bytes"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 9])),
+            "id count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 0, 0, 0, 0, 9])),
+            "change count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 0, 0, 0, 0, 0, 7])),
+            "trailing bytes"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1])),
+            "truncated"
+        );
+        assert!(!inner(&with(KIND_CHANGE, &[1, 2])).is_empty());
+    }
+
+    /// Every prefix and every single-byte corruption of every message kind is
+    /// either parsed or refused, never a panic (the parsers read network input).
+    #[test]
+    fn parsers_survive_truncated_and_corrupted_bodies() {
+        let ids = vec![ChangeId([1; 32]), ChangeId([2; 32])];
+        let mut outers = vec![
+            outer_body(&Outer::App(vec![1, 2])),
+            outer_body(&Outer::Welcome {
+                welcome: vec![4, 5],
+                chain: "ab".into(),
+            }),
+            outer_body(&Outer::Claim {
+                token: [1; 16],
+                proof: [2; 32],
+                key_package: vec![3],
+            }),
+            outer_body(&Outer::ClaimNonce {
+                token: [1; 16],
+                nonce: [2; 32],
+                signature: [3; 64],
+                chain: "ef".into(),
+            }),
+            outer_body(&Outer::Cert("cd".into())),
+            outer_body(&Outer::KeyPackage {
+                group: "g".into(),
+                key_package: vec![5],
+            }),
+            outer_body(&Outer::CommitRequest {
+                group: "g/s".into(),
+                epoch: 7,
+            }),
+            outer_body(&Outer::Commits {
+                group: "g".into(),
+                commits: vec![
+                    (DeviceId([7; 32]), vec![1]),
+                    (DeviceId([8; 32]), vec![2, 3]),
+                ],
+            }),
+            outer_body(&Outer::ReaddNeeded { group: "g".into() }),
+        ];
+        outers.shrink_to_fit();
+        let mut inners = vec![
+            query_body(b"q"),
+            reply_body(b"r"),
+            more_body(),
+            chunk_missing_body(&[[1; 32], [2; 32]]),
+        ];
+        inners.extend(offer_bodies(&ids, &[]));
+        inners.extend(chunk_want_bodies(&[[1; 32]]));
+        inners.extend(chunks_bodies(&[([3; 32], vec![9; 40])]));
+        inners.extend(notices_bodies(&["aa".into(), "bb".into()]));
+        let mutations = |body: &[u8]| {
+            let mut all: Vec<Vec<u8>> = (0..=body.len()).map(|n| body[..n].to_vec()).collect();
+            for i in 0..body.len() {
+                for flip in [0xffu8, 0x01, 0x80] {
+                    let mut b = body.to_vec();
+                    b[i] ^= flip;
+                    all.push(b);
+                }
+            }
+            all
+        };
+        for body in &outers {
+            assert!(parse_outer(body).is_ok(), "the unmodified body parses");
+            for m in mutations(body) {
+                let _ = parse_outer(&m);
+            }
+        }
+        for body in &inners {
+            assert!(parse(body).is_ok(), "the unmodified body parses");
+            for m in mutations(body) {
+                let _ = parse(&m);
+            }
+        }
     }
 }

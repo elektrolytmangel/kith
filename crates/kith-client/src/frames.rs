@@ -52,7 +52,7 @@ impl<S: Store, K: Signer> Client<S, K> {
     ) -> Result<Handled, ClientError> {
         let outer = match sync::parse_outer(body) {
             Ok(m) => m,
-            Err(e) => return Ok(Handled::rejected(&org, &from, e)),
+            Err(e) => return Ok(Handled::rejected(&org, &from, e.to_string())),
         };
         if claim != matches!(outer, Outer::Claim { .. }) {
             return Ok(Handled::rejected(
