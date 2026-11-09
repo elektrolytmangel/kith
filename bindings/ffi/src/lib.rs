@@ -187,6 +187,25 @@ impl KithClient {
             .create_own_device_invite(&org, &relay, ttl_seconds.saturating_mul(1000))?)
     }
 
+    /// A link that up to `max_uses` devices (1 to 1000) can use, valid for
+    /// `ttl_seconds`; for example one link in a group chat. Admins only. Every claim
+    /// still arrives as `InviteClaimed` and the admin decides with `acceptClaim`
+    /// (or `rejectClaim`); each admission uses one of `max_uses`.
+    pub fn create_multi_invite(
+        &self,
+        org: String,
+        relay: String,
+        ttl_seconds: u64,
+        max_uses: u32,
+    ) -> Result<String, KithError> {
+        Ok(self.lock().create_multi_invite(
+            &org,
+            &relay,
+            ttl_seconds.saturating_mul(1000),
+            max_uses,
+        )?)
+    }
+
     /// True if this device is a member of `org`'s group (it can send and read).
     pub fn is_member(&self, org: String) -> bool {
         self.lock().is_member(&org)
@@ -501,6 +520,8 @@ pub struct InviteInfo {
     pub relay: String,
     /// Expiry, milliseconds since the Unix epoch.
     pub expires_ms: u64,
+    /// How many devices the link was made for (1 for a one-time invite).
+    pub uses: u32,
 }
 
 /// Read an invite link without claiming it, to know which relay and org to connect to.
@@ -512,6 +533,7 @@ pub fn parse_invite(link: String) -> Result<InviteInfo, KithError> {
         org: inv.org.to_hex(),
         relay: inv.relay,
         expires_ms: inv.expires_ms,
+        uses: inv.uses,
     })
 }
 

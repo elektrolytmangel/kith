@@ -120,6 +120,17 @@ or read, and devices join by invitation ([ADR 0005](../adr/0005-org-root-key-cer
    changes reach it once the relay has that announce (its `presence` lists it);
    changes made in between arrive with the history download.
 
+**One link for several people.** An admin can call
+`createMultiInvite(org, relayUrl, ttlSeconds, maxUses)` (1 to 1000 uses; Rust
+`create_multi_invite`, Swift/Kotlin `createMultiInvite`) and share the link with a group.
+The flow is the same, with these differences: every device that claims gets its own
+`inviteClaimed` (and `claimCode`) and the admin admits each one with `acceptClaim` or turns
+it down with `rejectClaim`; a rejected claim costs no use. Each admission uses one of
+`maxUses`, and the invite ends when the last is used or at its expiry. `parseInvite` reports
+`uses`, the number the link was made with. The admin device keeps the count, so it must be
+the one to admit, and it must be online. Anyone who sees the link can claim it: the claim
+list is the admin's check, so compare the codes with the person where you can.
+
 A member (not only an admin) can add **another device of its own** with
 `createOwnDeviceInvite(org, relayUrl, ttlSeconds)`; the flow is the same (the member gets
 `inviteClaimed`, calls `acceptClaim`). The new device has the member's role, at most editor,
