@@ -379,3 +379,26 @@ fn state_survives_save_and_restore() {
     }
     assert!(!format!("{:?}", devs[0].mls).contains("values"));
 }
+
+/// Saved MLS state that is cut short or damaged is refused or read, never a panic.
+#[test]
+fn saved_state_survives_truncation_and_corruption() {
+    let devs = group_of(2);
+    let saved = devs[1].mls.to_bytes();
+    assert!(Groups::from_bytes(&saved).is_ok());
+    let step = (saved.len() / 150).max(1);
+    for n in (0..saved.len()).step_by(step) {
+        assert!(Groups::from_bytes(&saved[..n]).is_err(), "len {n}");
+    }
+    // The framing (magic and the first count) is ours. The stored values behind it
+    // are authenticated by the device key before they get here (ADR 0021) and
+    // parsed by openmls_memory_storage, which panics on malformed JSON, so they
+    // are not corrupted here.
+    for i in 0..MAGIC.len() + 4 {
+        for flip in [0xffu8, 0x01, 0x80] {
+            let mut m = saved.clone();
+            m[i] ^= flip;
+            let _ = Groups::from_bytes(&m);
+        }
+    }
+}

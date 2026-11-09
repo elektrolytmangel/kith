@@ -780,3 +780,81 @@ fn an_admin_restored_by_the_creator_acts_again() {
     assert!(p.accepted.contains(&rule.change_id), "built on the restore");
     assert_eq!(p.write_rule("note"), Role::Viewer);
 }
+
+/// Every op survives encode/decode, and every prefix and single-byte corruption
+/// of its payload is read or refused, never a panic (policy payloads come from
+/// peers).
+#[test]
+fn policy_ops_roundtrip_and_survive_truncation_and_corruption() {
+    let org = Org::new();
+    let (a, b) = (key(), key());
+    let ids = vec![ChangeId([1; 32]), ChangeId([2; 32])];
+    let ops = vec![
+        PolicyOp::Genesis {
+            admin: org.admin_cert(&a),
+        },
+        PolicyOp::SetRole {
+            device: a.device_id(),
+            role: Role::Editor,
+            cert: None,
+        },
+        PolicyOp::SetRole {
+            device: b.device_id(),
+            role: Role::Admin,
+            cert: Some(org.admin_cert(&b)),
+        },
+        PolicyOp::SetRule {
+            object_type: "note".into(),
+            write: Role::Editor,
+        },
+        PolicyOp::SetRetention {
+            object_type: "note".into(),
+            retention: Retention::KeepAll,
+        },
+        PolicyOp::SetRetention {
+            object_type: "note".into(),
+            retention: Retention::KeepLast(5),
+        },
+        PolicyOp::SetRetention {
+            object_type: "note".into(),
+            retention: Retention::KeepDays(30),
+        },
+        PolicyOp::SetSubgroup {
+            name: "fin-1".into(),
+            members: vec![a.device_id(), b.device_id()],
+            keep: ids.clone(),
+        },
+        PolicyOp::SetSubgroup {
+            name: "x".into(),
+            members: vec![],
+            keep: vec![],
+        },
+        PolicyOp::LinkDevice {
+            device: b.device_id(),
+        },
+        PolicyOp::Restrict {
+            device: a.device_id(),
+            role: None,
+            keep: ids,
+        },
+        PolicyOp::Restrict {
+            device: a.device_id(),
+            role: Some(Role::Viewer),
+            keep: vec![],
+        },
+    ];
+    for op in ops {
+        let bytes = op.encode();
+        assert_eq!(PolicyOp::decode(&bytes).unwrap(), op);
+        for n in 0..=bytes.len() {
+            let _ = PolicyOp::decode(&bytes[..n]);
+        }
+        for i in 0..bytes.len() {
+            for flip in [0xffu8, 0x01, 0x80] {
+                let mut m = bytes.clone();
+                m[i] ^= flip;
+                let _ = PolicyOp::decode(&m);
+            }
+        }
+    }
+}
