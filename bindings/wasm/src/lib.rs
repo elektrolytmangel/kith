@@ -221,6 +221,25 @@ impl KithClient {
             .map_err(js_err)
     }
 
+    /// A link that up to `maxUses` devices (1 to 1000) can use, valid for
+    /// `ttlSeconds`; for example one link in a group chat (REQ-INV-005). Admins
+    /// only. Every claim still arrives as an `inviteClaimed` event and the admin
+    /// decides with `acceptClaim` (or `rejectClaim`); each admission uses one of
+    /// `maxUses`. Stay online to admit.
+    #[wasm_bindgen(js_name = createMultiInvite)]
+    pub fn create_multi_invite(
+        &self,
+        org: &str,
+        relay: &str,
+        ttl_seconds: f64,
+        max_uses: u32,
+    ) -> Result<String, JsError> {
+        self.inner
+            .borrow_mut()
+            .create_multi_invite(org, relay, (ttl_seconds.max(0.0) * 1000.0) as u64, max_uses)
+            .map_err(js_err)
+    }
+
     /// A one-time link to add another device of *this user* to `org` (REQ-ID-002).
     /// Any member can make one, not only admins; the new device gets this device's
     /// role (at most editor). Stay online until the `inviteClaimed` event, then
@@ -238,7 +257,7 @@ impl KithClient {
             .map_err(js_err)
     }
 
-    /// Read an invite link without claiming it: `{org, relay, expiresMs}`, so the app
+    /// Read an invite link without claiming it: `{org, relay, expiresMs, uses}`, so the app
     /// knows where to `connect` before `claimInvite`.
     #[wasm_bindgen(js_name = parseInvite)]
     pub fn parse_invite(link: &str) -> Result<js_sys::Object, JsError> {
@@ -248,6 +267,7 @@ impl KithClient {
         set("org", inv.org.to_hex().into()).map_err(|_| JsError::new("object"))?;
         set("relay", inv.relay.into()).map_err(|_| JsError::new("object"))?;
         set("expiresMs", (inv.expires_ms as f64).into()).map_err(|_| JsError::new("object"))?;
+        set("uses", inv.uses.into()).map_err(|_| JsError::new("object"))?;
         Ok(o)
     }
 

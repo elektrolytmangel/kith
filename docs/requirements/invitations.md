@@ -25,6 +25,16 @@ relay that substitutes its own device. The code includes a random value the admi
 chooses after the claim arrives, so it cannot be predicted when a claim is made
 (ADR 0023).
 
+### REQ-INV-005: Multi-use invitations
+
+- **Priority:** should | **Phase:** 5 | **Status:** implemented | **Verify:** test | **Source:** user request
+
+An admin must be able to create one invite link that several devices can use
+(`create_multi_invite(org, relay, ttl, max_uses)`, 1 to 1000), as an addition to the
+one-time invite. Every claim is still verified and shown to the admin, who admits
+or rejects it; each admission uses one of the `max_uses`, and the invite ends at
+its expiry or with its last use. Own-device invites stay single use.
+
 ### REQ-INV-004: Device and user removal
 
 - **Priority:** must | **Phase:** 5 | **Status:** implemented | **Verify:** test | **Source:** design §Removing

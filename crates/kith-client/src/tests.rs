@@ -2631,6 +2631,114 @@ fn an_invite_takes_a_limited_number_of_claims() {
     assert_ne!(nonce(&net), first);
 }
 
+/// req: REQ-INV-005
+#[test]
+fn a_multi_use_invite_admits_several_devices_then_ends() {
+    let mut net = Net::org(2);
+    for _ in 0..3 {
+        net.devs.push(client());
+    }
+    // Admins only, and the number of uses is bounded.
+    assert!(matches!(
+        net.devs[1].create_multi_invite(&ORG, "ws://r", 60_000, 2),
+        Err(ClientError::NotAdmin(_))
+    ));
+    for bad in [0, kith_core::membership::MAX_INVITE_USES + 1] {
+        assert!(matches!(
+            net.devs[0].create_multi_invite(&ORG, "ws://r", 60_000, bad),
+            Err(ClientError::InvalidInvite(_))
+        ));
+    }
+    let link = net.devs[0]
+        .create_multi_invite(&ORG, "ws://r", 60_000, 2)
+        .unwrap();
+    assert_eq!(Invite::parse(&link).unwrap().uses, 2);
+    // All three devices claim the same link; each claim is valid and shows a code.
+    for i in [2, 3, 4] {
+        let claim = net.devs[i].claim_invite(&link).unwrap();
+        let events = net.send(i, vec![claim.frame]);
+        assert_eq!(claimed_by(&events, 0), claim_code(&events, i));
+        assert!(claimed_by(&events, 0).is_some());
+    }
+    let (d2, d3, d4) = (hex(&net.devs[2]), hex(&net.devs[3]), hex(&net.devs[4]));
+    // The admin chooses: device 2 and 3 get in, the invite then has no use left.
+    for (i, d) in [(2, &d2), (3, &d3)] {
+        let frames = net.devs[0].accept_claim(&ORG, d).unwrap();
+        net.send(0, frames);
+        assert!(net.devs[i].is_member(&ORG));
+    }
+    assert!(
+        net.devs[0].orgs.0[&*ORG].invites.is_empty(),
+        "used up invites are forgotten"
+    );
+    assert!(matches!(
+        net.devs[0].accept_claim(&ORG, &d4),
+        Err(ClientError::InvalidInvite(_))
+    ));
+    assert!(!net.devs[4].is_member(&ORG));
+    // A used-up link is dead for new claims.
+    let late = net.devs[4].claim_invite(&link).unwrap();
+    let events = net.send(4, vec![late.frame]);
+    assert!(claimed_by(&events, 0).is_none());
+}
+
+/// req: REQ-INV-005
+#[test]
+fn a_multi_use_invite_stays_open_for_claims_that_are_rejected_and_expires() {
+    let mut net = Net::org(1);
+    net.devs.push(client());
+    net.devs.push(client());
+    let link = net.devs[0]
+        .create_multi_invite(&ORG, "ws://r", 60_000, 5)
+        .unwrap();
+    let d1 = hex(&net.devs[1]);
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    net.send(1, vec![claim.frame]);
+    // Rejecting a claim costs no use.
+    net.devs[0].reject_claim(&ORG, &d1);
+    assert_eq!(net.devs[0].orgs.0[&*ORG].invites[0].uses, 5);
+    // A claim of the first device accepted: a use is counted, the invite stays.
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    net.send(1, vec![claim.frame]);
+    let frames = net.devs[0].accept_claim(&ORG, &d1).unwrap();
+    net.send(0, frames);
+    assert_eq!(net.devs[0].orgs.0[&*ORG].invites[0].uses, 4);
+    // The pending claim of another device survives and is admitted later.
+    let d2 = hex(&net.devs[2]);
+    let claim = net.devs[2].claim_invite(&link).unwrap();
+    net.send(2, vec![claim.frame]);
+    // Expiry still ends it, however many uses are left.
+    let token = Invite::parse(&link).unwrap().token;
+    for inv in &mut net.devs[0].orgs.0.get_mut(&*ORG).unwrap().invites {
+        if inv.token == token {
+            inv.expires_ms = 1;
+        }
+    }
+    assert!(matches!(
+        net.devs[0].accept_claim(&ORG, &d2),
+        Err(ClientError::InvalidInvite(_))
+    ));
+    assert!(!net.devs[2].is_member(&ORG));
+}
+
+/// req: REQ-INV-005
+#[test]
+fn the_remaining_uses_of_an_invite_survive_a_restart() {
+    let mut net = Net::org(1);
+    net.devs.push(client());
+    let link = net.devs[0]
+        .create_multi_invite(&ORG, "ws://r", 60_000, 3)
+        .unwrap();
+    let claim = net.devs[1].claim_invite(&link).unwrap();
+    net.send(1, vec![claim.frame]);
+    let d1 = hex(&net.devs[1]);
+    let frames = net.devs[0].accept_claim(&ORG, &d1).unwrap();
+    net.send(0, frames);
+    let saved = net.devs[0].orgs.to_bytes();
+    let restored = org::Orgs::from_bytes(&saved).unwrap();
+    assert_eq!(restored.0[&*ORG].invites[0].uses, 2);
+}
+
 /// req: REQ-SYNC-001
 #[test]
 fn a_reconciliation_only_takes_answers_from_its_peer() {

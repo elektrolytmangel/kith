@@ -388,6 +388,10 @@ pub struct Invite {
     pub secret: [u8; 32],
     /// Expiry, milliseconds since the Unix epoch.
     pub expires_ms: u64,
+    /// How many devices this invite may still admit (REQ-INV-005). 1 for the usual
+    /// one-time invite. The issuing admin counts it down; the number in a shared
+    /// link is only the capacity it was made with.
+    pub uses: u32,
     /// Set if a member made this link to add one of its own devices (ADR 0011):
     /// the issuing device. It links the claimer to itself instead of admitting a
     /// new user, and the claim is routed to it, since it may not be an admin.
@@ -401,12 +405,16 @@ impl std::fmt::Debug for Invite {
             .field("relay", &self.relay)
             .field("token", &hex::encode(self.token))
             .field("expires_ms", &self.expires_ms)
+            .field("uses", &self.uses)
             .field("own_device", &self.own_device)
             .finish_non_exhaustive()
     }
 }
 
 const LINK_PREFIX: &str = "kith://invite/v1?";
+
+/// Most devices one multi-use invite may admit.
+pub const MAX_INVITE_USES: u32 = 1000;
 
 impl Invite {
     /// A fresh invite valid until `expires_ms`.
@@ -417,7 +425,18 @@ impl Invite {
             token: crate::random_bytes(),
             secret: crate::random_bytes(),
             expires_ms,
+            uses: 1,
             own_device: None,
+        }
+    }
+
+    /// A fresh invite that admits up to `uses` devices (REQ-INV-005), clamped to
+    /// `1..=`[`MAX_INVITE_USES`]. Everyone who holds the link can claim it, so the
+    /// admin still checks each claim before admitting it.
+    pub fn new_multi_use(org: DeviceId, relay: &str, expires_ms: u64, uses: u32) -> Self {
+        Self {
+            uses: uses.clamp(1, MAX_INVITE_USES),
+            ..Self::new(org, relay, expires_ms)
         }
     }
 
@@ -432,12 +451,17 @@ impl Invite {
     /// `kith://invite/v1?org=…&relay=…&token=…&secret=…&expires=…`
     pub fn to_link(&self) -> String {
         format!(
-            "{LINK_PREFIX}org={}&relay={}&token={}&secret={}&expires={}{}",
+            "{LINK_PREFIX}org={}&relay={}&token={}&secret={}&expires={}{}{}",
             self.org.to_hex(),
             percent_encode(&self.relay),
             hex::encode(self.token),
             hex::encode(self.secret),
             self.expires_ms,
+            if self.uses == 1 {
+                String::new()
+            } else {
+                format!("&uses={}", self.uses)
+            },
             self.own_device
                 .map(|d| format!("&own={}", d.to_hex()))
                 .unwrap_or_default()
@@ -455,6 +479,7 @@ impl Invite {
         let mut token = None;
         let mut secret = None;
         let mut expires = None;
+        let mut uses = 1;
         let mut own_device = None;
         for pair in query.split('&') {
             let (k, v) = pair
@@ -466,6 +491,13 @@ impl Invite {
                 "token" => token = hex::decode(v).ok().and_then(|b| b.try_into().ok()),
                 "secret" => secret = hex::decode(v).ok().and_then(|b| b.try_into().ok()),
                 "expires" => expires = v.parse().ok(),
+                "uses" => {
+                    uses = v
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|n| (1..=MAX_INVITE_USES).contains(n))
+                        .ok_or(MembershipError::Malformed("uses"))?
+                }
                 "own" => {
                     own_device =
                         Some(DeviceId::from_hex(v).map_err(|_| MembershipError::Malformed("own"))?)
@@ -479,6 +511,8 @@ impl Invite {
             token: token.ok_or(MembershipError::Malformed("token"))?,
             secret: secret.ok_or(MembershipError::Malformed("secret"))?,
             expires_ms: expires.ok_or(MembershipError::Malformed("expires"))?,
+            // An own-device invite links one device of its issuer: always single use.
+            uses: if own_device.is_some() { 1 } else { uses },
             own_device,
         })
     }
@@ -823,6 +857,24 @@ mod tests {
         assert!(Invite::parse("https://example.com").is_err());
         assert!(Invite::parse(&link.replace("token=", "tokn=")).is_err());
         assert!(inv.is_expired(99) && !inv.is_expired(98));
+        // Multi-use: the capacity travels in the link; single use adds nothing.
+        assert!(!link.contains("uses="));
+        let multi = Invite::new_multi_use(inv.org, "ws://r", 5, 25);
+        assert!(multi.to_link().contains("&uses=25"));
+        assert_eq!(Invite::parse(&multi.to_link()).unwrap(), multi);
+        assert_eq!(Invite::new_multi_use(inv.org, "ws://r", 5, 0).uses, 1);
+        assert_eq!(
+            Invite::new_multi_use(inv.org, "ws://r", 5, u32::MAX).uses,
+            MAX_INVITE_USES
+        );
+        for bad in ["0", "1001", "x", "-1"] {
+            assert!(
+                Invite::parse(&multi.to_link().replace("uses=25", &format!("uses={bad}"))).is_err()
+            );
+        }
+        // An own-device link is always single use, whatever the link says.
+        let sneaky = format!("{}&uses=5", own.to_link());
+        assert_eq!(Invite::parse(&sneaky).unwrap().uses, 1);
         assert!(!format!("{inv:?}").contains(&hex::encode(inv.secret)));
     }
 

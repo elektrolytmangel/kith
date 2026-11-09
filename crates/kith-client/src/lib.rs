@@ -1259,8 +1259,44 @@ impl<S: Store, K: Signer> Client<S, K> {
         if !self.is_admin(org) {
             return Err(ClientError::NotAdmin(org.into()));
         }
+        self.issue_invite(org, relay, ttl_ms, 1)
+    }
+
+    /// A link that admits up to `max_uses` devices (REQ-INV-005, 1 to
+    /// [`kith_core::membership::MAX_INVITE_USES`]), for example one link in a group
+    /// chat. Everyone with the link can claim it, so the admin still sees each
+    /// claim ([`Event::InviteClaimed`]) and decides with [`Self::accept_claim`] or
+    /// [`Self::reject_claim`]; every admission uses one of the `max_uses`. The
+    /// invite ends at its expiry or when the last use is taken. Admins only; this
+    /// device must be online to admit.
+    pub fn create_multi_invite(
+        &mut self,
+        org: &str,
+        relay: &str,
+        ttl_ms: u64,
+        max_uses: u32,
+    ) -> Result<String, ClientError> {
+        if !self.is_admin(org) {
+            return Err(ClientError::NotAdmin(org.into()));
+        }
+        if !(1..=kith_core::membership::MAX_INVITE_USES).contains(&max_uses) {
+            return Err(ClientError::InvalidInvite(format!(
+                "uses must be 1 to {}",
+                kith_core::membership::MAX_INVITE_USES
+            )));
+        }
+        self.issue_invite(org, relay, ttl_ms, max_uses)
+    }
+
+    fn issue_invite(
+        &mut self,
+        org: &str,
+        relay: &str,
+        ttl_ms: u64,
+        uses: u32,
+    ) -> Result<String, ClientError> {
         let org_id = DeviceId::from_hex(org)?;
-        let invite = Invite::new(org_id, relay, now_ms().saturating_add(ttl_ms));
+        let invite = Invite::new_multi_use(org_id, relay, now_ms().saturating_add(ttl_ms), uses);
         let link = invite.to_link();
         self.orgs
             .0
@@ -1422,11 +1458,19 @@ impl<S: Store, K: Signer> Client<S, K> {
         } else {
             MembershipCert::issue(&self.key, org_id, added.member, false, now_ms())
         });
+        // One use is taken; the invite ends with its last one (REQ-INV-005).
+        let mut used_up = true;
         if let Some(st) = self.orgs.0.get_mut(org) {
-            st.invites.retain(|i| i.token != token);
+            for i in st.invites.iter_mut().filter(|i| i.token == token) {
+                i.uses = i.uses.saturating_sub(1);
+                used_up = i.uses == 0;
+            }
+            st.invites.retain(|i| i.uses > 0);
         }
-        // Other devices' claims on the same invite can't be admitted any more.
-        self.claims.retain(|_, (_, t, _)| *t != token);
+        // Other devices' claims on a used-up invite can't be admitted any more.
+        if used_up {
+            self.claims.retain(|_, (_, t, _)| *t != token);
+        }
         self.save_orgs()?;
         let mut frames: Vec<Frame> = policy_frame.into_iter().collect();
         frames.push(Frame::Broadcast {
