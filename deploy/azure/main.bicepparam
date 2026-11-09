@@ -2,7 +2,7 @@
 using 'main.bicep'
 
 param name = 'kith'
-param image = 'ghcr.io/elektrolytmangel/kith-relay:0.2.0-beta.2'
+param image = 'ghcr.io/elektrolytmangel/kith-relay:0.2.0-beta.3'
 
 // Revocation notices are kept in the `revocations` table (default). Set false for RAM only.
 param persistRevocations = true
