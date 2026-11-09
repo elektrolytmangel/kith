@@ -81,6 +81,8 @@ openmls_memory_storage = "0.6"
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
+# `cargo fuzz` builds with --cfg fuzzing (see fuzz/).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

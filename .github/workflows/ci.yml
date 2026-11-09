@@ -8,6 +8,7 @@ name: CI
 #   - docs, Markdown, PLAN.md, requirements: requirements.yml checks requirements
 #   - deploy/** (Bicep, compose): bicep.yml lints the template
 #   - Cargo dependency files: deny.yml also runs (this workflow does too)
+#   - fuzz/ (own workspace, nightly): fuzz.yml runs the targets
 #   - other workflows, dependabot.yml, CODEOWNERS, issue/PR templates, deny.toml,
 #     docker/ (used by release.yml only), private/, LICENSE
 # A new top-level directory with code or build inputs must be added to both lists.
