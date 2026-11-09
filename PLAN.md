@@ -4,7 +4,7 @@ The single place to see where kith stands, what was decided, and what comes
 next. **Read this first when you pick up work. Update it whenever you make a
 plan or finish a piece of work** (see [CLAUDE.md](CLAUDE.md)).
 
-- **Last updated:** 2026-11-08 (CI path allowlist, PR `ci/path-allowlist`; Azure template: `openOrgs` now defaults to true, PR `chore/azure-open-default`; release PR `release/0.2.0-beta.2`: the first beta.2 tag failed because `Cargo.toml` was still beta.1; the user must delete and re-create the tag on the merge commit; quotas recorded as a todo; `v0.2.0-beta.2` tagged by the user; relay open mode `KITH_RELAY_OPEN_ORGS` + Bicep `openOrgs` in PR `feat/open-mode`; app-approval proposal (quotas) added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
+- **Last updated:** 2026-11-09 (code-structure review: tests moved to sibling files, refactor plan below; CI path allowlist, PR `ci/path-allowlist`; Azure template: `openOrgs` now defaults to true, PR `chore/azure-open-default`; release PR `release/0.2.0-beta.2`: the first beta.2 tag failed because `Cargo.toml` was still beta.1; the user must delete and re-create the tag on the merge commit; quotas recorded as a todo; `v0.2.0-beta.2` tagged by the user; relay open mode `KITH_RELAY_OPEN_ORGS` + Bicep `openOrgs` in PR `feat/open-mode`; app-approval proposal (quotas) added; `v0.2.0-beta.1` tagged and released; Azure Bicep default image bumped to it; the user tests it in a real app; see *Road to production*)
 - **Version:** `v0.1.0-alpha.4` released (2026-11-06). `v0.1.0-alpha.5` (notice sharing, batched sync rounds, adopter docs) and
   `v0.1.0-alpha.6` (history compaction, ADR 0026) are on `main`; tags are the user's. Both are compatible with their predecessor.
   Upgrade every device before an admin sets a retention rule. Both ghcr.io packages are public.
@@ -102,6 +102,19 @@ Prod = web only, hosted by the user with `KITH_RELAY_PERSIST_REVOCATIONS=true` (
 Parked until the real app shows a need (decide after step 4): `SharedWorker` helper in `kith-web.js` so several tabs can use one client;
 lazy-loading web store (history is held in memory; 50k changes = 38 MiB, 6 s); compaction of the policy object and Automerge history squashing.
 Safari 7-day eviction is already documented (`threat-model.md`, `web-production.md`).
+
+### Code structure refactor (review 2026-11-09; behaviour-preserving, one PR per step)
+
+Review found: inline `mod tests` as long as the code, a 3,143-line `kith-client/src/lib.rs` with one 2,576-line `impl Client`
+(91 methods), functions of 200-290 lines, inconsistent FFI mutex use, stringly parser errors. Done on branch `refactor/split-modules`.
+
+1. [~] Move inline tests to sibling `tests.rs` (`#[cfg(test)] mod tests;`): relay-server, policy, group, ffi, membership, sqlite (PR `refactor/split-modules`).
+2. [ ] FFI: route every `inner.lock().unwrap()` through the poison-tolerant `lock()` (8 sites in `bindings/ffi/src/lib.rs`).
+3. [ ] Move test-only `Client::create_group` out of the production `impl` into `tests.rs`.
+4. [ ] Split `kith-client/src/lib.rs` into modules by concern (several `impl Client` blocks); break up `handle_deliver` (292 lines), `handle_plain`, `Event::event`. Target: no file over ~800 lines.
+5. [ ] Split `relay-server/src/lib.rs` (`limits`, `connection`, `revocation`, `routing`); check what belongs in `kith-relay`.
+6. [ ] Parsers: `Reader::array::<N>()` helper instead of `try_into().expect(..)`, typed `ParseError` instead of `Result<_, String>` (39 sites); audit `as` casts.
+7. [ ] Safety nets: fuzz targets for untrusted-input parsers; stricter clippy (`unwrap_used`/`expect_used` outside tests, file-length check). **Ask the user before adding CI jobs or lints.**
 
 ### Road to a release users can use (user agreed 2026-11-04; work in this order after step 0)
 
@@ -463,3 +476,4 @@ module and versions with the relay (image tag, env vars, new settings). Environm
 - **2026-11-08**: `v0.2.0-beta.2` tag failed the release check (tag did not match `Cargo.toml` 0.2.0-beta.1: the tag was set before the version bump). Release PR `release/0.2.0-beta.2` (version bump, changelog, Azure default image). The user deletes the bad tag (`git push origin :refs/tags/v0.2.0-beta.2`) and re-tags the merge commit. Pitfall: bump the version in a release PR *before* tagging.
 - **2026-11-08**: User: open mode is the Azure template default (`openOrgs = true`; Bicep + param example + guide + changelog, PR `chore/azure-open-default`). Redeploying an existing deployment makes it open. The user re-tags `v0.2.0-beta.2` after this merge.
 - **2026-11-08**: #93 merged (Azure open mode default). User: CI must not run for YAML/deploy edits. `ci.yml` now has a path allowlist instead of `paths-ignore` (PR `ci/path-allowlist`); `requirements.yml` also runs on its own file. The user still has to delete and re-create the `v0.2.0-beta.2` tag after the merge.
+- **2026-11-09**: Code review (structure, panics, tests). Plan above; step 1 (tests to `tests.rs`) done in a worktree from `main`, because `feat/multi-use-invite` has uncommitted edits in `lib.rs`/`membership.rs` (expect trivial conflicts when it lands).
