@@ -55,6 +55,10 @@ fn aad(label: &str) -> Vec<u8> {
 }
 
 /// Encrypt `plain`, bound to `label` (the store slot it is written to).
+#[allow(
+    clippy::expect_used,
+    reason = "XChaCha20-Poly1305 encryption of an in-memory buffer cannot fail"
+)]
 pub fn seal(key: &[u8; 32], label: &str, plain: &[u8]) -> Vec<u8> {
     let nonce: [u8; NONCE_LEN] = kith_core::random_bytes();
     let ct = XChaCha20Poly1305::new(key.into())

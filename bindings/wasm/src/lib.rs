@@ -71,6 +71,10 @@ impl KithClient {
     /// restores it with `KithClient.withSecretKey`.
     /// For persistence use `KithClient.open`.
     #[wasm_bindgen(constructor)]
+    #[allow(
+        clippy::expect_used,
+        reason = "a fresh in-memory store has no MLS state that could fail to load"
+    )]
     pub fn new() -> Self {
         wrap(DeviceKey::generate(), Box::new(MemoryStore::new()), None)
             .expect("an empty memory store has no MLS state to load")

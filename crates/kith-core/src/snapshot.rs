@@ -71,7 +71,11 @@ impl Snapshot {
             return None;
         }
         let covers = (0..n)
-            .map(|_| take(32).map(|c| ChangeId(c.try_into().expect("32 bytes"))))
+            .map(|_| {
+                take(32)
+                    .and_then(|c| <[u8; 32]>::try_from(c).ok())
+                    .map(ChangeId)
+            })
             .collect::<Option<Vec<_>>>()?;
         let m = u32::from_be_bytes(take(4)?.try_into().ok()?) as usize;
         if m > payload.len() / 4 {

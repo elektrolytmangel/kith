@@ -34,7 +34,9 @@ pub fn policy_object_id(org: &DeviceId) -> ObjectId {
         .chain_update(b"kith/policy/v1\0")
         .chain_update(org.0)
         .finalize();
-    ObjectId(h[..16].try_into().expect("16 bytes"))
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&h[..16]);
+    ObjectId(id)
 }
 
 /// A member's role.
@@ -296,12 +298,9 @@ impl PolicyOp {
             Ok(chain.0.remove(0))
         };
         let device = |b: &[u8]| -> Result<DeviceId, PolicyError> {
-            Ok(DeviceId(
-                b.get(..32)
-                    .ok_or(PolicyError("device"))?
-                    .try_into()
-                    .expect("32"),
-            ))
+            crate::array_at(b, 0)
+                .map(DeviceId)
+                .ok_or(PolicyError("device"))
         };
         Ok(match kind {
             0 => PolicyOp::Genesis { admin: cert(rest)? },
@@ -333,12 +332,8 @@ impl PolicyOp {
             }
             6 => {
                 let kind = *rest.first().ok_or(PolicyError("retention"))?;
-                let n = u32::from_be_bytes(
-                    rest.get(1..5)
-                        .ok_or(PolicyError("retention"))?
-                        .try_into()
-                        .expect("4"),
-                );
+                let n =
+                    u32::from_be_bytes(crate::array_at(rest, 1).ok_or(PolicyError("retention"))?);
                 let retention = Retention::from_code(kind, n).ok_or(PolicyError("retention"))?;
                 let object_type = std::str::from_utf8(&rest[5..])
                     .map_err(|_| PolicyError("object type"))?
@@ -365,8 +360,10 @@ impl PolicyOp {
                     device: d,
                     role,
                     keep: ids
-                        .chunks(32)
-                        .map(|c| ChangeId(c.try_into().expect("32")))
+                        .as_chunks::<32>()
+                        .0
+                        .iter()
+                        .map(|c| ChangeId(*c))
                         .collect(),
                 }
             }
@@ -385,12 +382,9 @@ impl PolicyOp {
                     return Err(PolicyError("name"));
                 }
                 let rest = &rest[n..];
-                let count = u32::from_be_bytes(
-                    rest.get(..4)
-                        .ok_or(PolicyError("members"))?
-                        .try_into()
-                        .expect("4"),
-                ) as usize;
+                let count =
+                    u32::from_be_bytes(crate::array_at(rest, 0).ok_or(PolicyError("members"))?)
+                        as usize;
                 let rest = &rest[4..];
                 if rest.len() < count * 32 || !(rest.len() - count * 32).is_multiple_of(32) {
                     return Err(PolicyError("members"));
@@ -398,14 +392,8 @@ impl PolicyOp {
                 let (m, k) = rest.split_at(count * 32);
                 PolicyOp::SetSubgroup {
                     name,
-                    members: m
-                        .chunks(32)
-                        .map(|c| DeviceId(c.try_into().expect("32")))
-                        .collect(),
-                    keep: k
-                        .chunks(32)
-                        .map(|c| ChangeId(c.try_into().expect("32")))
-                        .collect(),
+                    members: m.as_chunks::<32>().0.iter().map(|c| DeviceId(*c)).collect(),
+                    keep: k.as_chunks::<32>().0.iter().map(|c| ChangeId(*c)).collect(),
                 }
             }
             5 => {
@@ -619,10 +607,12 @@ impl Policy {
                 break; // a cycle cannot happen with hashes; stop defensively
             }
             // Concurrent ops: senior authors first, then lowest change ID.
-            let pick = *ready
+            let Some(&pick) = ready
                 .iter()
                 .min_by_key(|&&i| (p.seniority(&pending[i].author), pending[i].change_id))
-                .expect("non-empty");
+            else {
+                break;
+            };
             let c = pending.swap_remove(pick);
             done.insert(c.change_id);
             if !excluded.contains(&c.change_id) && p.apply(org, c) {

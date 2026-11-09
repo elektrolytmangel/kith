@@ -70,10 +70,7 @@ impl FileRef {
         if n != usize::try_from(size).ok()?.div_ceil(CHUNK_SIZE) || r.0.len() != n * 32 {
             return None;
         }
-        let chunks =
-            r.0.chunks(32)
-                .map(|c| c.try_into().expect("32 bytes"))
-                .collect();
+        let chunks = r.0.as_chunks::<32>().0.to_vec();
         Some(Self {
             name,
             mime,

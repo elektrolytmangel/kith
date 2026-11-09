@@ -798,7 +798,7 @@ impl Groups {
             .storage
             .values
             .read()
-            .expect("storage lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut entries: Vec<_> = values.iter().collect();
         entries.sort();
         put_u32(&mut w, entries.len());
@@ -883,7 +883,7 @@ impl Groups {
             let committer = r.device()?;
             let hash = match r.take(1)?[0] {
                 0 => None,
-                1 => Some(r.take(32)?.try_into().expect("32 bytes")),
+                1 => Some(r.array()?),
                 _ => return Err(GroupError::Corrupt("transition hash flag".into())),
             };
             last.insert(
@@ -939,8 +939,12 @@ impl<'a> Reader<'a> {
         self.0 = rest;
         Ok(head)
     }
+    /// The next `N` bytes as an array.
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], GroupError> {
+        <[u8; N]>::try_from(self.take(N)?).map_err(|_| GroupError::Corrupt("truncated".into()))
+    }
     fn count(&mut self) -> Result<usize, GroupError> {
-        let n = u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes")) as usize;
+        let n = u32::from_be_bytes(self.array()?) as usize;
         // Every entry takes at least 4 bytes: a huge count fails here, not in an allocation.
         if n > self.0.len() / 4 {
             return Err(GroupError::Corrupt("count exceeds data".into()));
@@ -948,15 +952,13 @@ impl<'a> Reader<'a> {
         Ok(n)
     }
     fn u64(&mut self) -> Result<u64, GroupError> {
-        Ok(u64::from_be_bytes(
-            self.take(8)?.try_into().expect("8 bytes"),
-        ))
+        Ok(u64::from_be_bytes(self.array()?))
     }
     fn device(&mut self) -> Result<DeviceId, GroupError> {
-        Ok(DeviceId(self.take(32)?.try_into().expect("32 bytes")))
+        Ok(DeviceId(self.array()?))
     }
     fn bytes(&mut self) -> Result<&'a [u8], GroupError> {
-        let n = u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes")) as usize;
+        let n = u32::from_be_bytes(self.array()?) as usize;
         self.take(n)
     }
 }

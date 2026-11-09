@@ -1,4 +1,6 @@
 //! Two devices edit the same Automerge object concurrently and converge.
+// Integration tests: helpers may unwrap (clippy.toml only exempts #[test] functions).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use automerge::transaction::Transactable;
 use automerge::{ROOT, ReadDoc};

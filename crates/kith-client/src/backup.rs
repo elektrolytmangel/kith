@@ -19,6 +19,10 @@ use crate::*;
 const MAGIC: &[u8] = b"kith-backup/v1\0";
 
 /// Argon2id cost: 64 MiB, 3 passes (OWASP); cheap in tests.
+#[allow(
+    clippy::expect_used,
+    reason = "the Argon2 cost constants are valid parameters"
+)]
 fn params() -> Params {
     let (m, t) = if cfg!(test) {
         (8 * 1024, 1)

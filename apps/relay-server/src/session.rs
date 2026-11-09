@@ -68,8 +68,9 @@ pub(crate) fn check_frame(
                 .map(|m| {
                     let proof = verify_proof(&m.org, d, &m.proof);
                     let mut notices = vec![];
-                    if matches!(proof, Ok((Role::Admin, _))) {
-                        let org_key = DeviceId::from_hex(&m.org).expect("canonical");
+                    if let (Ok((Role::Admin, _)), Ok(org_key)) =
+                        (&proof, DeviceId::from_hex(&m.org))
+                    {
                         let take = m.revoked.len().min(budget);
                         budget -= take;
                         notices = m

@@ -100,7 +100,7 @@ impl<'a> Reader<'a> {
     }
 
     fn array<const N: usize>(&mut self) -> Result<[u8; N], StoreError> {
-        Ok(self.take(N)?.try_into().expect("length checked"))
+        <[u8; N]>::try_from(self.take(N)?).map_err(|_| bad("truncated"))
     }
 
     fn bytes(&mut self) -> Result<&'a [u8], StoreError> {

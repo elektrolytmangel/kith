@@ -129,7 +129,11 @@ impl MembershipCert {
         if b.len() != CERT_LEN {
             return Err(MembershipError::Malformed("certificate length"));
         }
-        let id = |r: std::ops::Range<usize>| DeviceId(b[r].try_into().expect("32 bytes"));
+        let id = |at: usize| {
+            crate::array_at(b, at)
+                .map(DeviceId)
+                .ok_or(MembershipError::Malformed("certificate"))
+        };
         let (admin, own) = match b[96] {
             0 => (false, false),
             1 => (true, false),
@@ -137,13 +141,15 @@ impl MembershipCert {
             _ => return Err(MembershipError::Malformed("admin flag")),
         };
         Ok(Self {
-            org: id(0..32),
-            device: id(32..64),
-            issuer: id(64..96),
+            org: id(0)?,
+            device: id(32)?,
+            issuer: id(64)?,
             admin,
             own,
-            issued_ms: u64::from_be_bytes(b[97..105].try_into().expect("8 bytes")),
-            signature: b[105..].try_into().expect("64 bytes"),
+            issued_ms: u64::from_be_bytes(
+                crate::array_at(b, 97).ok_or(MembershipError::Malformed("certificate"))?,
+            ),
+            signature: crate::array_at(b, 105).ok_or(MembershipError::Malformed("certificate"))?,
         })
     }
 }
@@ -346,17 +352,23 @@ impl Revocation {
         {
             return Err(MembershipError::Malformed("revocation length"));
         }
-        let id = |r: std::ops::Range<usize>| DeviceId(b[r].try_into().expect("32 bytes"));
+        let id = |at: usize| {
+            crate::array_at(&b, at)
+                .map(DeviceId)
+                .ok_or(MembershipError::Malformed("revocation"))
+        };
         let chain = b[REVOKE_LEN..]
             .chunks(CERT_LEN)
             .map(MembershipCert::decode)
             .collect::<Result<_, _>>()?;
         Ok(Self {
-            org: id(0..32),
-            device: id(32..64),
-            issuer: id(64..96),
-            issued_ms: u64::from_be_bytes(b[96..104].try_into().expect("8 bytes")),
-            signature: b[104..168].try_into().expect("64 bytes"),
+            org: id(0)?,
+            device: id(32)?,
+            issuer: id(64)?,
+            issued_ms: u64::from_be_bytes(
+                crate::array_at(&b, 96).ok_or(MembershipError::Malformed("revocation"))?,
+            ),
+            signature: crate::array_at(&b, 104).ok_or(MembershipError::Malformed("revocation"))?,
             chain: CertChain(chain),
         })
     }
@@ -547,7 +559,8 @@ impl Invite {
     /// of its own with the same code (one chance in a million per claim).
     pub fn short_code(&self, key_package: &[u8], nonce: &[u8; 32]) -> String {
         let m = self.mac(b"kith/invite-code/v2\0", key_package, nonce);
-        let n = u32::from_be_bytes(m[..4].try_into().expect("4 bytes")) % 1_000_000;
+        let [a, b, c, d, ..] = m;
+        let n = u32::from_be_bytes([a, b, c, d]) % 1_000_000;
         format!("{n:06}")
     }
 

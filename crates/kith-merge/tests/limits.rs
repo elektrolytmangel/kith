@@ -1,5 +1,7 @@
 //! Changes Automerge must not apply as they are: references to objects, elements or
 //! operations a change has not seen, nesting beyond the limit, oversized payloads.
+// Integration tests: helpers may unwrap (clippy.toml only exempts #[test] functions).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write;
 

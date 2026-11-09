@@ -1,6 +1,9 @@
 //! Two devices edit offline, then catch up with each other.
 //! Run: `cargo run -p example-two-devices`
 
+// Example code: failing loudly with `unwrap` keeps the walk-through short.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use kith_client::{Client, DeviceKey, MemoryStore, ObjectType, Store};
 
 fn main() {
