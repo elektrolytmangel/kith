@@ -250,11 +250,7 @@ impl KithClient {
     }
 
     pub fn create(&self, object_type: String, payload: Vec<u8>) -> Result<ChangeInfo, KithError> {
-        let c = self
-            .inner
-            .lock()
-            .unwrap()
-            .create(ObjectType::new(object_type), payload)?;
+        let c = self.lock().create(ObjectType::new(object_type), payload)?;
         Ok(c.into())
     }
 
@@ -266,12 +262,7 @@ impl KithClient {
         mime: String,
         data: Vec<u8>,
     ) -> Result<ChangeInfo, KithError> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .add_file(&name, &mime, &data)?
-            .into())
+        Ok(self.lock().add_file(&name, &mime, &data)?.into())
     }
 
     /// `addFile` in `scope` (an org ID, `org/subgroup`, or `local`).
@@ -284,12 +275,7 @@ impl KithClient {
     ) -> Result<ChangeInfo, KithError> {
         let scope = kith_client::Scope::parse(&scope)
             .map_err(|e| KithError::Failed { msg: e.to_string() })?;
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .add_file_in(scope, &name, &mime, &data)?
-            .into())
+        Ok(self.lock().add_file_in(scope, &name, &mime, &data)?.into())
     }
 
     /// Name, MIME type, size and missing chunk count of a file object.
@@ -326,11 +312,9 @@ impl KithClient {
     ) -> Result<ChangeInfo, KithError> {
         let scope = kith_client::Scope::parse(&scope)
             .map_err(|e| KithError::Failed { msg: e.to_string() })?;
-        let c =
-            self.inner
-                .lock()
-                .unwrap()
-                .create_in(scope, ObjectType::new(object_type), payload)?;
+        let c = self
+            .lock()
+            .create_in(scope, ObjectType::new(object_type), payload)?;
         Ok(c.into())
     }
 
@@ -360,9 +344,7 @@ impl KithClient {
         json: String,
     ) -> Result<ChangeInfo, KithError> {
         let c = self
-            .inner
             .lock()
-            .unwrap()
             .create_document(ObjectType::new(object_type), &json)?;
         Ok(c.into())
     }
@@ -376,12 +358,7 @@ impl KithClient {
         patch: String,
     ) -> Result<Option<ChangeInfo>, KithError> {
         let oid = ObjectId::from_hex(&object_id)?;
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .update_document(oid, &patch)?
-            .map(Into::into))
+        Ok(self.lock().update_document(oid, &patch)?.map(Into::into))
     }
 
     /// The merged state of a document as a JSON string (all devices' edits).
@@ -648,11 +625,7 @@ impl RelaySession {
 
     /// Members of subgroup `name` per the policy (`nil`/`null` if it does not exist).
     pub fn subgroup_members(&self, name: String) -> Option<Vec<String>> {
-        self.client
-            .inner
-            .lock()
-            .unwrap()
-            .subgroup_members(&self.org, &name)
+        self.client.lock().subgroup_members(&self.org, &name)
     }
 
     /// Subgroups of this org this device can read.
@@ -699,11 +672,7 @@ impl RelaySession {
 
     /// Refuse the claim of an `InviteClaimed` event; the invite stays valid.
     pub fn reject_claim(&self, device: String) {
-        self.client
-            .inner
-            .lock()
-            .unwrap()
-            .reject_claim(&self.org, &device);
+        self.client.lock().reject_claim(&self.org, &device);
     }
 
     /// Make a member an admin (only the org's creator can). Send the returned
