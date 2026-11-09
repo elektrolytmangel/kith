@@ -193,40 +193,63 @@ impl Limits {
     /// `KITH_RELAY_WRITE_TIMEOUT_SECS`, `KITH_RELAY_IDLE_TIMEOUT_SECS`,
     /// `KITH_RELAY_MAX_CONNECTIONS_PER_IP`, `KITH_RELAY_CLIENT_IP_HEADER`.
     pub fn from_env() -> Self {
-        fn var<T: std::str::FromStr>(name: &str, default: T) -> T {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Like [`Self::from_env`], reading the variables through `lookup` (testable
+    /// without changing the process environment). A value that does not parse
+    /// falls back to the default.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        fn var<T: std::str::FromStr>(
+            lookup: &impl Fn(&str) -> Option<String>,
+            name: &str,
+            default: T,
+        ) -> T {
+            lookup(name).and_then(|v| v.parse().ok()).unwrap_or(default)
         }
         let d = Self::default();
         Self {
-            device_frames_per_sec: var("KITH_RELAY_DEVICE_FRAMES_PER_SEC", d.device_frames_per_sec),
-            device_burst: var("KITH_RELAY_DEVICE_BURST", d.device_burst),
-            device_bytes_per_sec: var("KITH_RELAY_DEVICE_BYTES_PER_SEC", d.device_bytes_per_sec),
-            org_frames_per_sec: var("KITH_RELAY_ORG_FRAMES_PER_SEC", d.org_frames_per_sec),
-            max_connections: var("KITH_RELAY_MAX_CONNECTIONS", d.max_connections),
-            max_message_bytes: var("KITH_RELAY_MAX_MESSAGE_BYTES", d.max_message_bytes),
-            max_refused: var("KITH_RELAY_MAX_REFUSED", d.max_refused),
+            device_frames_per_sec: var(
+                &lookup,
+                "KITH_RELAY_DEVICE_FRAMES_PER_SEC",
+                d.device_frames_per_sec,
+            ),
+            device_burst: var(&lookup, "KITH_RELAY_DEVICE_BURST", d.device_burst),
+            device_bytes_per_sec: var(
+                &lookup,
+                "KITH_RELAY_DEVICE_BYTES_PER_SEC",
+                d.device_bytes_per_sec,
+            ),
+            org_frames_per_sec: var(
+                &lookup,
+                "KITH_RELAY_ORG_FRAMES_PER_SEC",
+                d.org_frames_per_sec,
+            ),
+            max_connections: var(&lookup, "KITH_RELAY_MAX_CONNECTIONS", d.max_connections),
+            max_message_bytes: var(&lookup, "KITH_RELAY_MAX_MESSAGE_BYTES", d.max_message_bytes),
+            max_refused: var(&lookup, "KITH_RELAY_MAX_REFUSED", d.max_refused),
             pending_frames_per_sec: var(
+                &lookup,
                 "KITH_RELAY_PENDING_FRAMES_PER_SEC",
                 d.pending_frames_per_sec,
             ),
-            max_queued_bytes: var("KITH_RELAY_MAX_QUEUED_BYTES", d.max_queued_bytes),
+            max_queued_bytes: var(&lookup, "KITH_RELAY_MAX_QUEUED_BYTES", d.max_queued_bytes),
             write_timeout: Duration::from_secs(var(
+                &lookup,
                 "KITH_RELAY_WRITE_TIMEOUT_SECS",
                 d.write_timeout.as_secs(),
             )),
             idle_timeout: Duration::from_secs(var(
+                &lookup,
                 "KITH_RELAY_IDLE_TIMEOUT_SECS",
                 d.idle_timeout.as_secs(),
             )),
             max_connections_per_ip: var(
+                &lookup,
                 "KITH_RELAY_MAX_CONNECTIONS_PER_IP",
                 d.max_connections_per_ip,
             ),
-            client_ip_header: std::env::var("KITH_RELAY_CLIENT_IP_HEADER")
-                .ok()
+            client_ip_header: lookup("KITH_RELAY_CLIENT_IP_HEADER")
                 .map(|h| h.trim().to_ascii_lowercase())
                 .filter(|h| !h.is_empty()),
         }
