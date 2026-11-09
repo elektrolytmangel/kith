@@ -51,7 +51,8 @@ jobs:
         working-directory: fuzz
         env:
           SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || (github.event_name == 'schedule' && '300' || '60') }}
-        run: cargo +nightly fuzz run ${{ matrix.target }} --fuzz-dir . -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048
+        # The prebuilt cargo-fuzz is a musl binary and would default to the musl target.
+        run: cargo +nightly fuzz run ${{ matrix.target }} --fuzz-dir . --target x86_64-unknown-linux-gnu -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048
       - name: Keep the crashing input
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
