@@ -1,0 +1,60 @@
+# Short fuzzing runs (cargo-fuzz, libFuzzer) of the parsers that read untrusted input:
+# relay bodies, saved org state, policy ops, certificates, changes, snapshots.
+# Targets live in fuzz/ (own workspace, nightly). Runs weekly, when the targets or the
+# parsers they cover change, and on demand (`seconds` sets the time per target).
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+      - "crates/kith-client/src/sync.rs"
+      - "crates/kith-client/src/org.rs"
+      - "crates/kith-core/src/policy.rs"
+      - "crates/kith-core/src/membership.rs"
+      - "crates/kith-core/src/snapshot.rs"
+      - "crates/kith-store/src/codec.rs"
+  schedule:
+    - cron: "43 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - parse_outer
+          - parse_message
+          - org_state
+          - policy_op
+          - certificates
+          - decode_change
+          - snapshot
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-fuzz
+      - name: Fuzz
+        working-directory: fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || (github.event_name == 'schedule' && '300' || '60') }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} --fuzz-dir . -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/

@@ -1,0 +1,66 @@
+[package]
+name = "kith-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the main workspace: needs nightly and libFuzzer.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kith-core = { path = "../crates/kith-core" }
+kith-store = { path = "../crates/kith-store" }
+kith-client = { path = "../crates/kith-client" }
+
+[[bin]]
+name = "parse_outer"
+path = "fuzz_targets/parse_outer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_message"
+path = "fuzz_targets/parse_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "org_state"
+path = "fuzz_targets/org_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_op"
+path = "fuzz_targets/policy_op.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "certificates"
+path = "fuzz_targets/certificates.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_change"
+path = "fuzz_targets/decode_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot"
+path = "fuzz_targets/snapshot.rs"
+test = false
+doc = false
+bench = false

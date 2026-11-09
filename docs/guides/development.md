@@ -25,6 +25,18 @@ tests. Return an error instead. A justified invariant (no OS randomness, encrypt
 in-memory buffer) gets `#[allow(clippy::expect_used, reason = "...")]` on its function.
 Parsers use `Reader::array::<N>()` / `kith_core::array_at` instead of `try_into().expect(..)`.
 
+**Fuzzing.** `fuzz/` (own workspace, nightly, [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html))
+has one target per parser that reads untrusted input: `parse_outer`, `parse_message`, `org_state`,
+`policy_op`, `certificates`, `decode_change`, `snapshot`. Locally (or in `rust:1-bookworm`):
+
+```sh
+cargo install cargo-fuzz --locked && rustup toolchain install nightly --profile minimal
+cd fuzz && cargo +nightly fuzz run parse_outer --fuzz-dir . -- -max_total_time=60
+```
+
+`.github/workflows/fuzz.yml` runs every target weekly and when `fuzz/` or a covered parser changes.
+A crash is uploaded as an artifact; copy the input into a regular test before fixing it.
+
 ## Where code goes
 
 | Change | Crate |

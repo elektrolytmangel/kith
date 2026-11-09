@@ -761,5 +761,27 @@ fn now_ms() -> u64 {
     js_sys::Date::now() as u64
 }
 
+/// Entry points for the fuzz targets in `fuzz/` (compiled only with `--cfg fuzzing`,
+/// which `cargo fuzz` sets). They return whether the input was accepted.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+#[allow(missing_docs, reason = "fuzzing entry points, not API")]
+pub mod fuzz_api {
+    /// The outer relay body parser.
+    pub fn parse_outer(body: &[u8]) -> bool {
+        crate::sync::parse_outer(body).is_ok()
+    }
+
+    /// The inner message parser.
+    pub fn parse_message(body: &[u8]) -> bool {
+        crate::sync::parse(body).is_ok()
+    }
+
+    /// The saved org state reader.
+    pub fn org_state(bytes: &[u8]) -> bool {
+        crate::org::Orgs::from_bytes(bytes).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests;

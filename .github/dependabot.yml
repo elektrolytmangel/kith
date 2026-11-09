@@ -6,6 +6,10 @@ updates:
     groups:
       cargo-minor:
         update-types: [minor, patch]
+  # The fuzz crate is its own workspace (nightly only), so it has its own lockfile.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule: { interval: monthly }
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
