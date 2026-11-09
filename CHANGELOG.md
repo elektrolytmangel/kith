@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- **Multi-use invites** (REQ-INV-005): `createMultiInvite(org, relay, ttlSeconds, maxUses)` (Rust `create_multi_invite`) makes one link
+  that up to `maxUses` (1 to 1000) devices can use. The admin still admits or rejects each claim; every admission uses one,
+  and `parseInvite` reports `uses`. Additive: one-time links are unchanged (no `uses` in the link), the admin's saved state is read by older versions, and an older client ignores `uses`.
+
 ## [0.2.0-beta.2] - 2026-11-08
 
 Compatible with beta.1: no format or protocol change. Upgrade the relay first, then the devices (or only the relay).

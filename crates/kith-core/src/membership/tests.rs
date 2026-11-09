@@ -232,6 +232,24 @@ fn invite_links_roundtrip() {
     assert!(Invite::parse("https://example.com").is_err());
     assert!(Invite::parse(&link.replace("token=", "tokn=")).is_err());
     assert!(inv.is_expired(99) && !inv.is_expired(98));
+    // Multi-use: the capacity travels in the link; single use adds nothing.
+    assert!(!link.contains("uses="));
+    let multi = Invite::new_multi_use(inv.org, "ws://r", 5, 25);
+    assert!(multi.to_link().contains("&uses=25"));
+    assert_eq!(Invite::parse(&multi.to_link()).unwrap(), multi);
+    assert_eq!(Invite::new_multi_use(inv.org, "ws://r", 5, 0).uses, 1);
+    assert_eq!(
+        Invite::new_multi_use(inv.org, "ws://r", 5, u32::MAX).uses,
+        MAX_INVITE_USES
+    );
+    for bad in ["0", "1001", "x", "-1"] {
+        assert!(
+            Invite::parse(&multi.to_link().replace("uses=25", &format!("uses={bad}"))).is_err()
+        );
+    }
+    // An own-device link is always single use, whatever the link says.
+    let sneaky = format!("{}&uses=5", own.to_link());
+    assert_eq!(Invite::parse(&sneaky).unwrap().uses, 1);
     assert!(!format!("{inv:?}").contains(&hex::encode(inv.secret)));
 }
 
