@@ -35,6 +35,33 @@ impl Drop for OrgState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Orgs(pub BTreeMap<String, OrgState>);
 
+/// Why a saved org state could not be read. The wording shows up in
+/// `ClientError::StoredState`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum OrgStateError {
+    /// The blob does not start with the format marker.
+    #[error("unknown org state format")]
+    UnknownFormat,
+    /// The blob ends in the middle of a field.
+    #[error("truncated org state")]
+    Truncated,
+    /// A count larger than the data that follows.
+    #[error("count exceeds data")]
+    CountExceedsData,
+    /// A string field that is not UTF-8.
+    #[error("not UTF-8")]
+    NotUtf8,
+    /// The root-key flag is neither 0 nor 1.
+    #[error("root flag")]
+    RootFlag,
+    /// Bytes after the last org.
+    #[error("trailing bytes")]
+    TrailingBytes,
+    /// A saved certificate chain or invite link that does not parse.
+    #[error("{0}")]
+    Invalid(String),
+}
+
 const MAGIC: &[u8] = b"kith/orgs/v1\0";
 
 impl Orgs {
@@ -66,26 +93,31 @@ impl Orgs {
         w
     }
 
-    pub fn from_bytes(b: &[u8]) -> Result<Self, String> {
+    pub fn from_bytes(b: &[u8]) -> Result<Self, OrgStateError> {
         let mut r = Reader(b);
         if r.take(MAGIC.len())? != MAGIC {
-            return Err("unknown org state format".into());
+            return Err(OrgStateError::UnknownFormat);
         }
         let mut orgs = BTreeMap::new();
         for _ in 0..r.count()? {
             let org = r.string()?;
             let chain = match r.string()? {
                 s if s.is_empty() => None,
-                s => Some(CertChain::from_hex(&s).map_err(|e| e.to_string())?),
+                s => Some(
+                    CertChain::from_hex(&s).map_err(|e| OrgStateError::Invalid(e.to_string()))?,
+                ),
             };
             let root = match r.take(1)?[0] {
                 0 => None,
-                1 => Some(r.take(32)?.try_into().expect("32 bytes")),
-                _ => return Err("root flag".into()),
+                1 => Some(r.array()?),
+                _ => return Err(OrgStateError::RootFlag),
             };
             let mut invites = vec![];
             for _ in 0..r.count()? {
-                invites.push(Invite::parse(&r.string()?).map_err(|e| e.to_string())?);
+                invites.push(
+                    Invite::parse(&r.string()?)
+                        .map_err(|e| OrgStateError::Invalid(e.to_string()))?,
+                );
             }
             orgs.insert(
                 org,
@@ -97,7 +129,7 @@ impl Orgs {
             );
         }
         if !r.0.is_empty() {
-            return Err("trailing bytes".into());
+            return Err(OrgStateError::TrailingBytes);
         }
         Ok(Self(orgs))
     }
@@ -115,24 +147,31 @@ fn put_bytes(w: &mut Vec<u8>, b: &[u8]) {
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], OrgStateError> {
         if self.0.len() < n {
-            return Err("truncated org state".into());
+            return Err(OrgStateError::Truncated);
         }
         let (h, t) = self.0.split_at(n);
         self.0 = t;
         Ok(h)
     }
-    fn count(&mut self) -> Result<usize, String> {
-        let n = u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes")) as usize;
+
+    /// The next `N` bytes as an array.
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], OrgStateError> {
+        <[u8; N]>::try_from(self.take(N)?).map_err(|_| OrgStateError::Truncated)
+    }
+
+    fn count(&mut self) -> Result<usize, OrgStateError> {
+        let n = u32::from_be_bytes(self.array()?) as usize;
         if n > self.0.len() / 4 {
-            return Err("count exceeds data".into());
+            return Err(OrgStateError::CountExceedsData);
         }
         Ok(n)
     }
-    fn string(&mut self) -> Result<String, String> {
-        let n = u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes")) as usize;
-        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| "not UTF-8".into())
+
+    fn string(&mut self) -> Result<String, OrgStateError> {
+        let n = u32::from_be_bytes(self.array()?) as usize;
+        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| OrgStateError::NotUtf8)
     }
 }
 

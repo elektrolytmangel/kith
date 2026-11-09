@@ -52,8 +52,13 @@ impl<'a> Reader<'a> {
         self.0 = t;
         Ok(h)
     }
+    /// The next `N` bytes as an array.
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], ClientError> {
+        <[u8; N]>::try_from(self.take(N)?)
+            .map_err(|_| ClientError::InvalidBackup("truncated".into()))
+    }
     fn u32(&mut self) -> Result<usize, ClientError> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes")) as usize)
+        Ok(u32::from_be_bytes(self.array()?) as usize)
     }
     fn bytes(&mut self) -> Result<&'a [u8], ClientError> {
         let n = self.u32()?;
@@ -123,8 +128,8 @@ impl<S: Store> Client<S, DeviceKey> {
         if r.take(MAGIC.len())? != MAGIC {
             return Err(ClientError::InvalidBackup("not a kith backup".into()));
         }
-        let salt: [u8; 16] = r.take(16)?.try_into().expect("16 bytes");
-        let nonce: [u8; 24] = r.take(24)?.try_into().expect("24 bytes");
+        let salt: [u8; 16] = r.array()?;
+        let nonce: [u8; 24] = r.array()?;
         let key = derive(passphrase, &salt)?;
         let plain = XChaCha20Poly1305::new((&*key).into())
             .decrypt(
@@ -137,7 +142,7 @@ impl<S: Store> Client<S, DeviceKey> {
             .map_err(|_| ClientError::InvalidBackup("wrong passphrase or damaged backup".into()))?;
         let plain = Zeroizing::new(plain);
         let mut r = Reader(&plain);
-        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(r.take(32)?.try_into().expect("32 bytes"));
+        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(r.array()?);
         let orgs = Zeroizing::new(r.bytes()?.to_vec());
         let mut store = store;
         let n = r.u32()?;
@@ -148,7 +153,7 @@ impl<S: Store> Client<S, DeviceKey> {
         }
         let n = r.u32()?;
         for _ in 0..n {
-            let id: [u8; 32] = r.take(32)?.try_into().expect("32 bytes");
+            let id: [u8; 32] = r.array()?;
             let scope = std::str::from_utf8(r.bytes()?)
                 .ok()
                 .and_then(|s| Scope::parse(s).ok())
