@@ -20,10 +20,19 @@ pub use ids::{ChangeId, DeviceId, IdError, ObjectId, ObjectType, Scope, ScopeErr
 /// # Panics
 /// If the OS has no random number generator. Continuing without one would
 /// produce guessable keys.
+#[allow(
+    clippy::expect_used,
+    reason = "documented: no OS randomness means no safe keys, so stopping is the only safe choice"
+)]
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let mut b = [0u8; N];
     getrandom::getrandom(&mut b).expect("OS random number generator unavailable");
     b
+}
+
+/// `N` bytes of `bytes` starting at `at`, or `None` if they are not all there.
+pub(crate) fn array_at<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
+    <[u8; N]>::try_from(bytes.get(at..at.checked_add(N)?)?).ok()
 }
 
 /// Version of this crate, exposed to bindings so apps can report it.

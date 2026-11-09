@@ -62,6 +62,10 @@ fn aad(index: usize) -> Vec<u8> {
 }
 
 /// Encrypt `data` with a fresh key.
+#[allow(
+    clippy::expect_used,
+    reason = "XChaCha20-Poly1305 encryption of an in-memory buffer cannot fail"
+)]
 pub fn encrypt_file(data: &[u8]) -> EncryptedFile {
     let key: [u8; 32] = kith_core::random_bytes();
     let cipher = XChaCha20Poly1305::new(&key.into());

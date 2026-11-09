@@ -107,6 +107,10 @@ impl KithClient {
     /// `secret_key()` and restores it with `with_secret_key`.
     /// For persistence use `open`.
     #[uniffi::constructor]
+    #[allow(
+        clippy::expect_used,
+        reason = "a fresh in-memory store has no MLS state that could fail to load"
+    )]
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(

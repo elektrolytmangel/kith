@@ -268,6 +268,10 @@ fn visible<'a>(
 /// Apply checked changes. Should Automerge still fail or panic on one, apply them
 /// one at a time and leave out those that do (a panic can only be caught where
 /// panics unwind, not in WebAssembly builds).
+#[allow(
+    clippy::expect_used,
+    reason = "re-applying changes that were applied to the same document a moment ago"
+)]
 fn apply(changes: Vec<automerge::Change>) -> (AutoCommit, Vec<ChangeHash>) {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let try_apply = |doc: &mut AutoCommit, cs: Vec<automerge::Change>| {

@@ -296,3 +296,43 @@ fn hmac_matches_rfc_4231() {
         "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
     );
 }
+
+/// Certificate chains and revocations survive hex round trips, and every prefix
+/// and single-byte corruption of their bytes is read or refused (never a panic).
+#[test]
+fn certificates_and_revocations_survive_truncation_and_corruption() {
+    let (root, admin, gone) = (key(), key(), key());
+    let org = root.device_id();
+    let chain = CertChain(vec![
+        MembershipCert::issue(&root, org, admin.device_id(), true, 1),
+        MembershipCert::issue_own(&admin, org, gone.device_id(), 2),
+    ]);
+    let revocation = Revocation::issue(&admin, chain.clone(), org, gone.device_id(), 5);
+    assert_eq!(CertChain::from_hex(&chain.to_hex()).unwrap(), chain);
+    assert_eq!(
+        Revocation::from_hex(&revocation.to_hex()).unwrap(),
+        revocation
+    );
+    for (hex_form, parse) in [
+        (
+            chain.to_hex(),
+            (|s: &str| CertChain::from_hex(s).is_ok()) as fn(&str) -> bool,
+        ),
+        (revocation.to_hex(), |s: &str| {
+            Revocation::from_hex(s).is_ok()
+        }),
+    ] {
+        let bytes = hex::decode(&hex_form).unwrap();
+        for n in 0..bytes.len() {
+            let _ = parse(&hex::encode(&bytes[..n]));
+        }
+        for i in 0..bytes.len() {
+            for flip in [0xffu8, 0x01, 0x80] {
+                let mut m = bytes.clone();
+                m[i] ^= flip;
+                let _ = parse(&hex::encode(&m));
+            }
+        }
+        assert!(parse(&hex_form));
+    }
+}

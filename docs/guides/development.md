@@ -15,9 +15,15 @@
 ```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets
+python3 scripts/check_file_length.py   # production files stay under 1,100 lines
 cargo test --workspace
 python3 scripts/reqs.py --write     # after touching requirements or `req:` tags
 ```
+
+**Panics.** `clippy::unwrap_used` and `clippy::expect_used` are warnings (so CI fails) outside
+tests. Return an error instead. A justified invariant (no OS randomness, encrypting an
+in-memory buffer) gets `#[allow(clippy::expect_used, reason = "...")]` on its function.
+Parsers use `Reader::array::<N>()` / `kith_core::array_at` instead of `try_into().expect(..)`.
 
 ## Where code goes
 

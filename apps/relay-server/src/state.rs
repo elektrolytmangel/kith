@@ -135,11 +135,14 @@ pub fn load_revocations(state: &Shared, records: &[RevocationRecord]) -> usize {
     // Verify first, without the relay lock.
     let mut verified = vec![];
     for rec in records {
-        let Some(org) = crate::canonical_org(&rec.org) else {
+        let Some((org, org_key)) = crate::canonical_org(&rec.org).and_then(|org| {
+            kith_core::DeviceId::from_hex(&org)
+                .ok()
+                .map(|key| (org, key))
+        }) else {
             tracing::warn!(org = %rec.org, "skipping a stored revocation: bad org ID");
             continue;
         };
-        let org_key = kith_core::DeviceId::from_hex(&org).expect("canonical");
         match crate::verify_notice(&org_key, &rec.notice) {
             Ok(rev) => verified.push((org, rev, &rec.notice)),
             Err(e) => tracing::warn!(org = %rec.org, error = %e, "skipping a stored revocation"),

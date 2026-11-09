@@ -13,6 +13,10 @@ use kith_relay_server::{
 };
 
 #[tokio::main]
+#[allow(
+    clippy::expect_used,
+    reason = "a relay that cannot bind its address or serve has nothing to fall back to"
+)]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
