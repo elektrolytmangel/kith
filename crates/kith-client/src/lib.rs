@@ -1548,12 +1548,6 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     // ---- MLS group (REQ-ENC-001..004) ----
 
-    #[cfg(test)]
-    fn create_group(&mut self, org: &str) -> Result<(), ClientError> {
-        self.groups.create_group(&self.key, org)?;
-        self.save_groups()
-    }
-
     /// True if this device is a member of `org`'s group (it can send and read).
     pub fn is_member(&self, org: &str) -> bool {
         self.groups.is_member(org)

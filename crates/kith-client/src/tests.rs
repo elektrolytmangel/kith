@@ -14,6 +14,14 @@ static ORG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
 
 type C = Client<MemoryStore>;
 
+impl<S: Store, K: Signer> Client<S, K> {
+    /// Start an MLS group without an invitation (production code goes through `create_org`).
+    fn create_group(&mut self, org: &str) -> Result<(), ClientError> {
+        self.groups.create_group(&self.key, org)?;
+        self.save_groups()
+    }
+}
+
 fn client() -> C {
     Client::new(DeviceKey::generate(), MemoryStore::new()).unwrap()
 }
