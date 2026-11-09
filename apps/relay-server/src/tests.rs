@@ -1492,3 +1492,90 @@ async fn rate_buckets_of_orgs_without_online_devices_are_forgotten() {
     }
     panic!("the buckets were kept");
 }
+
+// ---- configuration and sizing (pinned before the module split) ----
+
+/// req: REQ-RELAY-006
+#[test]
+fn limits_are_read_from_the_environment_and_bad_values_fall_back() {
+    let d = Limits::default();
+    let none = Limits::from_lookup(|_| None);
+    assert_eq!(none.device_burst, d.device_burst);
+    assert_eq!(none.max_connections, d.max_connections);
+    assert_eq!(none.client_ip_header, None);
+
+    let env = |name: &str| {
+        Some(
+            match name {
+                "KITH_RELAY_DEVICE_BURST" => "7",
+                "KITH_RELAY_MAX_CONNECTIONS" => "not a number",
+                "KITH_RELAY_WRITE_TIMEOUT_SECS" => "3",
+                "KITH_RELAY_IDLE_TIMEOUT_SECS" => "9",
+                "KITH_RELAY_MAX_CONNECTIONS_PER_IP" => "2",
+                "KITH_RELAY_CLIENT_IP_HEADER" => "  X-Forwarded-For ",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    };
+    let l = Limits::from_lookup(env);
+    assert_eq!(l.device_burst, 7.0);
+    assert_eq!(l.max_connections, d.max_connections, "unparsable: default");
+    assert_eq!(l.write_timeout, Duration::from_secs(3));
+    assert_eq!(l.idle_timeout, Duration::from_secs(9));
+    assert_eq!(l.max_connections_per_ip, 2);
+    assert_eq!(l.client_ip_header.as_deref(), Some("x-forwarded-for"));
+    // An empty header name means "not set".
+    let l = Limits::from_lookup(|n| (n == "KITH_RELAY_CLIENT_IP_HEADER").then(|| " ".into()));
+    assert_eq!(l.client_ip_header, None);
+}
+
+#[test]
+fn queued_frames_are_sized_by_what_they_carry() {
+    let body = |n: usize| vec![0u8; n];
+    let base = approx_size(&Frame::Receipt { delivered: vec![] });
+    assert_eq!(base, 256);
+    for f in [
+        Frame::Broadcast {
+            org: "o".into(),
+            body: body(1000),
+        },
+        Frame::Direct {
+            org: "o".into(),
+            to: "t".into(),
+            body: body(1000),
+        },
+        Frame::SyncRequest {
+            org: "o".into(),
+            body: body(1000),
+        },
+        Frame::Deliver {
+            org: "o".into(),
+            from: "f".into(),
+            body: body(1000),
+        },
+        Frame::ClaimDeliver {
+            org: "o".into(),
+            from: "f".into(),
+            body: body(1000),
+        },
+    ] {
+        assert_eq!(approx_size(&f), base + 1000, "{f:?}");
+    }
+    let two = vec!["a".to_string(), "b".to_string()];
+    assert_eq!(
+        approx_size(&Frame::Presence {
+            org: "o".into(),
+            online: two.clone()
+        }),
+        base + 160
+    );
+    assert_eq!(approx_size(&Frame::Receipt { delivered: two }), base + 160);
+    assert_eq!(
+        approx_size(&Frame::Error {
+            code: "c".into(),
+            message: "four".into()
+        }),
+        base + 4
+    );
+}
