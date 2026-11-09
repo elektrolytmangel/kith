@@ -77,6 +77,8 @@ impl<S: Store, K: Signer> Client<S, K> {
 
     /// `scope`: the group the message was encrypted for, which is also the scope
     /// its data belongs to.
+    ///
+    /// Parses the inner message and hands it to the `on_*` method for its kind.
     pub(crate) fn handle_plain(
         &mut self,
         org: String,
@@ -85,218 +87,297 @@ impl<S: Store, K: Signer> Client<S, K> {
         plaintext: &[u8],
     ) -> Result<Handled, ClientError> {
         use sync::Message;
-        let rejected = |reason: String| {
-            Handled::event(Event::Rejected {
-                org: org.clone(),
-                from: from.clone(),
-                reason,
-            })
-        };
         let msg = match sync::parse(plaintext) {
             Ok(m) => m,
-            Err(e) => return Ok(rejected(e)),
+            Err(e) => return Ok(Handled::rejected(&org, &from, e)),
         };
         match msg {
-            Message::Change(change) if change.body.scope.as_str() != scope => {
-                Ok(rejected("change belongs to another scope".into()))
-            }
-            Message::Change(change) => match self.receive(change.clone()) {
-                Ok(is_new) => Ok(Handled {
-                    replies: if is_new {
-                        self.eager_fetch(&org, &change)?
-                    } else {
-                        vec![]
-                    },
-                    event: Event::Received {
-                        org,
-                        from,
-                        change: Box::new(change),
-                        is_new,
-                    },
-                }),
-                Err(ClientError::Rejected(e)) => Ok(rejected(e.to_string())),
-                Err(ClientError::Forbidden(e)) => Ok(rejected(e)),
-                Err(e) => Err(e),
-            },
-            Message::ChunkWant(ids) => {
-                let (replies, sent, missing) = self.serve_chunks(&org, &scope, &from, &ids)?;
-                Ok(Handled {
-                    replies,
-                    event: Event::ChunksServed {
-                        to: from,
-                        sent,
-                        missing,
-                    },
-                })
-            }
-            Message::Chunks(chunks) => {
-                let (stored, ready) = self.absorb_chunks(&scope, chunks)?;
-                Ok(Handled::event(Event::FileChunks {
+            Message::Change(change) => self.on_change(org, &scope, from, change),
+            Message::ChunkWant(ids) => self.on_chunk_want(org, &scope, from, &ids),
+            Message::Chunks(chunks) => self.on_chunks(&scope, from, chunks),
+            Message::ChunkMissing(ids) => self.on_chunk_missing(org, &scope, from, &ids),
+            Message::Query(query) => self.on_query(org, &scope, from, &query),
+            Message::More => self.on_more(org, &scope, from),
+            Message::Notices(lines) => self.on_notices(org, &scope, from, &lines),
+            Message::Reply(answer) => self.on_reply(org, &scope, from, &answer),
+            Message::Offer { want, changes } => self.on_offer(org, &scope, from, &want, changes),
+        }
+    }
+
+    /// One change from a peer.
+    fn on_change(
+        &mut self,
+        org: String,
+        scope: &str,
+        from: String,
+        change: Change,
+    ) -> Result<Handled, ClientError> {
+        if change.body.scope.as_str() != scope {
+            return Ok(Handled::rejected(
+                &org,
+                &from,
+                "change belongs to another scope",
+            ));
+        }
+        match self.receive(change.clone()) {
+            Ok(is_new) => Ok(Handled {
+                replies: if is_new {
+                    self.eager_fetch(&org, &change)?
+                } else {
+                    vec![]
+                },
+                event: Event::Received {
+                    org,
                     from,
-                    stored,
-                    ready,
-                }))
-            }
-            Message::ChunkMissing(ids) => {
-                // The peer the relay picked may not have the file: ask its author.
-                let replies = self.ask_authors(&org, &scope, &from, &ids)?;
+                    change: Box::new(change),
+                    is_new,
+                },
+            }),
+            Err(ClientError::Rejected(e)) => Ok(Handled::rejected(&org, &from, e.to_string())),
+            Err(ClientError::Forbidden(e)) => Ok(Handled::rejected(&org, &from, e)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A peer asks for file chunks.
+    fn on_chunk_want(
+        &mut self,
+        org: String,
+        scope: &str,
+        from: String,
+        ids: &[[u8; 32]],
+    ) -> Result<Handled, ClientError> {
+        let (replies, sent, missing) = self.serve_chunks(&org, scope, &from, ids)?;
+        Ok(Handled {
+            replies,
+            event: Event::ChunksServed {
+                to: from,
+                sent,
+                missing,
+            },
+        })
+    }
+
+    /// File chunks from a peer.
+    fn on_chunks(
+        &mut self,
+        scope: &str,
+        from: String,
+        chunks: Vec<([u8; 32], Vec<u8>)>,
+    ) -> Result<Handled, ClientError> {
+        let (stored, ready) = self.absorb_chunks(scope, chunks)?;
+        Ok(Handled::event(Event::FileChunks {
+            from,
+            stored,
+            ready,
+        }))
+    }
+
+    /// A peer does not have the chunks we asked for.
+    fn on_chunk_missing(
+        &mut self,
+        org: String,
+        scope: &str,
+        from: String,
+        ids: &[[u8; 32]],
+    ) -> Result<Handled, ClientError> {
+        // The peer the relay picked may not have the file: ask its author.
+        let replies = self.ask_authors(&org, scope, &from, ids)?;
+        Ok(Handled {
+            replies,
+            event: Event::ChunksMissing {
+                from,
+                count: ids.len(),
+            },
+        })
+    }
+
+    /// A reconciliation round from a peer: answer it.
+    fn on_query(
+        &mut self,
+        org: String,
+        scope: &str,
+        from: String,
+        query: &[u8],
+    ) -> Result<Handled, ClientError> {
+        match kith_sync::respond(&self.store.scope_ids(&org_scope(scope)?)?, query) {
+            Ok(answer) => {
+                let mut replies = vec![direct(
+                    &org,
+                    &from,
+                    self.app_body(scope, &sync::reply_body(&answer))?,
+                )];
+                // Catching up also hands over the notices we hold, so a
+                // new admin or always-on client learns them (ADR 0024).
+                if scope == org {
+                    let held: Vec<String> = self
+                        .revocations
+                        .iter()
+                        .filter(|r| r.org.to_hex() == org)
+                        .map(Revocation::to_hex)
+                        .collect();
+                    for body in sync::notices_bodies(&held) {
+                        replies.push(direct(&org, &from, self.app_body(scope, &body)?));
+                    }
+                }
                 Ok(Handled {
                     replies,
-                    event: Event::ChunksMissing {
-                        from,
-                        count: ids.len(),
-                    },
+                    event: Event::SyncServed { from },
                 })
             }
-            Message::Query(query) => {
-                match kith_sync::respond(&self.store.scope_ids(&org_scope(&scope)?)?, &query) {
-                    Ok(answer) => {
-                        let mut replies = vec![direct(
-                            &org,
-                            &from,
-                            self.app_body(&scope, &sync::reply_body(&answer))?,
-                        )];
-                        // Catching up also hands over the notices we hold, so a
-                        // new admin or always-on client learns them (ADR 0024).
-                        if scope == org {
-                            let held: Vec<String> = self
-                                .revocations
-                                .iter()
-                                .filter(|r| r.org.to_hex() == org)
-                                .map(Revocation::to_hex)
-                                .collect();
-                            for body in sync::notices_bodies(&held) {
-                                replies.push(direct(&org, &from, self.app_body(&scope, &body)?));
-                            }
-                        }
-                        Ok(Handled {
-                            replies,
-                            event: Event::SyncServed { from },
-                        })
-                    }
-                    Err(e) => Ok(rejected(e.to_string())),
-                }
-            }
-            Message::More => {
-                // Another round with this peer (REQ-SYNC-005), unless one is running.
-                if self.reconciling.contains_key(&scope) {
-                    return Ok(Handled::event(Event::Ignored));
-                }
-                let body = self.start_reconcile(&scope, Some(&from))?;
-                Ok(Handled {
-                    replies: vec![direct(&org, &from, body)],
-                    event: Event::Ignored,
-                })
-            }
-            Message::Notices(lines) if scope == org => {
-                self.learn_notices(&org, &lines)?;
-                Ok(Handled::event(Event::Ignored))
-            }
-            Message::Notices(_) => Ok(rejected("notices belong to the org group".into())),
-            Message::Reply(answer) => {
-                let Some((r, peer)) = self.reconciling.get_mut(&scope) else {
-                    // Not reconciling (any more): a late or duplicate answer.
-                    return Ok(Handled::event(Event::Ignored));
-                };
-                // One reconciliation runs with one peer: the first to answer, or the
-                // one we asked. Another member's answer would derail it.
-                match peer {
-                    Some(p) if *p != from => return Ok(Handled::event(Event::Ignored)),
-                    Some(_) => {}
-                    None => *peer = Some(from.clone()),
-                }
-                match r.step(&answer) {
-                    Ok(kith_sync::Step::Continue(query)) => Ok(Handled {
-                        replies: vec![direct(
-                            &org,
-                            &from,
-                            self.app_body(&scope, &sync::query_body(&query))?,
-                        )],
-                        event: Event::Ignored,
-                    }),
-                    Ok(kith_sync::Step::Done(diff)) => {
-                        self.reconciling.remove(&scope);
-                        let (to_send, cut) = batch(self.changes_for(&scope, &diff.to_send)?);
-                        // Ask for one batch; the peer sends `More` if it has further
-                        // changes for us after answering.
-                        let to_request =
-                            &diff.to_request[..diff.to_request.len().min(SYNC_BATCH_CHANGES)];
-                        let mut replies = if to_send.is_empty() && to_request.is_empty() {
-                            vec![]
-                        } else {
-                            self.offer_frames(&org, &scope, &from, to_request, &to_send)?
-                        };
-                        if cut {
-                            replies.push(self.more_frame(&org, &scope, &from)?);
-                        }
-                        Ok(Handled {
-                            event: Event::SyncCompared {
-                                from,
-                                sending: to_send.len(),
-                                wanting: to_request.len(),
-                            },
-                            replies,
-                        })
-                    }
-                    Err(e) => {
-                        self.reconciling.remove(&scope);
-                        Ok(rejected(e.to_string()))
-                    }
-                }
-            }
-            Message::Offer { want, changes } => {
-                let (mut stored, mut known, mut rejected_n) = (0, 0, 0);
-                let mut fetches = vec![];
-                for enc in changes {
-                    let change = match kith_store::codec::decode_change(&enc) {
-                        Ok(c) => c,
-                        Err(_) => {
-                            rejected_n += 1;
-                            continue;
-                        }
-                    };
-                    if change.body.scope.as_str() != scope {
-                        rejected_n += 1;
-                        continue;
-                    }
-                    match self.receive(change.clone()) {
-                        Ok(true) => {
-                            stored += 1;
-                            fetches.extend(self.eager_fetch(&org, &change)?);
-                        }
-                        Ok(false) => known += 1,
-                        Err(ClientError::Rejected(_) | ClientError::Forbidden(_)) => {
-                            rejected_n += 1
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                // Reply only if asked, so two offers never ping-pong forever.
-                let mut replies = if want.is_empty() {
+            Err(e) => Ok(Handled::rejected(&org, &from, e.to_string())),
+        }
+    }
+
+    /// "There is more": another round with this peer (REQ-SYNC-005), unless one
+    /// is running.
+    fn on_more(&mut self, org: String, scope: &str, from: String) -> Result<Handled, ClientError> {
+        if self.reconciling.contains_key(scope) {
+            return Ok(Handled::event(Event::Ignored));
+        }
+        let body = self.start_reconcile(scope, Some(&from))?;
+        Ok(Handled {
+            replies: vec![direct(&org, &from, body)],
+            event: Event::Ignored,
+        })
+    }
+
+    /// Revocation notices shared by a peer; only the org group carries them.
+    fn on_notices(
+        &mut self,
+        org: String,
+        scope: &str,
+        from: String,
+        lines: &[String],
+    ) -> Result<Handled, ClientError> {
+        if scope != org {
+            return Ok(Handled::rejected(
+                &org,
+                &from,
+                "notices belong to the org group",
+            ));
+        }
+        self.learn_notices(&org, lines)?;
+        Ok(Handled::event(Event::Ignored))
+    }
+
+    /// The partner's answer to our reconciliation round: the next query, or the
+    /// end of the comparison and the first offer.
+    fn on_reply(
+        &mut self,
+        org: String,
+        scope: &str,
+        from: String,
+        answer: &[u8],
+    ) -> Result<Handled, ClientError> {
+        let Some((r, peer)) = self.reconciling.get_mut(scope) else {
+            // Not reconciling (any more): a late or duplicate answer.
+            return Ok(Handled::event(Event::Ignored));
+        };
+        // One reconciliation runs with one peer: the first to answer, or the
+        // one we asked. Another member's answer would derail it.
+        match peer {
+            Some(p) if *p != from => return Ok(Handled::event(Event::Ignored)),
+            Some(_) => {}
+            None => *peer = Some(from.clone()),
+        }
+        match r.step(answer) {
+            Ok(kith_sync::Step::Continue(query)) => Ok(Handled {
+                replies: vec![direct(
+                    &org,
+                    &from,
+                    self.app_body(scope, &sync::query_body(&query))?,
+                )],
+                event: Event::Ignored,
+            }),
+            Ok(kith_sync::Step::Done(diff)) => {
+                self.reconciling.remove(scope);
+                let (to_send, cut) = batch(self.changes_for(scope, &diff.to_send)?);
+                // Ask for one batch; the peer sends `More` if it has further
+                // changes for us after answering.
+                let to_request = &diff.to_request[..diff.to_request.len().min(SYNC_BATCH_CHANGES)];
+                let mut replies = if to_send.is_empty() && to_request.is_empty() {
                     vec![]
                 } else {
-                    let (wanted, cut) = batch(self.changes_for(&scope, &want)?);
-                    let mut r = self.offer_frames(&org, &scope, &from, &[], &wanted)?;
-                    // The asker cut its list at one batch, or we cut our answer:
-                    // tell it to reconcile again.
-                    if cut || want.len() >= SYNC_BATCH_CHANGES {
-                        r.push(self.more_frame(&org, &scope, &from)?);
-                    }
-                    r
+                    self.offer_frames(&org, scope, &from, to_request, &to_send)?
                 };
-                replies.extend(fetches);
+                if cut {
+                    replies.push(self.more_frame(&org, scope, &from)?);
+                }
                 Ok(Handled {
-                    event: Event::SyncReceived {
+                    event: Event::SyncCompared {
                         from,
-                        stored,
-                        known,
-                        rejected: rejected_n,
-                        requested: want.len(),
+                        sending: to_send.len(),
+                        wanting: to_request.len(),
                     },
                     replies,
                 })
             }
+            Err(e) => {
+                self.reconciling.remove(scope);
+                Ok(Handled::rejected(&org, &from, e.to_string()))
+            }
         }
+    }
+
+    /// Changes a peer offers (and the ones it wants back). Each change is decoded
+    /// and checked on its own, so a bad one cannot hide the rest.
+    fn on_offer(
+        &mut self,
+        org: String,
+        scope: &str,
+        from: String,
+        want: &[ChangeId],
+        changes: Vec<Vec<u8>>,
+    ) -> Result<Handled, ClientError> {
+        let (mut stored, mut known, mut rejected_n) = (0, 0, 0);
+        let mut fetches = vec![];
+        for enc in changes {
+            let change = match kith_store::codec::decode_change(&enc) {
+                Ok(c) => c,
+                Err(_) => {
+                    rejected_n += 1;
+                    continue;
+                }
+            };
+            if change.body.scope.as_str() != scope {
+                rejected_n += 1;
+                continue;
+            }
+            match self.receive(change.clone()) {
+                Ok(true) => {
+                    stored += 1;
+                    fetches.extend(self.eager_fetch(&org, &change)?);
+                }
+                Ok(false) => known += 1,
+                Err(ClientError::Rejected(_) | ClientError::Forbidden(_)) => rejected_n += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        // Reply only if asked, so two offers never ping-pong forever.
+        let mut replies = if want.is_empty() {
+            vec![]
+        } else {
+            let (wanted, cut) = batch(self.changes_for(scope, want)?);
+            let mut r = self.offer_frames(&org, scope, &from, &[], &wanted)?;
+            // The asker cut its list at one batch, or we cut our answer:
+            // tell it to reconcile again.
+            if cut || want.len() >= SYNC_BATCH_CHANGES {
+                r.push(self.more_frame(&org, scope, &from)?);
+            }
+            r
+        };
+        replies.extend(fetches);
+        Ok(Handled {
+            event: Event::SyncReceived {
+                from,
+                stored,
+                known,
+                rejected: rejected_n,
+                requested: want.len(),
+            },
+            replies,
+        })
     }
 
     /// The stored changes of `org`'s scope with these IDs (unknown IDs and other
