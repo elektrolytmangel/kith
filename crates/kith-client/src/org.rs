@@ -169,4 +169,58 @@ mod tests {
             assert!(Orgs::from_bytes(&bytes[..len]).is_err(), "len {len}");
         }
     }
+
+    /// The wording is shown in `ClientError::StoredState`: keep it.
+    #[test]
+    fn org_state_errors_keep_their_wording() {
+        let err = |b: &[u8]| Orgs::from_bytes(b).unwrap_err().to_string();
+        let with = |rest: &[u8]| [MAGIC, rest].concat();
+        assert_eq!(err(&[]), "truncated org state");
+        assert_eq!(err(&[0; 13]), "unknown org state format");
+        assert_eq!(err(&with(&[0, 0, 0, 9])), "count exceeds data");
+        assert_eq!(err(&with(&[0, 0, 0, 1, 0, 0, 0, 1, 0xff])), "not UTF-8");
+        // One org "a", empty chain, then a root flag that is neither 0 nor 1.
+        assert_eq!(
+            err(&with(&[0, 0, 0, 1, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 2])),
+            "root flag"
+        );
+        let mut ok = with(&[0, 0, 0, 1, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(Orgs::from_bytes(&ok).is_ok());
+        ok.push(0);
+        assert_eq!(err(&ok), "trailing bytes");
+        // A chain that is not a certificate chain.
+        assert!(
+            !err(&with(&[
+                0, 0, 0, 1, 0, 0, 0, 1, b'a', 0, 0, 0, 2, b'z', b'z', 0, 0, 0, 0, 0
+            ]))
+            .is_empty()
+        );
+    }
+
+    /// Every prefix and single-byte corruption of a saved state is read or refused.
+    #[test]
+    fn org_state_survives_truncation_and_corruption() {
+        let key = DeviceKey::generate();
+        let org = key.device_id();
+        let mut orgs = Orgs::default();
+        orgs.0.insert(
+            org.to_hex(),
+            OrgState {
+                chain: None,
+                root: Some(key.secret_bytes()),
+                invites: vec![Invite::new(org, "ws://r/v1/ws", 9)],
+            },
+        );
+        let bytes = orgs.to_bytes();
+        for n in 0..=bytes.len() {
+            let _ = Orgs::from_bytes(&bytes[..n]);
+        }
+        for i in 0..bytes.len() {
+            for flip in [0xffu8, 0x01, 0x80] {
+                let mut b = bytes.clone();
+                b[i] ^= flip;
+                let _ = Orgs::from_bytes(&b);
+            }
+        }
+    }
 }

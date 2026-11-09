@@ -769,4 +769,173 @@ mod tests {
     fn empty_offer_is_still_one_body() {
         assert_eq!(offer_bodies(&[], &[]).len(), 1);
     }
+
+    /// The wording of a parse error is user-visible (`Event::Rejected`): keep it.
+    #[test]
+    fn parse_errors_keep_their_wording() {
+        let outer = |b: &[u8]| parse_outer(b).unwrap_err().to_string();
+        let inner = |b: &[u8]| parse(b).err().expect("an error").to_string();
+        let with = |kind: u8, rest: &[u8]| [&[kind][..], rest].concat();
+
+        assert_eq!(outer(&[]), "empty body");
+        assert_eq!(outer(&[OUTER_APP]), "empty payload");
+        assert_eq!(outer(&[1, 2]), "unencrypted body refused");
+        assert_eq!(outer(&[0x99, 1]), "unknown body kind 153");
+        assert_eq!(outer(&with(OUTER_WELCOME, &[0, 0, 0, 5, 1])), "truncated");
+        assert_eq!(outer(&with(OUTER_WELCOME, &[0, 0, 0, 0])), "empty welcome");
+        assert_eq!(
+            outer(&with(OUTER_WELCOME, &[0, 0, 0, 1, 9, 0xff])),
+            "certificate chain is not text"
+        );
+        assert_eq!(outer(&with(OUTER_CLAIM, &[0; 48])), "empty key package");
+        assert_eq!(outer(&with(OUTER_CLAIM, &[0; 47])), "truncated");
+        assert_eq!(outer(&with(OUTER_CLAIM_NONCE, &[0; 111])), "truncated");
+        assert_eq!(
+            outer(&with(OUTER_CERT, &[0xff])),
+            "certificate chain is not text"
+        );
+        assert_eq!(
+            outer(&with(OUTER_KEY_PACKAGE, &[1, b'g'])),
+            "empty key package"
+        );
+        assert_eq!(outer(&with(OUTER_KEY_PACKAGE, &[0])), "empty group");
+        assert_eq!(
+            outer(&with(OUTER_KEY_PACKAGE, &[1, 0xff, 1])),
+            "group is not text"
+        );
+        assert_eq!(
+            outer(&with(OUTER_COMMIT_REQUEST, &[1, b'g', 0, 0])),
+            "truncated"
+        );
+        assert_eq!(
+            outer(&with(OUTER_COMMITS, &[1, b'g', 0, 0, 0, 9])),
+            "commit count exceeds data"
+        );
+        assert_eq!(
+            outer(&with(OUTER_READD_NEEDED, &[1, b'g', 9])),
+            "trailing bytes"
+        );
+
+        assert_eq!(inner(&[]), "empty body");
+        assert_eq!(inner(&[99]), "unknown message kind 99");
+        assert_eq!(inner(&with(KIND_MORE, &[1])), "trailing bytes");
+        assert_eq!(inner(&with(KIND_NOTICES, &[0xff])), "notices are not text");
+        assert_eq!(
+            inner(&with(
+                KIND_NOTICES,
+                "a\n".repeat(MAX_NOTICES_PER_MESSAGE + 1).as_bytes()
+            )),
+            "too many notices"
+        );
+        assert_eq!(
+            inner(&with(KIND_CHUNK_WANT, &[0, 0, 0, 9])),
+            "chunk count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_CHUNK_WANT, &[0, 0, 0, 0, 1])),
+            "trailing bytes"
+        );
+        assert_eq!(inner(&with(KIND_CHUNK_WANT, &[0, 0])), "truncated");
+        assert_eq!(
+            inner(&with(KIND_CHUNKS, &[0, 0, 0, 9])),
+            "chunk count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_CHUNKS, &[0, 0, 0, 0, 1])),
+            "trailing bytes"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 9])),
+            "id count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 0, 0, 0, 0, 9])),
+            "change count exceeds data"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 0, 0, 0, 0, 0, 7])),
+            "trailing bytes"
+        );
+        assert_eq!(
+            inner(&with(KIND_OFFER, &[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1])),
+            "truncated"
+        );
+        assert!(!inner(&with(KIND_CHANGE, &[1, 2])).is_empty());
+    }
+
+    /// Every prefix and every single-byte corruption of every message kind is
+    /// either parsed or refused, never a panic (the parsers read network input).
+    #[test]
+    fn parsers_survive_truncated_and_corrupted_bodies() {
+        let ids = vec![ChangeId([1; 32]), ChangeId([2; 32])];
+        let mut outers = vec![
+            outer_body(&Outer::App(vec![1, 2])),
+            outer_body(&Outer::Welcome {
+                welcome: vec![4, 5],
+                chain: "ab".into(),
+            }),
+            outer_body(&Outer::Claim {
+                token: [1; 16],
+                proof: [2; 32],
+                key_package: vec![3],
+            }),
+            outer_body(&Outer::ClaimNonce {
+                token: [1; 16],
+                nonce: [2; 32],
+                signature: [3; 64],
+                chain: "ef".into(),
+            }),
+            outer_body(&Outer::Cert("cd".into())),
+            outer_body(&Outer::KeyPackage {
+                group: "g".into(),
+                key_package: vec![5],
+            }),
+            outer_body(&Outer::CommitRequest {
+                group: "g/s".into(),
+                epoch: 7,
+            }),
+            outer_body(&Outer::Commits {
+                group: "g".into(),
+                commits: vec![
+                    (DeviceId([7; 32]), vec![1]),
+                    (DeviceId([8; 32]), vec![2, 3]),
+                ],
+            }),
+            outer_body(&Outer::ReaddNeeded { group: "g".into() }),
+        ];
+        outers.shrink_to_fit();
+        let mut inners = vec![
+            query_body(b"q"),
+            reply_body(b"r"),
+            more_body(),
+            chunk_missing_body(&[[1; 32], [2; 32]]),
+        ];
+        inners.extend(offer_bodies(&ids, &[]));
+        inners.extend(chunk_want_bodies(&[[1; 32]]));
+        inners.extend(chunks_bodies(&[([3; 32], vec![9; 40])]));
+        inners.extend(notices_bodies(&["aa".into(), "bb".into()]));
+        let mutations = |body: &[u8]| {
+            let mut all: Vec<Vec<u8>> = (0..=body.len()).map(|n| body[..n].to_vec()).collect();
+            for i in 0..body.len() {
+                for flip in [0xffu8, 0x01, 0x80] {
+                    let mut b = body.to_vec();
+                    b[i] ^= flip;
+                    all.push(b);
+                }
+            }
+            all
+        };
+        for body in &outers {
+            assert!(parse_outer(body).is_ok(), "the unmodified body parses");
+            for m in mutations(body) {
+                let _ = parse_outer(&m);
+            }
+        }
+        for body in &inners {
+            assert!(parse(body).is_ok(), "the unmodified body parses");
+            for m in mutations(body) {
+                let _ = parse(&m);
+            }
+        }
+    }
 }
