@@ -4,6 +4,8 @@ use kith_protocol::Frame;
 
 use super::*;
 
+mod handlers;
+
 /// Every test org uses this root key, so its ID is a constant.
 const ROOT_SECRET: [u8; 32] = [7; 32];
 static ORG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {

@@ -206,6 +206,15 @@ impl Handled {
             replies: vec![],
         }
     }
+
+    /// A peer's message was refused: report it and do nothing else.
+    fn rejected(org: &str, from: &str, reason: impl Into<String>) -> Self {
+        Self::event(Event::Rejected {
+            org: org.into(),
+            from: from.into(),
+            reason: reason.into(),
+        })
+    }
 }
 
 /// What a frame from the relay meant for this client.
