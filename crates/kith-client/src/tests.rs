@@ -1221,9 +1221,9 @@ fn viewers_cannot_write_and_peers_reject_what_they_send_anyway() {
     let d2 = hex(&net.devs[2]);
     let demote = net.devs[0].set_role(&ORG, &d2, Role::Viewer).unwrap();
     spread(&mut net, 0, &demote);
-    for i in 0..3 {
+    for (i, dev) in net.devs.iter().enumerate().take(3) {
         assert_eq!(
-            net.devs[i].role_of(&ORG, &d2).unwrap(),
+            dev.role_of(&ORG, &d2).unwrap(),
             Some(Role::Viewer),
             "device {i}"
         );
@@ -1240,9 +1240,9 @@ fn viewers_cannot_write_and_peers_reject_what_they_send_anyway() {
             .iter()
             .any(|(i, e)| *i == 0 && matches!(e, Event::Rejected { .. }))
     );
-    for i in 0..2 {
-        assert!(net.devs[i].history(&c.body.object_id).unwrap().is_empty());
-        assert!(net.devs[i].edit(c.body.object_id, b"y".to_vec()).is_err());
+    for dev in net.devs.iter_mut().take(2) {
+        assert!(dev.history(&c.body.object_id).unwrap().is_empty());
+        assert!(dev.edit(c.body.object_id, b"y".to_vec()).is_err());
     }
     // Promoted later, the same change counts everywhere (a late grant).
     let promote = net.devs[0].set_role(&ORG, &d2, Role::Editor).unwrap();
@@ -2902,8 +2902,8 @@ fn documents_keep_their_content_when_history_is_folded() {
     let (bytes_before, ids_before) = (stored_bytes(&net.devs[2]), net.ids(2).len());
     let frames = net.devs[0].compact_min(&ORG, 1).unwrap();
     net.send(0, frames);
-    for d in 0..3 {
-        assert_eq!(net.devs[d].document_json(&oid).unwrap(), json, "device {d}");
+    for (d, dev) in net.devs.iter().enumerate().take(3) {
+        assert_eq!(dev.document_json(&oid).unwrap(), json, "device {d}");
     }
     assert!(net.ids(2).len() < ids_before / 4);
     assert!(
@@ -2916,9 +2916,8 @@ fn documents_keep_their_content_when_history_is_folded() {
         .unwrap()
         .unwrap();
     spread(&mut net, 2, &e);
-    for d in 0..3 {
-        let v: serde_json::Value =
-            serde_json::from_str(&net.devs[d].document_json(&oid).unwrap()).unwrap();
+    for (d, dev) in net.devs.iter().enumerate().take(3) {
+        let v: serde_json::Value = serde_json::from_str(&dev.document_json(&oid).unwrap()).unwrap();
         assert_eq!(v["after"], true, "device {d}");
         assert_eq!(v["n"], 120, "device {d}");
     }

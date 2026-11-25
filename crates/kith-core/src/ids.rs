@@ -64,15 +64,18 @@ macro_rules! byte_id {
 
 byte_id!(
     /// Random identifier of an object, fixed at creation.
-    ObjectId, 16
+    ObjectId,
+    16
 );
 byte_id!(
     /// Hash of a change envelope's contents (SHA-256).
-    ChangeId, 32
+    ChangeId,
+    32
 );
 byte_id!(
     /// A device's Ed25519 public key; its identity everywhere in the system.
-    DeviceId, 32
+    DeviceId,
+    32
 );
 
 impl ObjectId {
